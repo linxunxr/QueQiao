@@ -8,13 +8,21 @@
 //! - 从 Node 版迁移的每个模块都必须带着行为契约测试一起搬（Node 版 43 个
 //!   audit 脚本钉住的语义是唯一权威）。
 //!
-//! 迁移优先级（纯函数先行）：
+//! 迁移进度（纯函数先行，M1 八模块）：
 //! 1. `wake`：唤醒防卡死（回合租约判定 / 暂存唤醒兜底决策）——已入库
-//! 2. `retry`：agent 回合瞬时错误重投判定（容量类可重试 / 历史超限走压缩）
-//! 3. `diary`：日记触发三路径判定（定点 / 安静提前 / 启动补写）与按日存储模型
-//! 4. `rate`：唤醒频率与失败退配额语义
-//! 5. `media_cache`：取图短缓存（LRU+TTL）
+//! 2. `retry`：agent 回合瞬时错误重投判定（容量类可重试 / 历史超限走压缩）——已入库
+//! 3. `diary`：日记触发三路径判定（定点 / 安静提前 / 启动补写）与按日存储模型——已入库
+//! 4. `media_cache`：取图短缓存（LRU+TTL）——已入库
+//! 5. `recall`：自发消息撤回资格判定（规格外补充，qq_recall_message 端点校验）——已入库
+//! 6. `rate`：唤醒频率与失败退配额语义
+//! 7. `schedule`：唤醒优先级合并与合批
+//! 8. `search`：多引擎搜索解析与聚合排序
+//! 9. `state`：会话状态模型
 
+pub mod diary;
+pub mod media_cache;
+pub mod recall;
+pub mod retry;
 pub mod wake;
 
 pub const APP_NAME: &str = "queqiao";

@@ -57,22 +57,34 @@ mod tests {
     fn q(reasons: &[(&str, u64)]) -> Vec<PendingWakeReason> {
         reasons
             .iter()
-            .map(|(r, s)| PendingWakeReason { reason: r.to_string(), seq: *s })
+            .map(|(r, s)| PendingWakeReason {
+                reason: r.to_string(),
+                seq: *s,
+            })
             .collect()
     }
 
     /// 行为契约与 Node 版 test-wake-guards 一致：空队列 → noop。
     #[test]
     fn empty_queue_is_noop() {
-        assert_eq!(pending_wake_fallback_decision(&[], false), PendingWakeAction::Noop);
-        assert_eq!(pending_wake_fallback_decision(&[], true), PendingWakeAction::Noop);
+        assert_eq!(
+            pending_wake_fallback_decision(&[], false),
+            PendingWakeAction::Noop
+        );
+        assert_eq!(
+            pending_wake_fallback_decision(&[], true),
+            PendingWakeAction::Noop
+        );
     }
 
     /// 仍繁忙 → retry，不带补发下标。
     #[test]
     fn still_busy_retries() {
         let queue = q(&[("private", 24), ("anyMessage", 25)]);
-        assert_eq!(pending_wake_fallback_decision(&queue, true), PendingWakeAction::Retry);
+        assert_eq!(
+            pending_wake_fallback_decision(&queue, true),
+            PendingWakeAction::Retry
+        );
     }
 
     /// busy 已解除 → 补发最早一条（队列顺序即时间顺序）。
