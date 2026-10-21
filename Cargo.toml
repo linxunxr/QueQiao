@@ -6,6 +6,7 @@ members = [
     "crates/queqiao-onebot",
     "crates/queqiao-dsh",
     "crates/queqiao-media",
+    "crates/queqiao-mcp",
 ]
 
 # 工作区共享依赖（各 crate 按需引用：`foo = { workspace = true }`）。

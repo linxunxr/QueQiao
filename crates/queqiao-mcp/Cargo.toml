@@ -1,0 +1,12 @@
+[package]
+name = "queqiao-mcp"
+description = "MCP 工具面：DSH spawn 的 stdio server，45 个 qq_* 工具转发到桥 HTTP API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "queqiao-mcp"
+path = "src/main.rs"
+
+[dependencies]

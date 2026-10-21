@@ -14,6 +14,7 @@ crates/
 ├── queqiao-onebot/   OneBot v11 客户端：WS 事件流 + HTTP 调用（连 SnowLuma 官方发行包）
 ├── queqiao-dsh/      DSH 私有协议：Cookie 离线铸造、斜杠 RPC、remote.mux 事件流
 ├── queqiao-media/    媒体处理：图片压缩 / 语音 ASR / 视频抽帧（后期阶段）
+├── queqiao-mcp/      MCP 工具面：DSH spawn 的 stdio server（45 个 qq_* 工具 → 桥 HTTP）
 └── queqiao/          二进制主程序：tokio 编排（定时器/网络/文件 IO 皆在此层）
 ```
 
