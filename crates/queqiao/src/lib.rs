@@ -4,4 +4,5 @@
 //! 可离线单测的组装件（配置加载、状态持久化、控制台路由等）。
 
 pub mod config;
+pub mod orchestrator;
 pub mod state;

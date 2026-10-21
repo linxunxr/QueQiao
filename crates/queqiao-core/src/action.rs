@@ -28,7 +28,7 @@ pub struct IncomingMessage {
 }
 
 /// 定时器种类（bin 侧的定时器句柄按 (key, kind) 唯一）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TimerKind {
     /// 合批窗口到期：以合并后的最终原因发送唤醒。
     BatchWindow,
