@@ -59,6 +59,9 @@ pub enum BridgeEvent {
     TimerFired { key: String, timer: TimerKind },
     /// DSH 回合开始（mux turn/start——回合租约的心跳源之一）。
     TurnStarted { key: String, session_id: String },
+    /// DSH 回合内任意帧（tool/call、assistant/message…——刷新租约心跳；
+    /// 静默超过租约时长由 TurnLease 定时器强制解除）。
+    TurnBeat { key: String, session_id: String },
     /// DSH 回合结束（ok=false 表示 error 回合——触发退配额）。
     TurnEnded {
         key: String,
