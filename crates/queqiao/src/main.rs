@@ -185,6 +185,8 @@ struct Setup {
     ws_url: String,
     ws_token: String,
     cfg: queqiao::config::Config,
+    dsh: std::sync::Arc<std::sync::Mutex<DshClient<ReqwestTransport>>>,
+    sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
 }
 
 fn discover(cfg: queqiao::config::Config) -> Setup {
@@ -214,7 +216,7 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
         found.source
     );
 
-    // DSH 探活（铸 Cookie + 端口自适应；仅打印，客户端全链下批接入）。
+    // DSH 客户端（铸 Cookie + 端口自适应）与 DSH 会话管理器。
     let secret = std::env::var("USERPROFILE")
         .ok()
         .map(|p| std::path::PathBuf::from(p).join(".dsh"))
@@ -242,17 +244,51 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
     };
     println!("DSH 基址：{dsh_base}");
 
+    let secret_for_client = secret;
+    let sources = AuthSources {
+        launch_token: cfg.dsh.auth_token.clone(),
+        token_explicit: !cfg.dsh.auth_token.is_empty(),
+        secret: Box::new(move || secret_for_client),
+        rediscover_token: None,
+    };
+    let dsh = std::sync::Arc::new(std::sync::Mutex::new(DshClient::new(
+        &dsh_base,
+        ReqwestTransport::new(30_000),
+        sources,
+        cfg.dsh.allow_remote,
+    )));
+    let agent_dir = if cfg.session_cwd.is_empty() {
+        "state/agents".to_owned()
+    } else {
+        cfg.session_cwd.clone()
+    };
+    let preset = cfg.social_v2.agent_preset.clone();
+    let sessions = std::sync::Arc::new(std::sync::Mutex::new(
+        queqiao::session_manager::SessionManager::new(
+            dsh.clone(),
+            std::path::Path::new("state/sessions.json"),
+            &preset,
+            &cfg.workspace_title,
+            &agent_dir,
+        )
+        .expect("sessions.json 加载失败"),
+    ));
+
     let ws = found.ws.as_ref().expect("该账号没有 wsServers 配置");
     Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
         ws_token: ws.token.clone(),
         cfg,
+        dsh,
+        sessions,
     }
 }
 
 async fn run(setup: Setup) {
     let cfg = setup.cfg;
     let ws_url = setup.ws_url;
+    let dsh_arc = setup.dsh;
+    let sessions_arc = setup.sessions;
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
         .expect("OneBot WS 连接失败（token 失效？重跑或检查 per-account 配置）");
@@ -354,6 +390,69 @@ async fn run(setup: Setup) {
         );
     }
 
+    // ── DSH mux 事件流任务：信封 → BridgeEvent（回合生命周期回流决策）──────
+    // 结构：连接 → follow 全部现有映射 → 信封转发；断连退避重连。新会话的
+    // follow 通过 Notify 信号重连实现（重连重放全部 desired——MuxSession 契约，
+    // 事件不丢）。
+    let (mux_env_tx, mut mux_env_rx) =
+        tokio::sync::mpsc::channel::<queqiao_dsh::mux::MuxEnvelope>(256);
+    let reconnect = std::sync::Arc::new(tokio::sync::Notify::new());
+    {
+        let dsh = dsh_arc.clone();
+        let sessions = sessions_arc.clone();
+        let env_tx = mux_env_tx.clone();
+        let reconnect = reconnect.clone();
+        tokio::spawn(async move {
+            loop {
+                let dsh_clone = dsh.clone();
+                let cookie = tokio::task::spawn_blocking(move || {
+                    dsh_clone
+                        .lock()
+                        .ok()
+                        .and_then(|mut c| c.ensure_auth(now_ms()).ok())
+                })
+                .await
+                .ok()
+                .flatten();
+                let Some(cookie) = cookie else {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    continue;
+                };
+                let base = dsh
+                    .lock()
+                    .map(|c| c.base_url().to_owned())
+                    .unwrap_or_default();
+                let ws = match queqiao_dsh::ws::tungstenite::TungsteniteWs::connect(&base, &cookie)
+                    .await
+                {
+                    Ok(ws) => ws,
+                    Err(_) => {
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        continue;
+                    }
+                };
+                let desired: HashSet<String> = sessions
+                    .lock()
+                    .map(|m| m.mappings().values().cloned().collect())
+                    .unwrap_or_default();
+                println!("DSH mux 已连接 {base}（follow {} 个会话）", desired.len());
+                let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+                let runner = queqiao_dsh::ws::MuxRunner::new(ws, desired, env_tx.clone(), cmd_rx);
+                let mut handle = tokio::spawn(runner.run());
+                tokio::select! {
+                    _ = &mut handle => {
+                        // 断连：退避后重连（鉴权由 outcome 无效时 ensure_auth 重铸）。
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    _ = reconnect.notified() => {
+                        // 新会话映射出现：短暂等待写盘后重连重放全部 desired。
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        });
+    }
+
     println!(
         "决策循环启动（{} 个会话在册）— Ctrl+C 退出",
         orchestrator.session_keys().len()
@@ -366,7 +465,10 @@ async fn run(setup: Setup) {
         rng_seed ^= rng_seed << 17;
         ((rng_seed.wrapping_mul(0x2545F4914F6CDD1Du64)) >> 11) as f64 / (1u64 << 53) as f64
     };
-    let mut last_tick = now_ms();
+    let executor = Executor {
+        sessions: sessions_arc,
+        reconnect: reconnect.clone(),
+    };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
         tokio::select! {
@@ -374,45 +476,126 @@ async fn run(setup: Setup) {
                 let Some(event) = maybe_event else { break };
                 let now = now_ms();
                 let actions = orchestrator.on_event(event, now, now_local(), &mut rng);
-                execute(actions, now);
+                executor.execute(actions, now).await;
                 let tick_actions = orchestrator.advance(now_ms(), now_local(), &mut rng);
-                execute(tick_actions, now_ms());
+                executor.execute(tick_actions, now_ms()).await;
+            }
+            maybe_envelope = mux_env_rx.recv() => {
+                // mux 信封 → 回合生命周期事件（sessionId 反查会话键）。
+                if let Some(event) = maybe_envelope
+                    .and_then(|envelope| bridge_mux_envelope(&executor.sessions, envelope))
+                {
+                    let now = now_ms();
+                    let actions = orchestrator.on_event(event, now, now_local(), &mut rng);
+                    executor.execute(actions, now).await;
+                }
             }
             _ = timeout => {
                 let now = now_ms();
-                // 半秒一拍：推进定时器轮 + 配置热更检查。
                 let actions = orchestrator.advance(now, now_local(), &mut rng);
-                execute(actions, now);
-                if now.saturating_sub(last_tick) > 5_000 {
-                    last_tick = now;
-                    // 配置热更（mtime 检测；此处只打印——热应用在控制台批次）。
-                }
+                executor.execute(actions, now).await;
             }
         }
     }
 }
 
-/// 动作执行（当前形态）：SendPrompt 打结构化日志（DSH 投递全链下批），
-/// Log 直通 stdout，其余类型预告后续批次。
-fn execute(actions: Vec<BridgeAction>, now: u64) {
-    for action in actions {
-        match action {
-            BridgeAction::SendPrompt { key, reason } => {
-                println!("[{now}] SendPrompt {key}（{reason}）— DSH 投递全链待接入");
-            }
-            BridgeAction::SendMessage { key, text, .. } => {
-                println!(
-                    "[{now}] SendMessage {key}: {}",
-                    text.chars().take(50).collect::<String>()
-                );
-            }
-            BridgeAction::RefundWakeTime { key, at } => {
-                println!("[{now}] RefundWakeTime {key} @{at}");
-            }
-            BridgeAction::SaveState => {}
-            BridgeAction::Log { message } => println!("[{now}] {message}"),
-            BridgeAction::ScheduleTimer { .. } | BridgeAction::CancelTimer { .. } => {
-                // 定时器已在 Orchestrator 内部处理。
+/// mux 信封 → 回合生命周期事件（sessionId 反查会话键；未映射会话丢弃）。
+fn bridge_mux_envelope(
+    sessions: &std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
+    envelope: queqiao_dsh::mux::MuxEnvelope,
+) -> Option<BridgeEvent> {
+    let queqiao_dsh::mux::MuxEnvelope::SessionEvent { session_id, event } = envelope else {
+        return None;
+    };
+    let key = sessions
+        .lock()
+        .ok()
+        .and_then(|m| m.key_of_session(&session_id))?;
+    let event_type = event
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    match event_type {
+        "turn/start" => Some(BridgeEvent::TurnStarted { key, session_id }),
+        "turn/end" => {
+            // reason 含 error 视为失败回合（退配额路径）；其余（stop/正常收尾）为成功。
+            let reason = event
+                .get("data")
+                .and_then(|d| d.get("reason"))
+                .and_then(|r| r.as_str())
+                .unwrap_or_default();
+            let ok = !reason.to_ascii_lowercase().contains("error");
+            Some(BridgeEvent::TurnEnded {
+                key,
+                session_id,
+                ok,
+            })
+        }
+        // 其余帧（assistant/message、tool/*…）刷新租约心跳。
+        _ => Some(BridgeEvent::TurnBeat { key, session_id }),
+    }
+}
+
+/// 动作执行器：SendPrompt 真实投递（spawn_blocking——reqwest 约束），
+/// 新建会话后通知 mux 重连 follow；Log 直通 stdout。
+struct Executor {
+    sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
+    reconnect: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Executor {
+    async fn execute(&self, actions: Vec<BridgeAction>, now: u64) {
+        for action in actions {
+            match action {
+                BridgeAction::SendPrompt { key, reason } => {
+                    // 真实投递（简化模板文本——完整唤醒文本构造含人格卡/消息快照，下批）。
+                    let text = format!(
+                        "【鹊桥唤醒】（{reason}）请用 qq_get_unread_messages 查看未读消息，按你的人格设定自然回应群友；收尾用 qq_set_wake_config 设置下次唤醒条件。"
+                    );
+                    let sessions = self.sessions.clone();
+                    let key_for_task = key.clone();
+                    let reason_for_log = reason.clone();
+                    let reconnect = self.reconnect.clone();
+                    let before: HashSet<String> = sessions
+                        .lock()
+                        .map(|m| m.mappings().keys().cloned().collect())
+                        .unwrap_or_default();
+                    let result = tokio::task::spawn_blocking(move || {
+                        sessions
+                            .lock()
+                            .map_err(|e| e.to_string())
+                            .and_then(|mut m| m.deliver_prompt(&key_for_task, &text))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    match result {
+                        Ok(()) => println!("[{now}] SendPrompt {key}（{reason_for_log}）已投递"),
+                        Err(e) => println!("[{now}] SendPrompt {key} 投递失败：{e}"),
+                    }
+                    // 新会话创建后通知 mux 重连 follow。
+                    let after: HashSet<String> = self
+                        .sessions
+                        .lock()
+                        .map(|m| m.mappings().keys().cloned().collect())
+                        .unwrap_or_default();
+                    if after.len() > before.len() {
+                        reconnect.notify_one();
+                    }
+                }
+                BridgeAction::SendMessage { key, text, .. } => {
+                    println!(
+                        "[{now}] SendMessage {key}: {}",
+                        text.chars().take(50).collect::<String>()
+                    );
+                }
+                BridgeAction::RefundWakeTime { key, at } => {
+                    println!("[{now}] RefundWakeTime {key} @{at}");
+                }
+                BridgeAction::SaveState => {}
+                BridgeAction::Log { message } => println!("[{now}] {message}"),
+                BridgeAction::ScheduleTimer { .. } | BridgeAction::CancelTimer { .. } => {
+                    // 定时器已在 Orchestrator 内部处理。
+                }
             }
         }
     }

@@ -88,9 +88,9 @@ pub struct AuthSources {
     /// 用户是否在 config 显式填了 token（明确意图，优先于铸造）。
     pub token_explicit: bool,
     /// 持久化签名密钥的惰性提供者：invalidate 后会重探（DSH 可能刚重建凭据文件）。
-    pub secret: Box<dyn FnMut() -> Option<[u8; 32]>>,
+    pub secret: Box<dyn FnMut() -> Option<[u8; 32]> + Send>,
     /// invalidate 时重扫 launch token（日志发现）；无则保持不变。
-    pub rediscover_token: Option<Box<dyn FnMut() -> String>>,
+    pub rediscover_token: Option<Box<dyn FnMut() -> String + Send>>,
 }
 
 impl AuthSources {
@@ -222,6 +222,11 @@ pub struct DshClient<T: Transport> {
 }
 
 impl<T: Transport> DshClient<T> {
+    /// 配置的 DSH 基址（mux 连接等需要）。
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn new(base_url: &str, transport: T, sources: AuthSources, allow_remote: bool) -> Self {
         Self {
             transport,
@@ -694,7 +699,7 @@ mod tests {
     /// 铸造被 401 且有 launch token → 切 token 策略换票并重试成功。
     #[test]
     fn minted_401_switches_to_token() {
-        let first = Rc::new(RefCell::new(true));
+        let first = std::sync::Arc::new(std::sync::Mutex::new(true));
         let (transport, reqs) = MockTransport::new(Box::new(move |req| {
             let path = Url::parse(&req.url).unwrap().path().to_string();
             if path == "/" {
@@ -714,8 +719,8 @@ mod tests {
                 .iter()
                 .find(|(k, _)| k == "cookie")
                 .map(|(_, v)| v.clone());
-            if cookie.is_some_and(|c| c.starts_with("dsh-auth-")) && *first.borrow() {
-                *first.borrow_mut() = false;
+            if cookie.is_some_and(|c| c.starts_with("dsh-auth-")) && *first.lock().unwrap() {
+                *first.lock().unwrap() = false;
                 return Ok(HttpResponse {
                     status: 401,
                     headers: vec![],
@@ -752,8 +757,8 @@ mod tests {
     /// （Node 版「密钥文件可能刚被 DSH 首次启动写入」的真实场景）。
     #[test]
     fn token_401_switches_back_to_minted_after_secret_rediscovery() {
-        let first = Rc::new(RefCell::new(true));
-        let secret_available = Rc::new(RefCell::new(false));
+        let first = std::sync::Arc::new(std::sync::Mutex::new(true));
+        let secret_available = std::sync::Arc::new(std::sync::Mutex::new(false));
         let (transport, _) = MockTransport::new(Box::new(move |req| {
             let path = Url::parse(&req.url).unwrap().path().to_string();
             if path == "/" {
@@ -773,8 +778,8 @@ mod tests {
                 .iter()
                 .find(|(k, _)| k == "cookie")
                 .map(|(_, v)| v.clone());
-            if cookie.as_deref() == Some("exchanged=1") && *first.borrow() {
-                *first.borrow_mut() = false;
+            if cookie.as_deref() == Some("exchanged=1") && *first.lock().unwrap() {
+                *first.lock().unwrap() = false;
                 return Ok(HttpResponse {
                     status: 401,
                     headers: vec![],
@@ -790,7 +795,7 @@ mod tests {
         let probe = {
             let available = secret_available.clone();
             move || {
-                if *available.borrow() {
+                if *available.lock().unwrap() {
                     Some(SECRET)
                 } else {
                     None
@@ -805,12 +810,12 @@ mod tests {
         };
         let mut client = DshClient::new("http://127.0.0.1:9", transport, sources, false);
         // 第一步：secret 不可用 → 走交换换票。
-        *secret_available.borrow_mut() = false;
+        *secret_available.lock().unwrap() = false;
         let exchanged = client.ensure_auth(1000).unwrap();
         assert_eq!(exchanged, "exchanged=1");
         assert_eq!(client.strategy(), Some(AuthStrategy::Token));
         // 凭据文件此刻出现（DSH 首启写入）；401 → 切回铸造。
-        *secret_available.borrow_mut() = true;
+        *secret_available.lock().unwrap() = true;
         let out = client.call_unary("settings/describe", None, 2000).unwrap();
         assert!(out.result.ok);
         assert_eq!(client.strategy(), Some(AuthStrategy::Minted));
