@@ -187,6 +187,7 @@ struct Setup {
     cfg: queqiao::config::Config,
     dsh: std::sync::Arc<std::sync::Mutex<DshClient<ReqwestTransport>>>,
     sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
+    social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
 }
 
 fn discover(cfg: queqiao::config::Config) -> Setup {
@@ -274,6 +275,14 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
         .expect("sessions.json 加载失败"),
     ));
 
+    let social = std::sync::Arc::new(std::sync::Mutex::new(
+        queqiao::social_store::SocialStore::load(
+            std::path::Path::new("state/social-v2.json"),
+            cfg.owner_qq.map(|o| o.0),
+        )
+        .expect("social-v2.json 加载失败"),
+    ));
+
     let ws = found.ws.as_ref().expect("该账号没有 wsServers 配置");
     Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
@@ -281,6 +290,7 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
         cfg,
         dsh,
         sessions,
+        social,
     }
 }
 
@@ -289,34 +299,42 @@ async fn run(setup: Setup) {
     let ws_url = setup.ws_url;
     let dsh_arc = setup.dsh;
     let sessions_arc = setup.sessions;
+    let social_arc = setup.social;
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
         .expect("OneBot WS 连接失败（token 失效？重跑或检查 per-account 配置）");
     println!("OneBot WS 已连接 {ws_url}");
+    let social_for_stream = social_arc.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeEvent>(256);
     tokio::spawn(async move {
         let mut stream = stream;
+        let social = social_for_stream;
         while let Some(event) = stream.recv_event().await {
             let bridged = match event {
                 Ok(OneBotEvent::GroupMessage(m)) if !m.sent_by_self => {
-                    Some(BridgeEvent::MessageArrived(Box::new(
-                        queqiao_core::action::IncomingMessage {
-                            key: format!("group:{}", m.group_id),
-                            seq: 0, // seq 由水位推进（onebot 无内建序号——bin 接线批次补）
-                            message_id: m.message_id.to_string(),
-                            sender: m.sender.card.clone().unwrap_or(m.sender.nickname.clone()),
-                            user_id: m.user_id.to_string(),
-                            text: extract_plain_text(&m.message),
-                            is_self: m.sent_by_self,
-                            at_me: at_self(&m.message),
-                            reply_to_me: false,
-                            time_ms: now_ms(),
-                        },
-                    )))
+                    let key = format!("group:{}", m.group_id);
+                    let mut incoming = queqiao_core::action::IncomingMessage {
+                        key: key.clone(),
+                        seq: 0, // seq 由持久水位分配（见下方 append_message）
+                        message_id: m.message_id.to_string(),
+                        sender: m.sender.card.clone().unwrap_or(m.sender.nickname.clone()),
+                        user_id: m.user_id.to_string(),
+                        text: extract_plain_text(&m.message),
+                        is_self: m.sent_by_self,
+                        at_me: at_self(&m.message),
+                        reply_to_me: false,
+                        time_ms: now_ms(),
+                    };
+                    incoming.seq = social
+                        .lock()
+                        .map(|mut s| s.append_message(&key, &incoming, now_ms()))
+                        .unwrap_or(0);
+                    Some(BridgeEvent::MessageArrived(Box::new(incoming)))
                 }
-                Ok(OneBotEvent::PrivateMessage(m)) if !m.sent_by_self => Some(
-                    BridgeEvent::MessageArrived(Box::new(queqiao_core::action::IncomingMessage {
-                        key: format!("private:{}", m.user_id),
+                Ok(OneBotEvent::PrivateMessage(m)) if !m.sent_by_self => {
+                    let key = format!("private:{}", m.user_id);
+                    let mut incoming = queqiao_core::action::IncomingMessage {
+                        key: key.clone(),
                         seq: 0,
                         message_id: m.message_id.to_string(),
                         sender: m.sender.nickname.clone(),
@@ -326,8 +344,13 @@ async fn run(setup: Setup) {
                         at_me: false,
                         reply_to_me: false,
                         time_ms: now_ms(),
-                    })),
-                ),
+                    };
+                    incoming.seq = social
+                        .lock()
+                        .map(|mut s| s.append_message(&key, &incoming, now_ms()))
+                        .unwrap_or(0);
+                    Some(BridgeEvent::MessageArrived(Box::new(incoming)))
+                }
                 Ok(OneBotEvent::GroupPoke {
                     group_id, user_id, ..
                 }) => {
@@ -466,8 +489,15 @@ async fn run(setup: Setup) {
         ((rng_seed.wrapping_mul(0x2545F4914F6CDD1Du64)) >> 11) as f64 / (1u64 << 53) as f64
     };
     let executor = Executor {
-        sessions: sessions_arc,
+        sessions: sessions_arc.clone(),
         reconnect: reconnect.clone(),
+        social: social_arc.clone(),
+        wake_cfg: WakePromptConfig {
+            role_name: String::new(), // current-role.json 读取在控制台批次接入
+            pre_sleep_ms: cfg.social_v2.wake.pre_sleep_wait_ms,
+            reply_quiet_ms: cfg.social_v2.wait.default_quiet_ms,
+            reply_remaining_ms: cfg.social_v2.wait.default_quiet_ms,
+        },
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -479,6 +509,7 @@ async fn run(setup: Setup) {
                 executor.execute(actions, now).await;
                 let tick_actions = orchestrator.advance(now_ms(), now_local(), &mut rng);
                 executor.execute(tick_actions, now_ms()).await;
+                sync_dirty(&orchestrator, &social_arc);
             }
             maybe_envelope = mux_env_rx.recv() => {
                 // mux 信封 → 回合生命周期事件（sessionId 反查会话键）。
@@ -494,9 +525,24 @@ async fn run(setup: Setup) {
                 let now = now_ms();
                 let actions = orchestrator.advance(now, now_local(), &mut rng);
                 executor.execute(actions, now).await;
+                sync_dirty(&orchestrator, &social_arc);
             }
         }
     }
+}
+
+/// 决策脏会话回写持久态（wake_times/noAction 等）并落盘。
+fn sync_dirty(
+    orchestrator: &Orchestrator,
+    social: &std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+) {
+    let mut store = social.lock().unwrap();
+    for key in orchestrator.session_keys() {
+        if let Some(rt) = orchestrator.session(&key) {
+            store.sync_runtime(&key, rt);
+        }
+    }
+    store.save();
 }
 
 /// mux 信封 → 回合生命周期事件（sessionId 反查会话键；未映射会话丢弃）。
@@ -541,6 +587,16 @@ fn bridge_mux_envelope(
 struct Executor {
     sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
     reconnect: std::sync::Arc<tokio::sync::Notify>,
+    social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+    wake_cfg: WakePromptConfig,
+}
+
+/// 唤醒文本构造参数（配置切片）。
+struct WakePromptConfig {
+    role_name: String,
+    pre_sleep_ms: u64,
+    reply_quiet_ms: u64,
+    reply_remaining_ms: u64,
 }
 
 impl Executor {
@@ -548,10 +604,74 @@ impl Executor {
         for action in actions {
             match action {
                 BridgeAction::SendPrompt { key, reason } => {
-                    // 真实投递（简化模板文本——完整唤醒文本构造含人格卡/消息快照，下批）。
-                    let text = format!(
-                        "【鹊桥唤醒】（{reason}）请用 qq_get_unread_messages 查看未读消息，按你的人格设定自然回应群友；收尾用 qq_set_wake_config 设置下次唤醒条件。"
-                    );
+                    // 完整唤醒文本：从持久态组装上下文（agentToken/未读/最近消息/唤醒摘要）。
+                    let ctx = {
+                        let mut social = self.social.lock().unwrap();
+                        let token = social.ensure_agent_token(&key);
+                        let st = social.conversation(&key);
+                        let last_msg = st
+                            .and_then(|s| s.recent_messages.iter().rev().find(|m| !m.is_self))
+                            .map(|m| {
+                                (
+                                    m.sender.clone(),
+                                    m.text.chars().take(30).collect::<String>(),
+                                )
+                            });
+                        let last_unfinished = st
+                            .and_then(|s| s.recent_messages.iter().rev().find(|m| !m.is_self))
+                            .map(|m| queqiao_core::v2_wait::looks_like_unfinished(&m.text))
+                            .unwrap_or(false);
+                        let unread = st.map(|s| s.unread.len()).unwrap_or(0);
+                        let wc = st.map(|s| s.wake_config.clone()).unwrap_or_default();
+                        let mode = if wc.mode == "active" {
+                            "活跃"
+                        } else {
+                            "潜水"
+                        };
+                        let timing = if wc.infinite {
+                            "无限".to_owned()
+                        } else {
+                            "有限".to_owned()
+                        };
+                        let mut triggers = Vec::new();
+                        if wc.triggers.at_mention {
+                            triggers.push("@");
+                        }
+                        if wc.triggers.name_mention {
+                            triggers.push("名字");
+                        }
+                        if !wc.triggers.keywords.is_empty() {
+                            triggers.push("关键词");
+                        }
+                        if wc.triggers.question {
+                            triggers.push("提问");
+                        }
+                        if wc.triggers.poke {
+                            triggers.push("拍一拍");
+                        }
+                        if wc.triggers.any_message {
+                            triggers.push("任意消息");
+                        }
+                        let summary = if triggers.is_empty() {
+                            format!("{mode}，{timing}")
+                        } else {
+                            format!("{mode}，{timing}；触发：{}", triggers.join("/"))
+                        };
+                        queqiao::prompt::PromptContext {
+                            key: key.clone(),
+                            role_name: self.wake_cfg.role_name.clone(),
+                            agent_token: token,
+                            unread_count: unread,
+                            last_message: last_msg,
+                            last_unfinished,
+                            last_ai_reply_min_ago: None,
+                            wake_summary: summary,
+                            pre_sleep_ms: self.wake_cfg.pre_sleep_ms,
+                            reply_quiet_ms: self.wake_cfg.reply_quiet_ms,
+                            reply_remaining_ms: self.wake_cfg.reply_remaining_ms,
+                        }
+                    };
+                    let text = queqiao::prompt::build_wake_prompt(&ctx, &reason);
                     let sessions = self.sessions.clone();
                     let key_for_task = key.clone();
                     let reason_for_log = reason.clone();

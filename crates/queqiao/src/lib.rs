@@ -5,5 +5,7 @@
 
 pub mod config;
 pub mod orchestrator;
+pub mod prompt;
 pub mod session_manager;
+pub mod social_store;
 pub mod state;
