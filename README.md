@@ -4,6 +4,8 @@ QQ ↔ DeepSeek Harness（DSH）桥接的 Rust 实现：QQ 群/私聊消息经 [
 
 **权威参照**：Node 版 [qq-bridge](../qq-bridge) 是生产运行中的实现，其 43 个 audit 脚本钉住的行为契约是本仓库迁移的唯一语义标准；每个模块迁移时**测试先行、契约同步**。Rust 迁移的完整可行性分析见 qq-bridge 的 `docs/guides/RUST_MIGRATION_ANALYSIS.md`。
 
+**规格基线**：[docs/规格设计.md](docs/规格设计.md)（分层规格、关键机制语义、数据模型、里程碑——语义冲突时以它为准）。
+
 ## 架构
 
 ```
