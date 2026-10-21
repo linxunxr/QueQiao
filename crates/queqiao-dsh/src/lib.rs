@@ -14,6 +14,7 @@
 //! projections），本 crate 的每个信封形状都要钉住单测。
 
 pub mod auth;
+pub mod client;
 pub mod envelope;
 pub mod inbox;
 pub mod port;
