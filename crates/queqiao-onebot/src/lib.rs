@@ -12,9 +12,24 @@
 /// OneBot 事件骨架。字段按需补全——只建模桥实际消费的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OneBotEvent {
-    GroupMessage { group_id: u64, user_id: u64, message_id: i64 },
-    PrivateMessage { user_id: u64, message_id: i64 },
-    GroupPoke { group_id: u64, target_id: u64 },
-    FriendPoke { user_id: u64 },
-    Heartbeat { online: bool, receive_healthy: bool },
+    GroupMessage {
+        group_id: u64,
+        user_id: u64,
+        message_id: i64,
+    },
+    PrivateMessage {
+        user_id: u64,
+        message_id: i64,
+    },
+    GroupPoke {
+        group_id: u64,
+        target_id: u64,
+    },
+    FriendPoke {
+        user_id: u64,
+    },
+    Heartbeat {
+        online: bool,
+        receive_healthy: bool,
+    },
 }

@@ -7,5 +7,9 @@
 //! Node 版（qq-bridge）是权威参照实现：行为契约以其 43 个 audit 脚本为准。
 
 fn main() {
-    println!("{} {} — 鹊桥：QQ ↔ DeepSeek Harness 桥接（Rust 版，骨架期）", queqiao_core::APP_NAME, env!("CARGO_PKG_VERSION"));
+    println!(
+        "{} {} — 鹊桥：QQ ↔ DeepSeek Harness 桥接（Rust 版，骨架期）",
+        queqiao_core::APP_NAME,
+        env!("CARGO_PKG_VERSION")
+    );
 }
