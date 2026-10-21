@@ -18,13 +18,17 @@
 //! 7. `v2_wait`：「话说一半」判定（规格外补充，qq_wait_for_messages 观察语义）——已入库
 //! 8. `state`：会话状态模型——实体化为 Node 版 `src/core/session-router.mjs`
 //!    （每会话策略路由，`session_router` 模块）——已入库
-//! 9. `rate` / `schedule`：Node 版无独立纯函数源与单测，语义散布于 bridge.js
-//!    编排层（1.2 万行），推迟至 M4 随状态机编排一并提取为纯函数
+//! 9. `rate` / `schedule`：频率窗口与失败退配额 / 唤醒优先级合并与合批——
+//!    已在 M4 编排批次从 bridge.js 提取为纯函数（rate.rs / schedule.rs）
+//! 10. `action`：决策接口形态——BridgeEvent/BridgeAction/TimerKind（主循环契约）
 
+pub mod action;
 pub mod diary;
 pub mod media_cache;
+pub mod rate;
 pub mod recall;
 pub mod retry;
+pub mod schedule;
 pub mod search;
 pub mod session_router;
 pub mod v2_wait;
