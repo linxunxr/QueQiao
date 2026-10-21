@@ -1,0 +1,8 @@
+[package]
+name = "queqiao-media"
+description = "媒体处理：图片压缩降级、语音 ASR、视频抽帧（后期阶段，当前占位）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

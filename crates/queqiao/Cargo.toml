@@ -1,0 +1,16 @@
+[package]
+name = "queqiao"
+description = "鹊桥：QQ ↔ DeepSeek Harness 桥接主程序（Rust 版）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "queqiao"
+path = "src/main.rs"
+
+[dependencies]
+queqiao-core = { path = "../queqiao-core" }
+queqiao-onebot = { path = "../queqiao-onebot" }
+queqiao-dsh = { path = "../queqiao-dsh" }
+queqiao-media = { path = "../queqiao-media" }

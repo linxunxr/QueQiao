@@ -1,0 +1,8 @@
+[package]
+name = "queqiao-onebot"
+description = "OneBot v11 客户端：连接 SnowLuma 官方发行包（WS 事件流 + HTTP 调用）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

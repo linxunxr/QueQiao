@@ -1,0 +1,8 @@
+[package]
+name = "queqiao-dsh"
+description = "DeepSeek Harness 私有协议：Cookie 离线铸造（HMAC）、斜杠 RPC、remote.mux 事件流"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

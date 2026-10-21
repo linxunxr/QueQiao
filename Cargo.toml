@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/queqiao",
+    "crates/queqiao-core",
+    "crates/queqiao-onebot",
+    "crates/queqiao-dsh",
+    "crates/queqiao-media",
+]
+
+# 工作区共享依赖（各 crate 按需引用：`foo = { workspace = true }`）。
+# 骨架期先声明选型，实际引入时再解开。
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"

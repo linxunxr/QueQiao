@@ -1,0 +1,8 @@
+[package]
+name = "queqiao-core"
+description = "纯逻辑内核：仿真状态机决策函数（零 IO，时间/随机性注入）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
