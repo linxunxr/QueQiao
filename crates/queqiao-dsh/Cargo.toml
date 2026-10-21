@@ -16,7 +16,12 @@ sha2 = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [features]
 # 生产 HTTP 传输（ReqwestTransport）；纯逻辑测试与协议层不需要。
 reqwest = ["dep:reqwest"]
+# WS 事件流运行壳（MuxRunner + TungsteniteWs）与 control baseline 回退。
+ws = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]

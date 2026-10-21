@@ -12,5 +12,9 @@ path = "src/main.rs"
 [dependencies]
 queqiao-core = { path = "../queqiao-core" }
 queqiao-onebot = { path = "../queqiao-onebot" }
-queqiao-dsh = { path = "../queqiao-dsh" }
+queqiao-dsh = { path = "../queqiao-dsh", features = ["reqwest", "ws"] }
 queqiao-media = { path = "../queqiao-media" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }

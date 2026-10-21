@@ -27,6 +27,17 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'dsh.*bin\.
 $ports | Sort-Object -Unique
 "#;
 
+/// 把扫描脚本编码为 `-EncodedCommand` 参数（UTF-16LE + 标准 base64，
+/// 避免引号转义问题）；bin 层用 `powershell -NoProfile -EncodedCommand <输出>` 执行。
+pub fn encoded_port_scan_command() -> String {
+    use base64::Engine;
+    let utf16le: Vec<u8> = PORT_SCAN_PS
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16le)
+}
+
 /// 在候选端口里找出新的业务 baseUrl：逐个调 `verify(baseUrl)`（返回 true 表示是
 /// 可用的 DSH 业务 API 口），第一个通过的生效；与 config 一致或全部失败返回
 /// `None`。Electron 杂端口（401/404 的内部口）在 verify 处自然被淘汰。
