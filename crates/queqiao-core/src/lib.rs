@@ -23,6 +23,7 @@ pub mod diary;
 pub mod media_cache;
 pub mod recall;
 pub mod retry;
+pub mod search;
 pub mod wake;
 
 pub const APP_NAME: &str = "queqiao";
