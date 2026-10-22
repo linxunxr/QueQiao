@@ -83,6 +83,7 @@
 </main>
 <div class="bar">
   <button onclick="save()">保存并生效</button>
+  <button class="ghost" onclick="exportDiag()" style="background:transparent;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:9px 20px;font-size:13px;cursor:pointer">导出诊断包</button>
   <span class="hint" id="status"></span>
 </div>
 <div id="toast"></div>
@@ -168,6 +169,19 @@ async function save() {
   } else { toast('保存失败：' + (res.error || '未知错误'), false); status.textContent = ''; }
 }
 load();
+
+async function exportDiag() {
+  try {
+    const r = await fetch( '/api/diagnostics');
+    const res = await r.json();
+    const blob = new Blob([JSON.stringify(res.value || res, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'queqiao-diagnostics-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+    a.click();
+    toast('诊断包已导出', true);
+  } catch (e) { toast('导出失败：' + e.message, false); }
+}
 </script>
 </body>
 </html>

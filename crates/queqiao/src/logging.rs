@@ -20,11 +20,44 @@ const LOG_LINE_MAX: usize = 1000;
 const LOG_MAX_LINES: usize = 2000;
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
+static ACTIVITY: Mutex<Option<Logger>> = Mutex::new(None);
 
 struct Logger {
     file: PathBuf,
     /// 内存行数计数（-1 = 未数，首次写入时数一次）。
     lines: i64,
+}
+
+/// 会话活动流水（Node 版 qq-activity.log 对应物）：消息入库/唤醒/发言事件，
+/// 单独文件便于回溯"AI 当时为什么说这句"。
+pub fn activity(event: &str) {
+    let mut guard = ACTIVITY.lock().unwrap();
+    let Some(logger) = guard.as_mut() else { return };
+    let mut line = redact(&event.replace(['\r', '\n'], " "));
+    if line.chars().count() > LOG_LINE_MAX {
+        let truncated: String = line.chars().take(LOG_LINE_MAX).collect();
+        line = format!("{truncated}…[截断]");
+    }
+    let line = format!(
+        "[{}] {line}
+",
+        local_clock()
+    );
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&logger.file)
+        && f.write_all(line.as_bytes()).is_ok()
+    {
+        logger.lines += 1;
+        if logger.lines > LOG_MAX_LINES as i64 {
+            let backup = logger.file.with_extension("log.1");
+            if std::fs::rename(&logger.file, &backup).is_err() {
+                let _ = File::create(&logger.file);
+            }
+            logger.lines = 0;
+        }
+    }
 }
 
 /// 敏感串打码：token/authorization/密钥值的常见形态（与 Node redactSensitiveText
@@ -95,20 +128,36 @@ fn local_clock() -> String {
     (f.0)()
 }
 
-/// 初始化日志文件（home/state/bridge.log）。重复调用无害（后到忽略）。
+/// 初始化日志文件（home/state/bridge.log + activity.log）。重复调用无害。
 pub fn init(home: &std::path::Path) {
-    let mut guard = LOGGER.lock().unwrap();
-    if guard.is_some() {
-        return;
-    }
     let state_dir = home.join("state");
     let _ = std::fs::create_dir_all(&state_dir);
-    let file = state_dir.join("bridge.log");
-    // 数一次现有行数（不存在从 0）。
-    let lines = std::fs::read_to_string(&file)
-        .map(|t| t.lines().filter(|l| !l.is_empty()).count() as i64)
-        .unwrap_or(0);
-    *guard = Some(Logger { file, lines });
+    let make = |name: &str| -> Logger {
+        let file = state_dir.join(name);
+        let lines = std::fs::read_to_string(&file)
+            .map(|t| t.lines().filter(|l| !l.is_empty()).count() as i64)
+            .unwrap_or(0);
+        Logger { file, lines }
+    };
+    let mut guard = LOGGER.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(make("bridge.log"));
+    }
+    drop(guard);
+    let mut act = ACTIVITY.lock().unwrap();
+    if act.is_none() {
+        *act = Some(make("activity.log"));
+    }
+}
+
+/// 崩溃捕获：panic 信息落 bridge.log（默认 panic 只打印到 stderr 一瞬间即崩，
+/// 事后无从排查——桌面客户端场景里 stderr 管道读不读得到全凭运气）。
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log(&format!("PANIC: {info}"));
+        default(info);
+    }));
 }
 
 /// 写一条桥日志：stdout + 文件双写；时间戳、脱敏、截断、轮转都在这里。

@@ -215,6 +215,7 @@ fn main() {
     };
     let cfg = cfg.config().clone();
     queqiao::logging::init(&queqiao::paths::queqiao_home());
+    queqiao::logging::install_panic_hook();
     println!(
         "{} {} — 鹊桥主程序（M4 编排：OneBot 事件 → core 决策 → 动作日志）",
         queqiao_core::APP_NAME,
@@ -382,6 +383,13 @@ async fn run(setup: Setup) {
                         .lock()
                         .map(|mut s| s.append_message(&key, &incoming, now_ms()))
                         .unwrap_or(0);
+                    if !incoming.is_self {
+                        queqiao::logging::activity(&format!(
+                            "{key} 消息入库：{}（{}）",
+                            incoming.sender,
+                            incoming.text.chars().take(60).collect::<String>()
+                        ));
+                    }
                     Some(BridgeEvent::MessageArrived(Box::new(incoming)))
                 }
                 Ok(OneBotEvent::PrivateMessage(m)) if !m.sent_by_self => {
@@ -564,7 +572,8 @@ async fn run(setup: Setup) {
     );
 
     // 自动更新：异步检测（失败静默）；就绪后经 update_ready 通知主循环。
-    let (update_tx, mut update_rx) = tokio::sync::oneshot::channel::<update::ReleaseInfo>();
+    // oneshot 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic。
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
     {
         tokio::spawn(async move {
             let current = env!("CARGO_PKG_VERSION");
@@ -574,7 +583,7 @@ async fn run(setup: Setup) {
                 .and_then(|r| r.ok())
                 .flatten();
             if let Some(rel) = checked {
-                let _ = update_tx.send(rel);
+                let _ = update_tx.send(rel).await;
             }
         });
     }
@@ -629,9 +638,9 @@ async fn run(setup: Setup) {
                     executor.execute(actions, now).await;
                 }
             }
-            update = &mut update_rx => {
+            update = update_rx.recv() => {
                 // 检测到新版本：显示更新内容 → 下载 staging → 全体空闲时应用并重启。
-                if let Ok(rel) = update {
+                if let Some(rel) = update {
                     println!("╔══════════════════════════════════════════════════════╗");
                     println!("║ 发现新版本 {}（当前 {}）", rel.tag, env!("CARGO_PKG_VERSION"));
                     println!("╚══════════════════════════════════════════════════════╝");
@@ -880,7 +889,10 @@ impl Executor {
                     println!("[{now}] RefundWakeTime {key} @{at}");
                 }
                 BridgeAction::SaveState => {}
-                BridgeAction::Log { message } => queqiao::logging::log(&message),
+                BridgeAction::Log { message } => {
+                    queqiao::logging::log(&message);
+                    queqiao::logging::activity(&message);
+                }
                 BridgeAction::ScheduleTimer { .. } | BridgeAction::CancelTimer { .. } => {
                     // 定时器已在 Orchestrator 内部处理。
                 }

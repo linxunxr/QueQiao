@@ -148,6 +148,7 @@ pub async fn serve(
         .route("/api/socialV2/send-message", post(send_message))
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
+        .route("/api/diagnostics", get(diagnostics))
         // CORS：桌面客户端（Tauri webview）与浏览器页面跨域访问本地桥 API。
         // 本服务只绑 127.0.0.1，放开 origin 无外网暴露面。
         .layer(axum::middleware::from_fn(cors_mw))
@@ -417,4 +418,81 @@ async fn set_wake_config(
         store.save();
     }
     ok_json(json!({ "updated": true }))
+}
+
+/// 诊断包：一键收集排障所需（控制台「导出诊断包」按钮）——运行日志双份、
+/// 活动流水、版本、脱敏配置、会话概要。全部内嵌单 JSON，前端直接下载。
+async fn diagnostics(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(_q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    // 沿用控制台令牌（比 agent token 宽：诊断含配置，只该给操作者）。
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let home = crate::paths::queqiao_home();
+    let read = |name: &str| {
+        std::fs::read_to_string(home.join("state").join(name))
+            .unwrap_or_else(|_| "(不可读或不存在)".to_owned())
+    };
+    // 配置脱敏：令牌类键打码后内嵌。
+    let mut cfg_json = serde_json::to_value(&state.cfg).unwrap_or(Value::Null);
+    if let Some(obj) = cfg_json.as_object_mut() {
+        for section in ["snowluma", "dsh"] {
+            if let Some(s) = obj.get_mut(section).and_then(Value::as_object_mut) {
+                for key in ["accessToken", "authToken"] {
+                    if let Some(v) = s.get(key)
+                        && v.as_str().is_some_and(|x| !x.is_empty())
+                    {
+                        s.insert(key.to_string(), json!("***"));
+                    }
+                }
+            }
+        }
+        if let Some(t) = obj.get_mut("consoleToken")
+            && t.as_str().is_some_and(|x| !x.is_empty())
+        {
+            *t = json!("***");
+        }
+    }
+    let store = state.social.lock().unwrap();
+    let sessions: Vec<String> = store.conversation_keys();
+    let summary: Vec<Value> = sessions
+        .iter()
+        .map(|k| {
+            store
+                .conversation(k)
+                .map(|st| {
+                    json!({
+                        "key": k,
+                        "unread": st.unread.len(),
+                        "recent": st.recent_messages.len(),
+                        "lastIncomingAt": st.last_incoming_at,
+                        "wakeMode": st.wake_config.mode,
+                    })
+                })
+                .unwrap_or(Value::Null)
+        })
+        .collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    ok_json(json!({
+        "generatedAt": now,
+        "version": env!("CARGO_PKG_VERSION"),
+        "bridgeLog": read("bridge.log"),
+        "bridgeLogPrev": read("bridge.log.1"),
+        "activityLog": read("activity.log"),
+        "activityLogPrev": read("activity.log.1"),
+        "config": cfg_json,
+        "sessions": summary,
+    }))
 }

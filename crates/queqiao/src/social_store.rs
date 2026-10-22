@@ -44,6 +44,11 @@ impl SocialStore {
         self.paused
     }
 
+    /// 会话键清单（诊断与控制台概要用）。
+    pub fn conversation_keys(&self) -> Vec<String> {
+        self.conversations.keys().cloned().collect()
+    }
+
     pub fn conversation(&self, key: &str) -> Option<&ConversationState> {
         self.conversations.get(key)
     }
