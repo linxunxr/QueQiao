@@ -40,6 +40,7 @@ jobs:
           Copy-Item target/release/queqiao.exe $Stage
           Copy-Item target/release/queqiao-mcp.exe $Stage
           Copy-Item install.ps1 $Stage
+          Copy-Item install.bat $Stage
           Copy-Item scripts/setup-dsh.ps1 $Stage
           # preset 随包分发（安装器部署到 ~/.dsh/agent-presets）。
           New-Item -ItemType Directory -Force -Path "$Stage/dsh/agent-presets" | Out-Null
@@ -58,9 +59,9 @@ jobs:
           2. DeepSeek Harness（DSH）——已安装并初始化（~/.dsh 存在）。
           3. config.json——参照仓库 README「快速上手」准备，放到 exe 同目录。
 
-          全新安装：powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
-          （引导安装 DSH/SnowLuma、部署 preset、生成 config、注册 MCP）
-          升级部署：powershell -NoProfile -ExecutionPolicy Bypass -File setup-dsh.ps1
+          全新安装：解压后双击 install.bat（引导安装 DSH/SnowLuma、部署 preset、
+          生成 config、注册 MCP；也可命令行 install.ps1，参数见脚本头部）
+          升级部署：双击 setup.bat
           （构建 + dist 布局 + DSH preset 注册；也可直接用本包已构建的 exe）。
           详见仓库 README：https://github.com/linxunxr/QueQiao
           '@ | Out-File "$Stage/安装说明.txt" -Encoding utf8

@@ -119,3 +119,4 @@ cargo clippy --all-targets \
 | 2026-10-21 | M1~M4 主体：core 全量、dsh/onebot 双冒烟、bin 编排闭环、MCP 核心闭环、出包与部署脚本 |
 | 2026-10-22 | 开源准备：LICENSE、路径参数化（CWD 无关）、README 面向外部受众重写、依赖许可审计 |
 | 2026-10-22 | preset 随仓库分发 + install.ps1 一键安装总入口（SnowLuma 官方渠道自动下载） |
+| 2026-10-22 | install.bat / setup.bat 双击启动器——绕开「双击 .ps1 记事本打开」与执行策略墙 |
