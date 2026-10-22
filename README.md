@@ -120,3 +120,4 @@ cargo clippy --all-targets \
 | 2026-10-22 | 开源准备：LICENSE、路径参数化（CWD 无关）、README 面向外部受众重写、依赖许可审计 |
 | 2026-10-22 | preset 随仓库分发 + install.ps1 一键安装总入口（SnowLuma 官方渠道自动下载） |
 | 2026-10-22 | install.bat / setup.bat 双击启动器——绕开「双击 .ps1 记事本打开」与执行策略墙 |
+| 2026-10-22 | v0.1.1：自动更新（检测/显示更新内容/空闲时自动应用重启）、preset 分发、一键安装 |

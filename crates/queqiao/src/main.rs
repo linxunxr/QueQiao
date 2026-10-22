@@ -7,6 +7,8 @@
 //! Node 版（qq-bridge）是权威参照实现：行为契约以其 43 个 audit 脚本为准。
 
 use std::collections::HashSet;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use queqiao_core::action::{BridgeAction, BridgeEvent};
@@ -24,6 +26,7 @@ use queqiao_onebot::ws::EventStream;
 
 use queqiao::config::ConfigFile;
 use queqiao::orchestrator::Orchestrator;
+use queqiao::update;
 
 /// 消息是否 @ 了 bot（at 段 qq 匹配——self_id 本批从 login_info 取，简化为
 /// 任意 at 段都视为 @ 自己之外的目标：at_me 需要精确 self_id，接线批次补全）。
@@ -501,6 +504,22 @@ async fn run(setup: Setup) {
         });
     }
 
+    // 自动更新：异步检测（失败静默）；就绪后经 update_ready 通知主循环。
+    let (update_tx, mut update_rx) = tokio::sync::oneshot::channel::<update::ReleaseInfo>();
+    {
+        tokio::spawn(async move {
+            let current = env!("CARGO_PKG_VERSION");
+            let checked = tokio::task::spawn_blocking(move || update::check_latest(current))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+            if let Some(rel) = checked {
+                let _ = update_tx.send(rel);
+            }
+        });
+    }
+
     println!(
         "决策循环启动（{} 个会话在册）— Ctrl+C 退出",
         orchestrator.session_keys().len()
@@ -513,6 +532,7 @@ async fn run(setup: Setup) {
         rng_seed ^= rng_seed << 17;
         ((rng_seed.wrapping_mul(0x2545F4914F6CDD1Du64)) >> 11) as f64 / (1u64 << 53) as f64
     };
+    let mut pending_update: Option<std::path::PathBuf> = None;
     let executor = Executor {
         sessions: sessions_arc.clone(),
         reconnect: reconnect.clone(),
@@ -546,11 +566,56 @@ async fn run(setup: Setup) {
                     executor.execute(actions, now).await;
                 }
             }
+            update = &mut update_rx => {
+                // 检测到新版本：显示更新内容 → 下载 staging → 全体空闲时应用并重启。
+                if let Ok(rel) = update {
+                    println!("╔══════════════════════════════════════════════════════╗");
+                    println!("║ 发现新版本 {}（当前 {}）", rel.tag, env!("CARGO_PKG_VERSION"));
+                    println!("╚══════════════════════════════════════════════════════╝");
+                    for line in rel.notes.lines().take(30) {
+                        println!("│ {line}");
+                    }
+                    let home = queqiao::paths::queqiao_home();
+                    match tokio::task::spawn_blocking({
+                        let rel = rel.clone();
+                        move || {
+                            let staging = update::stage_update(&rel, &home)?;
+                            update::write_apply_bat(&staging, &home)
+                        }
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                    {
+                        Ok(bat) => {
+                            println!("[update] 新版已就绪，等待会话空闲后自动应用并重启…");
+                            pending_update = Some(bat);
+                        }
+                        Err(e) => println!("[update] 下载/准备失败（本次跳过，下次启动重试）：{e}"),
+                    }
+                }
+            }
             _ = timeout => {
                 let now = now_ms();
                 let actions = orchestrator.advance(now, now_local(), &mut rng);
                 executor.execute(actions, now).await;
                 sync_dirty(&orchestrator, &social_arc);
+                // 更新已就绪且全体空闲（无回合、无在途 prompt、无待发窗口）→ 应用并重启。
+                if let Some(bat) = pending_update.take() {
+                    let busy = orchestrator.session_keys().iter().any(|k| {
+                        orchestrator.session(k).is_some_and(|rt| rt.is_busy())
+                    });
+                    if !busy {
+                        println!("[update] 会话空闲，应用更新并重启…");
+                        let _ = std::process::Command::new("cmd")
+                            .args(["/c", "start", "", ""])
+                            .arg(&bat)
+                            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                            .spawn();
+                        break;
+                    }
+                    pending_update = Some(bat);
+                }
             }
         }
     }
