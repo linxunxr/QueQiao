@@ -31,7 +31,7 @@ crates/
 ## 许可说明
 
 - 本仓库自身代码以 **MIT** 发布；
-- 本仓库**不包含、不镜像、不逆向** SnowLuma 的任何专有组件（`snowluma-*.node` / `*.dll`）；运行时依赖官方发行包（一键脚本从官方发布地址原样下载），相关授权状态见仓库 Wiki / `AUTHORIZATION.md`（公开前补齐）；
+- 本仓库**不包含、不镜像、不逆向** SnowLuma 的任何专有组件（`snowluma-*.node` / `*.dll`）；运行时依赖官方发行包（一键脚本从官方发布地址原样下载），相关授权状态与权利人往来存证见 [`AUTHORIZATION.md`](AUTHORIZATION.md)（**公开 GitHub 前必须齐备**，请求邮件草稿见 [docs/授权请求邮件草稿.md](docs/授权请求邮件草稿.md)）；
 - 使用者各自须遵守 [SnowLuma EULA](https://github.com/SnowLuma/SnowLuma/blob/main/EULA.md)，商业使用需向其权利人另行取得授权。
 
 ## 开发
