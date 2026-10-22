@@ -15,8 +15,9 @@
 # ⚠️ 切换前先停旧桥（3100 端口冲突 + 双桥并行唤醒同一会话会双重回复）。
 
 param(
-    # 鹊桥安装目录（与 install.ps1 的 -InstallDir 一致；缺省 %LOCALAPPDATA%\QueQiao）。
-    [string]$InstallDir = "$env:LOCALAPPDATA\QueQiao",
+    # 鹊桥安装目录（与 install.ps1 的 -InstallDir 一致）。未传时交互式询问
+    # （回车采用缺省 %LOCALAPPDATA%\QueQiao）；已有安装目录存在 exe 时直接建议采用。
+    [string]$InstallDir = '',
     # Node 版桥仓库路径（首次部署复制 config.json/state/ 用；缺省取环境变量
     # QUEQIAO_NODE_BRIDGE——没有则跳过复制，由使用者自备 config.json 后再跑）。
     [string]$NodeBridge = $env:QUEQIAO_NODE_BRIDGE
@@ -33,6 +34,11 @@ if ($LASTEXITCODE -ne 0) { throw '构建失败' }
 Pop-Location
 
 Write-Host '== 2/4 dist 布局 ==' -ForegroundColor Cyan
+$defaultDir = "$env:LOCALAPPDATA\QueQiao"
+if (-not $InstallDir) {
+    $answer = Read-Host "  安装目录（回车 = [$defaultDir]，或输入已有安装路径）"
+    $InstallDir = if ($answer.Trim()) { $answer.Trim() } else { $defaultDir }
+}
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
