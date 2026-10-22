@@ -10,3 +10,5 @@ name = "queqiao-mcp"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = { workspace = true }
+reqwest = { workspace = true }

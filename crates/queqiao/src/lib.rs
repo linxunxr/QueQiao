@@ -9,3 +9,4 @@ pub mod prompt;
 pub mod session_manager;
 pub mod social_store;
 pub mod state;
+pub mod tools_api;

@@ -184,6 +184,8 @@ fn main() {
 struct Setup {
     ws_url: String,
     ws_token: String,
+    http_base: String,
+    http_token: String,
     cfg: queqiao::config::Config,
     dsh: std::sync::Arc<std::sync::Mutex<DshClient<ReqwestTransport>>>,
     sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
@@ -287,6 +289,8 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
     Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
         ws_token: ws.token.clone(),
+        http_base: found.base_url.clone(),
+        http_token: found.token.clone(),
         cfg,
         dsh,
         sessions,
@@ -299,6 +303,8 @@ async fn run(setup: Setup) {
     let ws_url = setup.ws_url;
     let dsh_arc = setup.dsh;
     let sessions_arc = setup.sessions;
+    let http_base = setup.http_base;
+    let http_token = setup.http_token;
     let social_arc = setup.social;
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
@@ -472,6 +478,25 @@ async fn run(setup: Setup) {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
                 }
+            }
+        });
+    }
+
+    // 工具 API 宿主（MCP 工具面的桥端点；consolePort 共用 3100）。
+    {
+        let social = social_arc.clone();
+        let cfg_clone = cfg.clone();
+        let onebot = OneBotHttpClient::new(&http_base, &http_token, 8000);
+        let port = cfg_clone.console_port;
+        let console_token = cfg_clone.console_token.clone();
+        let state = std::sync::Arc::new(queqiao::tools_api::ToolApiState {
+            social,
+            onebot,
+            cfg: cfg_clone,
+        });
+        tokio::spawn(async move {
+            if let Err(e) = queqiao::tools_api::serve(state, port, &console_token).await {
+                eprintln!("工具 API 异常退出：{e}");
             }
         });
     }
