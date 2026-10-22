@@ -102,7 +102,12 @@ fn ok_json(value: Value) -> ApiResult {
 }
 
 /// 启动工具 API（控制台端口共用；本批仅工具端点）。
-pub async fn serve(state: Arc<ToolApiState>, port: u16, console_token: &str) -> Result<(), String> {
+pub async fn serve(
+    state: Arc<ToolApiState>,
+    port: u16,
+    console_token: &str,
+    console: Option<Arc<crate::console::ConsoleState>>,
+) -> Result<(), String> {
     let ct = console_token.to_owned();
     let app = Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -137,10 +142,14 @@ pub async fn serve(state: Arc<ToolApiState>, port: u16, console_token: &str) -> 
             },
         ))
         .with_state(state);
+    let app = match console {
+        Some(c) => app.merge(crate::console::router(c)),
+        None => app,
+    };
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| format!("绑定 127.0.0.1:{port} 失败：{e}"))?;
-    println!("工具 API 已监听 127.0.0.1:{port}（/api/socialV2/*）");
+    println!("工具 API 已监听 127.0.0.1:{port}（/api/socialV2/* + 控制台 /）");
     axum::serve(listener, app).await.map_err(|e| e.to_string())
 }
 

@@ -81,6 +81,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/upgrade.ps1
 
 构建 release、布置 `dist/`、把 `~/.dsh/profiles/web/cordis.patch.yml` 中的旧桥托管块替换为指向 `queqiao-mcp.exe` 的 MCP 条目（可用 `-NodeBridge <路径>` 从已有部署迁移 config 与 state）。之后停旧桥、在 `dist/` 运行 `queqiao.exe`、重启 DSH 即可。
 
+**设置（UI，不再是配置文件）**：首次运行 `queqiao.exe` 无配置时自动弹出浏览器设置向导（管理员 QQ、白名单、SnowLuma 目录等），保存即启动；日常改动访问控制台 `http://127.0.0.1:3100`——常用项表单化，全量字段有 JSON 高级视图，保存经校验后热生效。config.json 仍兼容手改（高级用户），但不再需要。
+
 **验证安装**（只读冒烟，不干扰生产）：
 
 ```bash

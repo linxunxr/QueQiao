@@ -161,13 +161,56 @@ fn scan_dsh_ports() -> Vec<u16> {
 }
 
 fn main() {
-    let cfg = match ConfigFile::load(&queqiao::paths::config_path()) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "配置加载失败：{e}（请在工作目录放 config.json，参照 Node 版 config.example.json）"
-            );
-            std::process::exit(1);
+    let cfg_path = queqiao::paths::config_path();
+    let first_run = !cfg_path.exists();
+    let cfg = if first_run {
+        // 首次运行：起设置向导（控制台 + 自动开浏览器），保存后继续启动。
+        let console_state = std::sync::Arc::new(queqiao::console::ConsoleState {
+            config_path: cfg_path.clone(),
+            current: std::sync::Mutex::new(queqiao::config::Config::default()),
+            first_run: std::sync::atomic::AtomicBool::new(true),
+        });
+        let port = std::env::var("QUEQIAO_CONSOLE_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(3100);
+        {
+            let cs = console_state.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().expect("setup runtime");
+                rt.block_on(async move {
+                    // 向导模式：仅控制台路由（ToolApiState 依赖的连接发现还没跑）。
+                    let app = axum::Router::new()
+                        .merge(queqiao::console::router(cs))
+                        .fallback(queqiao::console::router_fallback);
+                    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                        .await
+                        .expect("绑定控制台端口失败（3100 被占用？设 QUEQIAO_CONSOLE_PORT 换口）");
+                    println!("首次使用：请在浏览器完成初始设置 → http://127.0.0.1:{port}");
+                    queqiao::console::open_browser(&format!("http://127.0.0.1:{port}"));
+                    let _ = axum::serve(listener, app).await;
+                });
+            });
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if !console_state
+                .first_run
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        ConfigFile::load(&cfg_path).expect("首次保存后的 config 加载失败")
+    } else {
+        match ConfigFile::load(&cfg_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("配置加载失败：{e}（{}）", cfg_path.display());
+                eprintln!("修正后重试，或删除该文件重新进入首次设置向导。");
+                std::process::exit(1);
+            }
         }
     };
     let cfg = cfg.config().clone();
@@ -485,7 +528,12 @@ async fn run(setup: Setup) {
         });
     }
 
-    // 工具 API 宿主（MCP 工具面的桥端点；consolePort 共用 3100）。
+    // 工具 API 宿主 + 控制台（同端口 3100；配置热更经 ConsoleState 共享）。
+    let console_state = std::sync::Arc::new(queqiao::console::ConsoleState {
+        config_path: queqiao::paths::config_path(),
+        current: std::sync::Mutex::new(cfg.clone()),
+        first_run: std::sync::atomic::AtomicBool::new(false),
+    });
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
@@ -497,12 +545,19 @@ async fn run(setup: Setup) {
             onebot,
             cfg: cfg_clone,
         });
+        let console = console_state.clone();
         tokio::spawn(async move {
-            if let Err(e) = queqiao::tools_api::serve(state, port, &console_token).await {
+            if let Err(e) =
+                queqiao::tools_api::serve(state, port, &console_token, Some(console)).await
+            {
                 eprintln!("工具 API 异常退出：{e}");
             }
         });
     }
+    println!(
+        "控制台：http://127.0.0.1:{} （设置与状态，配置改动保存即热生效）",
+        cfg.console_port
+    );
 
     // 自动更新：异步检测（失败静默）；就绪后经 update_ready 通知主循环。
     let (update_tx, mut update_rx) = tokio::sync::oneshot::channel::<update::ReleaseInfo>();
@@ -533,6 +588,10 @@ async fn run(setup: Setup) {
         ((rng_seed.wrapping_mul(0x2545F4914F6CDD1Du64)) >> 11) as f64 / (1u64 << 53) as f64
     };
     let mut pending_update: Option<std::path::PathBuf> = None;
+    let mut config_file = ConfigFile::load(&queqiao::paths::config_path()).unwrap_or_else(|_| {
+        ConfigFile::load(&queqiao::paths::config_path()).expect("config 重新加载失败")
+    });
+    let mut last_tick = now_ms();
     let executor = Executor {
         sessions: sessions_arc.clone(),
         reconnect: reconnect.clone(),
@@ -600,6 +659,19 @@ async fn run(setup: Setup) {
                 let actions = orchestrator.advance(now, now_local(), &mut rng);
                 executor.execute(actions, now).await;
                 sync_dirty(&orchestrator, &social_arc);
+                // 配置热更：UI 保存 → mtime 变化 → 重载进 ConsoleState（坏配置保留旧值）。
+                if now.saturating_sub(last_tick) > 5_000 {
+                    last_tick = now;
+                    if config_file.reload_if_changed().unwrap_or(false) {
+                        let fresh = config_file.config().clone();
+                        let mut cur = console_state.current.lock().unwrap();
+                        if *cur != fresh {
+                            *cur = fresh;
+                            drop(cur);
+                            println!("[config] 热更生效（UI 保存的配置已应用）");
+                        }
+                    }
+                }
                 // 更新已就绪且全体空闲（无回合、无在途 prompt、无待发窗口）→ 应用并重启。
                 if let Some(bat) = pending_update.take() {
                     let busy = orchestrator.session_keys().iter().any(|k| {
