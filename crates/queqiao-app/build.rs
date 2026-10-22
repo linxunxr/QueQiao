@@ -6,8 +6,12 @@ fn main() {
         let p = std::path::Path::new("binaries").join(exe);
         if !p.exists() {
             std::fs::create_dir_all("binaries").ok();
-            std::fs::write(&p, b"placeholder-for-build
-").ok();
+            std::fs::write(
+                &p,
+                b"placeholder-for-build
+",
+            )
+            .ok();
             println!("cargo:warning=binaries/{exe} 用占位文件（仅过 tauri 校验，不可运行）");
         }
     }
