@@ -214,6 +214,7 @@ fn main() {
         }
     };
     let cfg = cfg.config().clone();
+    queqiao::logging::init(&queqiao::paths::queqiao_home());
     println!(
         "{} {} — 鹊桥主程序（M4 编排：OneBot 事件 → core 决策 → 动作日志）",
         queqiao_core::APP_NAME,
@@ -355,7 +356,7 @@ async fn run(setup: Setup) {
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
         .expect("OneBot WS 连接失败（token 失效？重跑或检查 per-account 配置）");
-    println!("OneBot WS 已连接 {ws_url}");
+    queqiao::logging::log(&format!("OneBot WS 已连接 {ws_url}"));
     let social_for_stream = social_arc.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeEvent>(256);
     tokio::spawn(async move {
@@ -510,7 +511,10 @@ async fn run(setup: Setup) {
                     .lock()
                     .map(|m| m.mappings().values().cloned().collect())
                     .unwrap_or_default();
-                println!("DSH mux 已连接 {base}（follow {} 个会话）", desired.len());
+                queqiao::logging::log(&format!(
+                    "DSH mux 已连接 {base}（follow {} 个会话）",
+                    desired.len()
+                ));
                 let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
                 let runner = queqiao_dsh::ws::MuxRunner::new(ws, desired, env_tx.clone(), cmd_rx);
                 let mut handle = tokio::spawn(runner.run());
@@ -668,7 +672,7 @@ async fn run(setup: Setup) {
                         if *cur != fresh {
                             *cur = fresh;
                             drop(cur);
-                            println!("[config] 热更生效（UI 保存的配置已应用）");
+                            queqiao::logging::log("[config] 热更生效（UI 保存的配置已应用）");
                         }
                     }
                 }
@@ -851,8 +855,10 @@ impl Executor {
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()));
                     match result {
-                        Ok(()) => println!("[{now}] SendPrompt {key}（{reason_for_log}）已投递"),
-                        Err(e) => println!("[{now}] SendPrompt {key} 投递失败：{e}"),
+                        Ok(()) => queqiao::logging::log(&format!(
+                            "SendPrompt {key}（{reason_for_log}）已投递"
+                        )),
+                        Err(e) => queqiao::logging::log(&format!("SendPrompt {key} 投递失败：{e}")),
                     }
                     // 新会话创建后通知 mux 重连 follow。
                     let after: HashSet<String> = self
@@ -874,7 +880,7 @@ impl Executor {
                     println!("[{now}] RefundWakeTime {key} @{at}");
                 }
                 BridgeAction::SaveState => {}
-                BridgeAction::Log { message } => println!("[{now}] {message}"),
+                BridgeAction::Log { message } => queqiao::logging::log(&message),
                 BridgeAction::ScheduleTimer { .. } | BridgeAction::CancelTimer { .. } => {
                     // 定时器已在 Orchestrator 内部处理。
                 }

@@ -20,3 +20,4 @@ serde_yaml = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
+regex = { workspace = true }
