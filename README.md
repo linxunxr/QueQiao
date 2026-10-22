@@ -51,6 +51,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 
 安装器总揽全流程（每步先检测、已装即跳过、可反复运行）：①DSH 检测与官方渠道引导；②SnowLuma 从官方 Releases 自动下载原样安装；③部署 `qq-chat-v2` preset 到 DSH；④构建 release；⑤交互式生成最小 `config.json`（管理员 QQ、群/私聊白名单）；⑥注册 MCP 条目。结束后按提示启动即可。
 
+安装目录可选（`-InstallDir`，缺省 `%LOCALAPPDATA%\QueQiao`，与源码仓库无关）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -InstallDir D:\Tools\QueQiao
+```
+
 **手动路径**（偏好自己控制每一步时）：
 
 ```bash

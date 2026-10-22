@@ -18,6 +18,8 @@
 #    脚本在最后会提示并等待。
 
 param(
+    # 鹊桥安装目录（exe/config/state 的家；缺省 %LOCALAPPDATA%\QueQiao）。
+    [string]$InstallDir = "$env:LOCALAPPDATA\QueQiao",
     # SnowLuma 安装目录（检测与安装目标）。
     [string]$SnowLumaHome = "$env:USERPROFILE\SnowLuma",
     # Node 版桥路径（可选：迁移已有 config/state）。
@@ -82,8 +84,9 @@ Push-Location $RepoRoot
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw '构建失败' }
 Pop-Location
-$Dist = Join-Path $RepoRoot 'dist'
+$Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+Write-Info "安装目录：$Dist（-InstallDir 可改；程序与 config/state 都住这里，与源码仓库无关）"
 Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
 Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
 Copy-Item (Join-Path $RepoRoot 'THIRD_PARTY_NOTICES.md') $Dist -Force
