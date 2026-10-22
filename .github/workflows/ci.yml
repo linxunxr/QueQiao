@@ -49,9 +49,11 @@ jobs:
           cargo install cargo-license --locked
           LICENSES=$(cargo license --avoid-build-deps --avoid-dev-deps 2>/dev/null)
           echo "$LICENSES"
-          # 出现 GPL / LGPL / AGPL / SSPL / 未声明许可即失败。
-          if echo "$LICENSES" | grep -qiE 'GPL|AGPL|SSPL|UNLICENSE_OR_UNKNOWN|^NOASSERTION|($|^).*: *$'; then
-            echo "::error::依赖中出现传染性或未声明许可，见上方清单"
+          # 拦截强制传染许可：行首纯 GPL/LGPL/AGPL/SSPL（无 OR MIT/Apache 逃生门）、
+          # AND 组合里的强制 LGPL、未声明（NOASSERTION）。OR 组合里的 LGPL 可按
+          # MIT 侧履行（如 r-efi 的 Apache-2.0 OR LGPL-2.1 OR MIT），不拦。
+          if echo "$LICENSES" | grep -qiE '^(GPL|LGPL|AGPL|SSPL)|AND (L)?GPL|NOASSERTION|^UNKNOWN'; then
+            echo "::error::依赖中出现强制传染或未声明许可，见上方清单"
             exit 1
           fi
 
