@@ -1,21 +1,28 @@
-# 鹊桥（QueQiao）部署脚本：构建 → dist 布局 → DSH preset 注册
-# 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dsh.ps1
+﻿# 鹊桥（QueQiao）部署脚本：构建 → dist 布局 → DSH preset 注册
+# 用法：
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dsh.ps1 `
+#       -NodeBridge <已有 Node 版桥仓库路径>      # 可选：迁移 config/state
+#   （或设环境变量 QUEQIAO_NODE_BRIDGE 代替 -NodeBridge）
 # 前提：DSH 已安装且跑过一次（~/.dsh/profiles 存在）；SnowLuma 已登录。
 #
-# 做四件事：
+# 做四件事（NodeBridge 参数见 param 块）：
 #   1. cargo build --release
-#   2. dist/ 布局：两个 exe + 从 Node 版桥复制 config.json 与 state/（首次）
+#   2. dist/ 布局：两个 exe + 从 Node 版桥复制 config.json 与 state/（首次、可选）
 #   3. 生成 DSH MCP 注册片段（~/.dsh/profiles/<PROFILE>/cordis.patch.yml 的
-#      qq-bridge 托管块替换为指向 queqiao-mcp.exe 的条目）
+#      既有托管块替换为指向 queqiao-mcp.exe 的条目）
 #   4. 打印启动步骤
 #
-# ⚠️ 切换前先停 Node 版桥（3100 端口冲突 + 双桥并行唤醒同一会话会双重回复）。
+# ⚠️ 切换前先停旧桥（3100 端口冲突 + 双桥并行唤醒同一会话会双重回复）。
 
+param(
+    # Node 版桥仓库路径（首次部署复制 config.json/state/ 用；缺省取环境变量
+    # QUEQIAO_NODE_BRIDGE——没有则跳过复制，由使用者自备 config.json 后再跑）。
+    [string]$NodeBridge = $env:QUEQIAO_NODE_BRIDGE
+)
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
-$NodeBridge = 'D:\100work\103Tools\qq-bridge'   # Node 版桥（复制 config/state 用）
 
 Write-Host '== 1/4 release 构建 ==' -ForegroundColor Cyan
 Push-Location $RepoRoot
@@ -29,13 +36,18 @@ New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
 Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
 # 首次部署：从 Node 版桥带一份配置与状态（会话映射/唤醒配置沿用，无缝切换）。
-if (-not (Test-Path (Join-Path $Dist 'config.json'))) {
-    Copy-Item (Join-Path $NodeBridge 'config.json') $Dist
-    Write-Host '  已复制 config.json（来自 Node 版）' -ForegroundColor Yellow
-}
-if (-not (Test-Path (Join-Path $Dist 'state'))) {
-    Copy-Item (Join-Path $NodeBridge 'state') $Dist -Recurse
-    Write-Host '  已复制 state/（会话映射与持久状态沿用）' -ForegroundColor Yellow
+if ($NodeBridge -and (Test-Path $NodeBridge)) {
+    if (-not (Test-Path (Join-Path $Dist 'config.json'))) {
+        Copy-Item (Join-Path $NodeBridge 'config.json') $Dist
+        Write-Host '  已复制 config.json（来自 Node 版桥）' -ForegroundColor Yellow
+    }
+    if (-not (Test-Path (Join-Path $Dist 'state'))) {
+        Copy-Item (Join-Path $NodeBridge 'state') $Dist -Recurse
+        Write-Host '  已复制 state/（会话映射与持久状态沿用）' -ForegroundColor Yellow
+    }
+} else {
+    Write-Host '  未提供 -NodeBridge（或 QUEQIAO_NODE_BRIDGE）：跳过配置迁移，' -ForegroundColor Yellow
+    Write-Host '  请自备 config.json（参考仓库 config 形状）后放入 dist/ 再启动。' -ForegroundColor Yellow
 }
 
 Write-Host '== 3/4 DSH MCP 注册 ==' -ForegroundColor Cyan

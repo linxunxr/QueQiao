@@ -26,18 +26,24 @@ fn snowluma_home() -> Result<PathBuf, String> {
     if let Ok(home) = std::env::var("SNOWLUMA_HOME") {
         return Ok(PathBuf::from(home));
     }
-    // 冒烟便利：相邻 Node 版仓库的配置里就有 homeDir。
-    let bridge_cfg =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../qq-bridge/config.json");
-    let text = std::fs::read_to_string(&bridge_cfg)
-        .map_err(|e| format!("未设 SNOWLUMA_HOME 且读不到 {bridge_cfg:?}：{e}"))?;
-    let cfg: serde_json::Value =
-        serde_json::from_str(text.trim_start_matches('\u{FEFF}')).map_err(|e| e.to_string())?;
-    cfg.get("snowluma")
-        .and_then(|s| s.get("homeDir"))
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .ok_or_else(|| "Node 版 config.json 里没有 snowluma.homeDir".to_owned())
+    // 次选：可执行文件同目录/工作目录的 config.json（部署布局）里就有 homeDir。
+    for base in [
+        queqiao::paths::queqiao_home(),
+        std::env::current_dir().unwrap_or_default(),
+    ] {
+        let cfg_path = base.join("config.json");
+        if let Ok(text) = std::fs::read_to_string(&cfg_path)
+            && let Ok(cfg) =
+                serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{FEFF}'))
+            && let Some(home) = cfg
+                .get("snowluma")
+                .and_then(|s| s.get("homeDir"))
+                .and_then(|v| v.as_str())
+        {
+            return Ok(PathBuf::from(home));
+        }
+    }
+    Err("未设 SNOWLUMA_HOME，且 home 目录 config.json 里没有 snowluma.homeDir".into())
 }
 
 /// 读 per-account 配置：onebot_<数字>.json 逐个解析（坏文件跳过、按 uin 排序）。
