@@ -21,13 +21,14 @@ param(
     # 鹊桥安装目录（exe/config/state 的家）。未传时交互式询问（回车采用
     # 缺省 %LOCALAPPDATA%\QueQiao，或输入任意路径）。
     [string]$InstallDir = '',
-    # SnowLuma 安装目录（检测与安装目标）。
-    [string]$SnowLumaHome = "$env:USERPROFILE\SnowLuma",
+    # SnowLuma 安装目录（未传时扫描常见位置 → 交互询问 → 下载安装的兜底目录）。
+    [string]$SnowLumaHome = $env:SNOWLUMA_HOME,
     # Node 版桥路径（可选：迁移已有 config/state）。
     [string]$NodeBridge = $env:QUEQIAO_NODE_BRIDGE
 )
 $ErrorActionPreference = 'Stop'
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+# install.ps1 在仓库根（Release zip 里在安装根）：RepoRoot 即脚本所在目录。
+$RepoRoot = $PSScriptRoot
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
 
@@ -50,9 +51,51 @@ if (Test-Path $DshHome) {
 
 # ── 2. SnowLuma（官方发行包原样下载安装）──────────────────────────────────────
 Write-Step 2 'SnowLuma'
+# SnowLuma 判定标志 = 发行包根的 index.mjs。三段式发现：
+# ①参数/环境变量指定 ②常见位置扫描 ③交互询问；都没有才走下载。
+function Test-SnowLuma($dir) {
+    (Test-Path $dir) -and (Test-Path (Join-Path $dir 'index.mjs'))
+}
+if (-not $SnowLumaHome -or -not (Test-SnowLuma $SnowLumaHome)) {
+    if ($SnowLumaHome) { Write-Info "指定位置未找到 SnowLuma（$SnowLumaHome），进入扫描…" }
+    $candidates = @(
+        "$env:USERPROFILE\SnowLuma"
+        "$env:LOCALAPPDATA\SnowLuma"
+        "$env:LOCALAPPDATA\Programs\SnowLuma"
+        'D:\SnowLuma', 'D:\Tools\SnowLuma', 'C:\SnowLuma'
+    )
+    # 从 config.json 里找用户已配置的 homeDir（安装过 Node 版桥或设置过的）。
+    foreach ($base in @($InstallDir, "$env:LOCALAPPDATA\QueQiao", (Join-Path $RepoRoot 'dist'))) {
+        $cfgFile = Join-Path $base 'config.json'
+        if (Test-Path $cfgFile) {
+            try {
+                $j = Get-Content $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($j.snowluma -and $j.snowluma.homeDir) { $candidates = @($j.snowluma.homeDir) + $candidates }
+            } catch { }
+        }
+    }
+    $found = $candidates | Where-Object { Test-Snowluma $_ } | Select-Object -First 1
+    if (-not $SnowLumaHome -and $found) { $SnowLumaHome = $found }
+    if ($found) {
+        Write-Ok "已检测到 SnowLuma：$found"
+    } elseif (-not $SnowLumaHome -or -not (Test-Path $SnowLumaHome)) {
+        # 未装或装在未知位置：先问，避免给已装用户重复下载 40MB。
+        Write-Info '未在常见位置找到 SnowLuma（扫描了用户目录/本地程序目录/常见盘符根，'
+        Write-Info '以及 config.json 里的 snowluma.homeDir）。'
+        $answer = Read-Host '  若已安装在别处，输入其目录（发行包根，含 index.mjs）；直接回车 = 全新下载安装'
+        if ($answer.Trim() -and (Test-Snowluma $answer.Trim())) {
+            $SnowLumaHome = $answer.Trim()
+            Write-Ok "使用指定目录：$SnowLumaHome"
+        } elseif ($answer.Trim()) {
+            throw "指定目录未找到 index.mjs（$($answer.Trim())）——请确认是发行包解压根目录"
+        } else {
+            $SnowLumaHome = "$env:USERPROFILE\SnowLuma"
+        }
+    }
+}
 $slExe = Join-Path $SnowLumaHome 'index.mjs'
-if ((Test-Path $SnowLumaHome) -and (Test-Path $slExe)) {
-    Write-Ok "已检测到 $SnowLumaHome"
+if (Test-Snowluma $SnowLumaHome) {
+    # 已装（含刚指定的目录）：跳过下载。
 } else {
     Write-Info "未检测到 SnowLuma（$SnowLumaHome）。从官方 GitHub Releases 下载 win-x64 发行包…"
     $rel = Invoke-RestMethod 'https://api.github.com/repos/SnowLuma/SnowLuma/releases/latest'
