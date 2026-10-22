@@ -60,7 +60,38 @@ if ((Test-Path $SnowLumaHome) -and (Test-Path $slExe)) {
     if (-not $asset) { throw "官方 Releases 未找到 win-x64 资产（tag $($rel.tag_name)）——请手工安装后重跑" }
     Write-Info "下载 $($asset.name)（$([math]::Round($asset.size/1MB))MB，原样不修改）…"
     $zip = Join-Path $env:TEMP $asset.name
-    Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+    # 进度条下载：content-length 已知（GitHub 资产带 size），按已收字节刷新
+    # 百分比与进度条；30MB 以下过快时刷新节流（100ms）防闪烁。
+    $req = [System.Net.HttpWebRequest]::Create($asset.browser_download_url)
+    $req.AllowAutoRedirect = $true
+    $req.UserAgent = 'queqiao-installer'
+    $resp = $req.GetResponse()
+    $total = if ($resp.ContentLength -gt 0) { $resp.ContentLength } else { $asset.size }
+    $stream = $resp.GetResponseStream()
+    $fs = [System.IO.File]::Create($zip)
+    $buffer = New-Object byte[] 262144
+    $done = 0L
+    $lastTick = [DateTime]::MinValue
+    try {
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $fs.Write($buffer, 0, $read)
+            $done += $read
+            $now = [DateTime]::UtcNow
+            if (($now - $lastTick).TotalMilliseconds -ge 100 -or $done -eq $total) {
+                $lastTick = $now
+                $pct = [math]::Min(100, [math]::Floor($done * 100 / $total))
+                $barW = 36
+                $filled = [math]::Floor($barW * $pct / 100)
+                $bar = ('#' * $filled) + ('-' * ($barW - $filled))
+                Write-Progress -Activity "下载 $($asset.name)" -Status "$pct%（$([math]::Round($done/1MB,1))/$([math]::Round($total/1MB,1)) MB）" -PercentComplete $pct
+                Write-Host -NoNewline ("`r  [{0}] {1,3}%" -f $bar, $pct)
+            }
+        }
+    } finally {
+        $fs.Close(); $stream.Close(); $resp.Close()
+    }
+    Write-Host '' 
+    Write-Progress -Activity "下载 $($asset.name)" -Completed
     New-Item -ItemType Directory -Force -Path $SnowLumaHome | Out-Null
     Expand-Archive $zip $SnowLumaHome -Force
     Remove-Item $zip
