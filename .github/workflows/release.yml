@@ -1,0 +1,68 @@
+# Release：打 v* tag 时构建并上传 Windows 产物到 GitHub Release。
+# 产物只含本仓库 MIT 代码编译的 exe 与配套脚本/声明——不包含、不下载、
+# 不内嵌 SnowLuma 任何组件（A 档授权边界：不捆绑进第三方安装包；
+# SnowLuma 由使用者自行从官方渠道获取，见包内安装说明）。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '追加产物的已有 tag（如 v0.1.0）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 构建 Windows 产物并上传 Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建（release）
+        run: cargo build --release
+
+      - name: 组包
+        shell: pwsh
+        run: |
+          $Tag = if ("${{ github.event_name }}" -eq "workflow_dispatch") { "${{ inputs.tag }}" } else { "${{ github.ref_name }}" }
+          $Stage = "stage/$Tag"
+          New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+          # 双 exe + 部署脚本 + 许可与声明（宽松许可的声明保留义务随二进制履行）。
+          Copy-Item target/release/queqiao.exe $Stage
+          Copy-Item target/release/queqiao-mcp.exe $Stage
+          Copy-Item scripts/setup-dsh.ps1 $Stage
+          Copy-Item LICENSE $Stage
+          Copy-Item THIRD_PARTY_NOTICES.md $Stage
+          @'
+          鹊桥（QueQiao）安装说明
+          ========================
+
+          本包只包含鹊桥自身（MIT 许可）的可执行文件与部署脚本。
+          运行需要自备以下组件（本包不含、也不代替你获取它们）：
+
+          1. SnowLuma 官方发行包——从官方渠道下载安装（见 README 链接），
+             登录目标 QQ 并开启 OneBot 服务；使用者须遵守 SnowLuma EULA/LICENSE。
+          2. DeepSeek Harness（DSH）——已安装并初始化（~/.dsh 存在）。
+          3. config.json——参照仓库 README「快速上手」准备，放到 exe 同目录。
+
+          部署：powershell -NoProfile -ExecutionPolicy Bypass -File setup-dsh.ps1
+          （构建 + dist 布局 + DSH preset 注册；也可直接用本包已构建的 exe）。
+          详见仓库 README：https://github.com/linxunxr/QueQiao
+          '@ | Out-File "$Stage/安装说明.txt" -Encoding utf8
+          Compress-Archive -Path "$Stage/*" -DestinationPath "queqiao-$Tag-win64.zip" -Force
+          Get-Item "queqiao-$Tag-win64.zip"
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: queqiao-*-win64.zip
