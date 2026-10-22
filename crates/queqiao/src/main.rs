@@ -158,7 +158,7 @@ fn scan_dsh_ports() -> Vec<u16> {
 }
 
 fn main() {
-    let cfg = match ConfigFile::load(std::path::Path::new("config.json")) {
+    let cfg = match ConfigFile::load(&queqiao::paths::config_path()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -269,7 +269,7 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
     let sessions = std::sync::Arc::new(std::sync::Mutex::new(
         queqiao::session_manager::SessionManager::new(
             dsh.clone(),
-            std::path::Path::new("state/sessions.json"),
+            &queqiao::paths::sessions_path(),
             &preset,
             &cfg.workspace_title,
             &agent_dir,
@@ -279,7 +279,7 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
 
     let social = std::sync::Arc::new(std::sync::Mutex::new(
         queqiao::social_store::SocialStore::load(
-            std::path::Path::new("state/social-v2.json"),
+            &queqiao::paths::social_v2_path(),
             cfg.owner_qq.map(|o| o.0),
         )
         .expect("social-v2.json 加载失败"),

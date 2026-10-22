@@ -126,8 +126,24 @@ fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
 }
 
 /// 读 config.json 的 socialV2.tools（注册期过滤数据源；文件缺失按全默认开）。
+/// CWD 无关的 config.json 定位（DSH spawn 的进程 CWD 不确定）。
+fn config_path() -> std::path::PathBuf {
+    if let Ok(home) = std::env::var("QUEQIAO_HOME") {
+        return std::path::PathBuf::from(home).join("config.json");
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("config.json");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from("config.json")
+}
+
 fn load_section(section: &str) -> Value {
-    std::fs::read_to_string("config.json")
+    std::fs::read_to_string(config_path())
         .ok()
         .and_then(|text| {
             serde_json::from_str::<Value>(text.trim_start_matches('\u{FEFF}'))
