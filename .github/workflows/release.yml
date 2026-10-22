@@ -27,8 +27,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 构建（release）
+      - name: 构建（release，全 workspace 含客户端）
         run: cargo build --release
+
+      - name: 真桥 exe 拷入客户端 bundle 资源（覆盖占位）
+        shell: pwsh
+        run: |
+          Copy-Item target/release/queqiao.exe crates/queqiao-app/binaries/ -Force
+          Copy-Item target/release/queqiao-mcp.exe crates/queqiao-app/binaries/ -Force
 
       - name: 组包
         shell: pwsh
@@ -39,6 +45,7 @@ jobs:
           # 双 exe + 部署脚本 + 许可与声明（宽松许可的声明保留义务随二进制履行）。
           Copy-Item target/release/queqiao.exe $Stage
           Copy-Item target/release/queqiao-mcp.exe $Stage
+          Copy-Item target/release/queqiao-app.exe $Stage
           Copy-Item install.ps1 $Stage
           Copy-Item install.bat $Stage
           Copy-Item upgrade.bat $Stage
