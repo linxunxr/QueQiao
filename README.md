@@ -41,17 +41,23 @@ crates/
 3. DSH（DeepSeek Harness）已安装并初始化（`~/.dsh` 存在）；
 4. 按需安装 DSH preset（agent 会话需要 `qq-chat-v2` 预设，安装方式见 DSH 文档）。
 
-**构建**：
+**一键安装（推荐）**：
 
-```bash
-git clone <本仓库>
+```powershell
+git clone https://github.com/linxunxr/QueQiao.git
 cd QueQiao
-cargo build --release
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 ```
 
-**配置**（exe 同目录布局——可执行文件与 `config.json`、`state/` 放一起；`QUEQIAO_HOME` 环境变量可覆盖 home）：
+安装器总揽全流程（每步先检测、已装即跳过、可反复运行）：①DSH 检测与官方渠道引导；②SnowLuma 从官方 Releases 自动下载原样安装；③部署 `qq-chat-v2` preset 到 DSH；④构建 release；⑤交互式生成最小 `config.json`（管理员 QQ、群/私聊白名单）；⑥注册 MCP 条目。结束后按提示启动即可。
 
-参照仓库内 `crates/queqiao/tests/fixtures/config.example.json` 的形状编写 `config.json`，关键字段：`snowluma.homeDir`（SnowLuma 主目录，token 自发现数据源）、`allow.groups` / `allow.private`（会话白名单）、`ownerQQ`。
+**手动路径**（偏好自己控制每一步时）：
+
+```bash
+git clone <本仓库> && cd QueQiao && cargo build --release
+```
+
+配置（exe 同目录布局；`QUEQIAO_HOME` 环境变量可覆盖 home）：参照 `crates/queqiao/tests/fixtures/config.example.json` 的形状编写 `config.json`，关键字段：`snowluma.homeDir`（SnowLuma 主目录，token 自发现数据源）、`allow.groups` / `allow.private`（会话白名单）、`ownerQQ`；preset 需手工部署 `dsh/agent-presets/` 到 `~/.dsh/agent-presets/`；MCP 注册见 `scripts/setup-dsh.ps1`。
 
 **运行**：
 
@@ -112,3 +118,4 @@ cargo clippy --all-targets \
 | 2026-10-20 | 骨架：workspace 分层 + wake 防卡死首个迁移（含契约测试）          |
 | 2026-10-21 | M1~M4 主体：core 全量、dsh/onebot 双冒烟、bin 编排闭环、MCP 核心闭环、出包与部署脚本 |
 | 2026-10-22 | 开源准备：LICENSE、路径参数化（CWD 无关）、README 面向外部受众重写、依赖许可审计 |
+| 2026-10-22 | preset 随仓库分发 + install.ps1 一键安装总入口（SnowLuma 官方渠道自动下载） |
