@@ -12,6 +12,8 @@
 #   5. config.json：交互式生成最小可用配置（已存在则跳过）。
 #   6. MCP 注册：cordis.patch.yml 写入 queqiao-mcp 条目。
 #
+# 升级部署（已装过全部依赖）用 upgrade.bat / scripts/upgrade.ps1。
+#
 # ⚠️ SnowLuma 需人工完成两步（脚本无法代替）：登录 QQ、开启 OneBot 服务；
 #    脚本在最后会提示并等待。
 
@@ -131,7 +133,7 @@ if (-not (Test-Path (Split-Path $PatchFile))) {
 }
 $block = @"
 # === queqiao MCP BEGIN ===
-# 由 install.ps1 / setup-dsh.ps1 维护。
+# 由 install.ps1 / scripts/upgrade.ps1 维护。
 - insert:
     - id: mcp-snowluma
       name: '@deepseek-ai/dsh-mcp-client'

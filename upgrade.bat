@@ -5,7 +5,7 @@ cd /d "%~dp0"
 echo ============================================
 echo   QueQiao Upgrade Deploy
 echo ============================================
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup-dsh.ps1" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\upgrade.ps1" %*
 if errorlevel 1 (
     echo.
     echo Deploy failed - please report the red error above at:

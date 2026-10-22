@@ -1,6 +1,6 @@
-﻿# 鹊桥（QueQiao）部署脚本：构建 → dist 布局 → DSH preset 注册
+﻿# 鹊桥（QueQiao）升级部署脚本：构建 → dist 布局 → DSH MCP 注册
 # 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dsh.ps1 `
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/upgrade.ps1 `
 #       -NodeBridge <已有 Node 版桥仓库路径>      # 可选：迁移 config/state
 #   （或设环境变量 QUEQIAO_NODE_BRIDGE 代替 -NodeBridge）
 # 前提：DSH 已安装且跑过一次（~/.dsh/profiles 存在）；SnowLuma 已登录。

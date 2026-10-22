@@ -57,7 +57,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 git clone <本仓库> && cd QueQiao && cargo build --release
 ```
 
-配置（exe 同目录布局；`QUEQIAO_HOME` 环境变量可覆盖 home）：参照 `crates/queqiao/tests/fixtures/config.example.json` 的形状编写 `config.json`，关键字段：`snowluma.homeDir`（SnowLuma 主目录，token 自发现数据源）、`allow.groups` / `allow.private`（会话白名单）、`ownerQQ`；preset 需手工部署 `dsh/agent-presets/` 到 `~/.dsh/agent-presets/`；MCP 注册见 `scripts/setup-dsh.ps1`。
+配置（exe 同目录布局；`QUEQIAO_HOME` 环境变量可覆盖 home）：参照 `crates/queqiao/tests/fixtures/config.example.json` 的形状编写 `config.json`，关键字段：`snowluma.homeDir`（SnowLuma 主目录，token 自发现数据源）、`allow.groups` / `allow.private`（会话白名单）、`ownerQQ`；preset 需手工部署 `dsh/agent-presets/` 到 `~/.dsh/agent-presets/`；MCP 注册见 `scripts/upgrade.ps1`。
 
 **运行**：
 
@@ -67,10 +67,10 @@ cargo run --release -p queqiao
 
 启动时依次：发现 SnowLuma 连接（per-account 双 token 自动发现）→ 探测 DSH 端口（3080 不通时自动扫描进程端口）→ 连接 WS 事件流与 DSH mux → 启动决策循环与工具 API（127.0.0.1:3100）。
 
-**部署与 DSH preset 注册**（一键脚本）：
+**升级部署**（已装过全部依赖，一键脚本）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-dsh.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/upgrade.ps1
 ```
 
 构建 release、布置 `dist/`、把 `~/.dsh/profiles/web/cordis.patch.yml` 中的旧桥托管块替换为指向 `queqiao-mcp.exe` 的 MCP 条目（可用 `-NodeBridge <路径>` 从已有部署迁移 config 与 state）。之后停旧桥、在 `dist/` 运行 `queqiao.exe`、重启 DSH 即可。
@@ -119,5 +119,5 @@ cargo clippy --all-targets \
 | 2026-10-21 | M1~M4 主体：core 全量、dsh/onebot 双冒烟、bin 编排闭环、MCP 核心闭环、出包与部署脚本 |
 | 2026-10-22 | 开源准备：LICENSE、路径参数化（CWD 无关）、README 面向外部受众重写、依赖许可审计 |
 | 2026-10-22 | preset 随仓库分发 + install.ps1 一键安装总入口（SnowLuma 官方渠道自动下载） |
-| 2026-10-22 | install.bat / setup.bat 双击启动器——绕开「双击 .ps1 记事本打开」与执行策略墙 |
+| 2026-10-22 | install.bat / upgrade.bat 双击启动器——绕开「双击 .ps1 记事本打开」与执行策略墙 |
 | 2026-10-22 | v0.1.1：自动更新（检测/显示更新内容/空闲时自动应用重启）、preset 分发、一键安装 |

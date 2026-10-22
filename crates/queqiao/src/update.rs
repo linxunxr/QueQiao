@@ -161,7 +161,7 @@ pub fn write_apply_bat(staging: &Path, home: &Path) -> Result<PathBuf, String> {
          {}\
          {}\
          if exist \"{staging}\\install.bat\" copy /y \"{staging}\\install.bat\" install.bat >nul\r\n\
-         if exist \"{staging}\\setup.bat\" copy /y \"{staging}\\setup.bat\" setup.bat >nul\r\n\
+         if exist \"{staging}\\upgrade.bat\" copy /y \"{staging}\\upgrade.bat\" upgrade.bat >nul\r\n\
          if exist \"{staging}\\THIRD_PARTY_NOTICES.md\" copy /y \"{staging}\\THIRD_PARTY_NOTICES.md\" THIRD_PARTY_NOTICES.md >nul\r\n\
          if exist \"{staging}\\dsh\" xcopy /e /y /i \"{staging}\\dsh\" dist-preset-update >nul 2>&1\r\n\
          rd /s /q \"{staging}\" >nul 2>&1\r\n\
