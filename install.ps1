@@ -247,7 +247,12 @@ if ((Test-Path $PatchFile) -and (Get-Item $PatchFile).Length -gt 0) {
 
 Write-Host @"
 
-安装完成。启动步骤：
+安装完成。
+若从 Node 版桥（qq-bridge）迁移：双击 migrate-from-node.ps1 或运行
+  powershell -NoProfile -ExecutionPolicy Bypass -File migrate-from-node.ps1 -NodeBridge <Node版桥路径>
+（一次性带走 config/会话映射/唤醒状态/日记/表情包/黑话/花费/人格卡）。
+
+启动步骤：
   1. 确认 SnowLuma 已登录 QQ 且开启 OneBot 服务
   2. 启动桥：cd $Dist ; .\queqiao.exe
   3. 重启 DSH（preset 与 MCP 注册生效）

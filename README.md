@@ -85,6 +85,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/upgrade.ps1
 
 **设置（UI，不再是配置文件）**：首次运行 `queqiao.exe` 无配置时自动弹出浏览器设置向导（管理员 QQ、白名单、SnowLuma 目录等），保存即启动；日常改动访问控制台 `http://127.0.0.1:3100`——常用项表单化，全量字段有 JSON 高级视图，保存经校验后热生效。config.json 仍兼容手改（高级用户），但不再需要。
 
+**从 Node 版桥迁移**：`migrate-from-node.ps1 -NodeBridge <路径>` 一次性带走 config、会话映射（DSH 会话无缝续用）、唤醒状态、日记、表情包、黑话、花费记账与全部人格卡（roles/*.md）；目标同名文件默认跳过、`-Force` 覆盖。
+
 **验证安装**（只读冒烟，不干扰生产）：
 
 ```bash
