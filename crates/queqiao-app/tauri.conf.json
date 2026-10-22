@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "QueQiao",
+  "version": "0.1.0",
+  "identifier": "com.linxunxr.queqiao",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "鹊桥 QueQiao",
+        "width": 960,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "binaries/queqiao.exe": "binaries/",
+      "binaries/queqiao-mcp.exe": "binaries/"
+    }
+  }
+}

@@ -97,6 +97,37 @@ impl ToolApiState {
 
 type ApiResult = (StatusCode, Json<Value>);
 
+async fn cors_mw(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, std::convert::Infallible> {
+    use axum::http::Method;
+    if req.method() == Method::OPTIONS {
+        let mut resp = axum::response::Response::new(axum::body::Body::empty());
+        *resp.status_mut() = StatusCode::NO_CONTENT;
+        cors_headers(resp.headers_mut());
+        return Ok(resp);
+    }
+    let mut resp = next.run(req).await;
+    cors_headers(resp.headers_mut());
+    Ok(resp)
+}
+
+fn cors_headers(headers: &mut axum::http::HeaderMap) {
+    use axum::http::header::*;
+    let _ = headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    let _ = headers.insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
+    );
+    let _ = headers.insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        "content-type, x-agent-token, x-console-token"
+            .parse()
+            .unwrap(),
+    );
+}
+
 fn ok_json(value: Value) -> ApiResult {
     (StatusCode::OK, Json(json!({ "ok": true, "value": value })))
 }
@@ -117,6 +148,9 @@ pub async fn serve(
         .route("/api/socialV2/send-message", post(send_message))
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
+        // CORS：桌面客户端（Tauri webview）与浏览器页面跨域访问本地桥 API。
+        // 本服务只绑 127.0.0.1，放开 origin 无外网暴露面。
+        .layer(axum::middleware::from_fn(cors_mw))
         .layer(axum::middleware::from_fn(
             move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
                 let ct = ct.clone();

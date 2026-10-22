@@ -1,0 +1,17 @@
+[package]
+name = "queqiao-app"
+description = "鹊桥桌面客户端（Tauri 2 壳）：设置 UI、桥进程编排、系统托盘"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "queqiao-app"
+path = "src/main.rs"

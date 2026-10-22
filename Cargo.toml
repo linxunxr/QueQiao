@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/queqiao",
+    "crates/queqiao-app",
     "crates/queqiao-core",
     "crates/queqiao-onebot",
     "crates/queqiao-dsh",
