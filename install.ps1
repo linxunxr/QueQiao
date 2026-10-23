@@ -29,6 +29,29 @@ param(
 $ErrorActionPreference = 'Stop'
 # install.ps1 在仓库根（Release zip 里在安装根）：RepoRoot 即脚本所在目录。
 $RepoRoot = $PSScriptRoot
+
+# ── 0. 选择安装目录（最先做：后续 config 扫描与 SnowLuma 发现都依赖它）──────
+Write-Host "`n== 0/6 选择安装目录 ==" -ForegroundColor Cyan
+$defaultDir = "$env:LOCALAPPDATA\QueQiao"
+if (-not $InstallDir) {
+    # 系统文件夹选择对话框；取消/关闭则回退手输。
+    Write-Host "  在弹出的窗口中选择安装目录（exe、config、state 都住这里）：" -ForegroundColor Yellow
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = '选择鹊桥安装目录'
+    $dialog.SelectedPath = $defaultDir
+    $ownerForm = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
+    $shown = $dialog.ShowDialog($ownerForm)
+    if ($shown -eq [System.Windows.Forms.DialogResult]::OK -and $dialog.SelectedPath) {
+        $InstallDir = $dialog.SelectedPath
+    } else {
+        $answer = Read-Host "  未选择目录。直接回车 = 缺省位置 [$defaultDir]，或输入路径"
+        $trimmed = if ($null -ne $answer) { "$answer".Trim() } else { '' }
+        $InstallDir = if ($trimmed) { $trimmed } else { $defaultDir }
+    }
+}
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+Write-Ok "安装目录：$InstallDir"
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
 
@@ -162,13 +185,6 @@ Push-Location $RepoRoot
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw '构建失败' }
 Pop-Location
-$defaultDir = "$env:LOCALAPPDATA\QueQiao"
-if (-not $InstallDir) {
-    Write-Host ""
-    Write-Host "  选择安装目录（exe、config.json、state/ 都住这里，与源码仓库无关）：" -ForegroundColor Yellow
-    $answer = Read-Host "  直接回车装到缺省位置 [$defaultDir]，或输入自定义路径"
-    $InstallDir = if ($answer.Trim()) { $answer.Trim() } else { $defaultDir }
-}
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 Write-Ok "安装目录：$Dist"
@@ -248,17 +264,54 @@ if ((Test-Path $PatchFile) -and (Get-Item $PatchFile).Length -gt 0) {
     Write-Ok "已写入：$PatchFile"
 }
 
+# ── 7. 收尾：安装器与配套文件迁入安装目录（升级/重装无需回下载目录）────────
+foreach ($f in @('install.bat', 'install.ps1', 'upgrade.bat', 'migrate-from-node.ps1')) {
+    $srcF = Join-Path $RepoRoot $f
+    if (Test-Path $srcF) { Copy-Item $srcF $Dist -Force }
+}
+$upgradeSrc = Join-Path $RepoRoot 'scripts\upgrade.ps1'
+if (Test-Path $upgradeSrc) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dist 'scripts') | Out-Null
+    Copy-Item $upgradeSrc (Join-Path $Dist 'scripts\') -Force
+}
+$presetSrc = Join-Path $RepoRoot 'dsh\agent-presets'
+if (Test-Path $presetSrc) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dist 'dsh') | Out-Null
+    Copy-Item $presetSrc (Join-Path $Dist 'dsh\') -Recurse -Force
+}
+Write-Ok '安装器与配套文件已迁入安装目录（升级直接在安装目录跑 upgrade.bat）'
+
+# 桌面快捷方式。
+try {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $ws = New-Object -ComObject WScript.Shell
+    $sc = $ws.CreateShortcut((Join-Path $desktop '鹊桥 QueQiao.lnk'))
+    $appExe = Join-Path $Dist 'queqiao-app.exe'
+    $sc.TargetPath = if (Test-Path $appExe) { $appExe } else { Join-Path $Dist 'queqiao.exe' }
+    $sc.WorkingDirectory = $Dist
+    $sc.IconLocation = $sc.TargetPath
+    $sc.Save()
+    Write-Ok '桌面快捷方式已创建：鹊桥 QueQiao.lnk'
+} catch { Write-Info '快捷方式创建失败（不影响使用，可手动创建）。' }
+
 Write-Host @"
 
 安装完成。
-若从 Node 版桥（qq-bridge）迁移：双击 migrate-from-node.ps1 或运行
+若从 Node 版桥（qq-bridge）迁移：在安装目录运行 migrate-from-node.ps1
   powershell -NoProfile -ExecutionPolicy Bypass -File migrate-from-node.ps1 -NodeBridge <Node版桥路径>
-（一次性带走 config/会话映射/唤醒状态/日记/表情包/黑话/花费/人格卡）。
+  （一次性带走 config/会话映射/唤醒状态/日记/表情包/黑话/花费/人格卡）。
 
 启动步骤：
   1. 确认 SnowLuma 已登录 QQ 且开启 OneBot 服务
-  2. 启动桥：cd $Dist ; .\queqiao.exe
-  3. 重启 DSH（preset 与 MCP 注册生效）
-  4. 在白名单群/私聊发消息，观察 dist 窗口的决策日志与 AI 回复
+  2. 重启 DSH（preset 与 MCP 注册生效）
+  3. 在白名单群/私聊发消息，观察窗口日志与 AI 回复
 
 "@ -ForegroundColor Green
+$launch = Read-Host '是否立即启动鹊桥？（回车 = 启动，输入 n = 稍后手动启动）'
+$launchAns = if ($null -ne $launch) { "$launch".Trim().ToLower() } else { '' }
+if ($launchAns -ne 'n') {
+    $appExe = Join-Path $Dist 'queqiao-app.exe'
+    $entry = if (Test-Path $appExe) { $appExe } else { Join-Path $Dist 'queqiao.exe' }
+    Write-Ok "启动 $entry"
+    Start-Process $entry -WorkingDirectory $Dist
+}
