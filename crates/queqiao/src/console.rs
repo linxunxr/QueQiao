@@ -24,7 +24,9 @@ use serde_json::Value;
 use crate::config::Config;
 use crate::state::atomic_write_json;
 
-const CONSOLE_HTML: &str = include_str!("../assets/console.html");
+// 单源：与 Tauri 客户端共用同一份 UI（queqiao-app/ui/index.html）——
+// 浏览器模式由页面内 T 判空自动降级（无组件编排，仅设置功能）。
+const CONSOLE_HTML: &str = include_str!("../../queqiao-app/ui/index.html");
 
 pub struct ConsoleState {
     /// config.json 路径（home 解析）。
