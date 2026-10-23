@@ -150,11 +150,20 @@ fn snowluma_cfg(home: &std::path::Path) -> (String, String) {
     let mut dir = String::new();
     let mut http = String::new();
     if let Ok(raw) = std::fs::read_to_string(home.join("config.json"))
-        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw.trim_start_matches('\u{feff}'))
+        && let Ok(v) =
+            serde_json::from_str::<serde_json::Value>(&raw.trim_start_matches('\u{feff}'))
         && let Some(sl) = v.get("snowluma").and_then(|s| s.as_object())
     {
-        dir = sl.get("homeDir").and_then(|x| x.as_str()).unwrap_or("").into();
-        http = sl.get("httpUrl").and_then(|x| x.as_str()).unwrap_or("").into();
+        dir = sl
+            .get("homeDir")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into();
+        http = sl
+            .get("httpUrl")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into();
     }
     (dir, http)
 }
@@ -203,10 +212,14 @@ fn http_url_alive(http_url: &str) -> bool {
 /// 找 DSH 桌面版主程序（Electron 惯例装在 LOCALAPPDATA\Programs）。
 fn find_dsh_exe() -> Option<std::path::PathBuf> {
     let programs = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("Programs");
-    let base = std::fs::read_dir(&programs).ok()?.into_iter().flatten().find_map(|e| {
-        let name = e.file_name().to_string_lossy().to_string();
-        (name.starts_with("DeepSeek") && e.path().is_dir()).then_some(e.path())
-    })?;
+    let base = std::fs::read_dir(&programs)
+        .ok()?
+        .into_iter()
+        .flatten()
+        .find_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            (name.starts_with("DeepSeek") && e.path().is_dir()).then_some(e.path())
+        })?;
     // 主 exe：目录下最大的 DeepSeek*.exe（Electron 应用同目录常带卸载器等小 exe）。
     std::fs::read_dir(&base)
         .ok()?
@@ -383,8 +396,14 @@ mod tests {
         println!("snowluma_cfg(本地 CWD) = ({dir}, {http})");
         let (dsh, snowluma, bridge) = probe_components(&dir);
         println!("probe = dsh:{dsh} snowluma:{snowluma} bridge:{bridge}");
-        println!("http_url_alive(3000) = {}", http_url_alive("http://127.0.0.1:3000"));
-        println!("find_dsh_exe = {:?}", find_dsh_exe().map(|p| p.display().to_string()));
+        println!(
+            "http_url_alive(3000) = {}",
+            http_url_alive("http://127.0.0.1:3000")
+        );
+        println!(
+            "find_dsh_exe = {:?}",
+            find_dsh_exe().map(|p| p.display().to_string())
+        );
         // homeDir 未配置：-like '**' 修复回归——必须判未运行。
         let (_, s2, _) = probe_components("");
         assert!(!s2, "homeDir 为空时 snowluma 必须判未运行");
