@@ -150,8 +150,7 @@ fn snowluma_cfg(home: &std::path::Path) -> (String, String) {
     let mut dir = String::new();
     let mut http = String::new();
     if let Ok(raw) = std::fs::read_to_string(home.join("config.json"))
-        && let Ok(v) =
-            serde_json::from_str::<serde_json::Value>(&raw.trim_start_matches('\u{feff}'))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
         && let Some(sl) = v.get("snowluma").and_then(|s| s.as_object())
     {
         dir = sl
@@ -212,18 +211,13 @@ fn http_url_alive(http_url: &str) -> bool {
 /// 找 DSH 桌面版主程序（Electron 惯例装在 LOCALAPPDATA\Programs）。
 fn find_dsh_exe() -> Option<std::path::PathBuf> {
     let programs = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("Programs");
-    let base = std::fs::read_dir(&programs)
-        .ok()?
-        .into_iter()
-        .flatten()
-        .find_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            (name.starts_with("DeepSeek") && e.path().is_dir()).then_some(e.path())
-        })?;
+    let base = std::fs::read_dir(&programs).ok()?.flatten().find_map(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        (name.starts_with("DeepSeek") && e.path().is_dir()).then_some(e.path())
+    })?;
     // 主 exe：目录下最大的 DeepSeek*.exe（Electron 应用同目录常带卸载器等小 exe）。
     std::fs::read_dir(&base)
         .ok()?
-        .into_iter()
         .flatten()
         .filter_map(|e| {
             let p = e.path();
