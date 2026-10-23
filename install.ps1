@@ -73,6 +73,39 @@ if (Test-Path $DshHome) {
     Write-Ok "已检测到 $DshHome"
 }
 
+# DSH 基址探测：业务口常态漂移（默认 3080，重启可能换口）。桥运行时探活
+# 失败本就会自动扫（port.rs 同款逻辑）；安装器探测一次让 config 直接拿到
+# 真实值，设置页不再显示误导性的 3080。verify 判定：/api/settings/describe
+# 响应非 404 即为 DSH 口（无鉴权时 401/400 也说明端点在）。
+function Test-DshBase($base) {
+    try {
+        $r = Invoke-WebRequest -Uri "$base/api/settings/describe" -Method Post -Body '{}' -ContentType 'application/json' -TimeoutSec 2 -UseBasicParsing
+        return ($r.StatusCode -ne 404)
+    } catch {
+        $resp = $_.Exception.Response
+        if ($resp) { return ([int]$resp.StatusCode -ne 404) } else { return $false }
+    }
+}
+function Find-DshBase {
+    $ports = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {
+        (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName -match 'DeepSeek'
+    } | ForEach-Object { $_.LocalPort })
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'dsh.*bin\.js web' } | ForEach-Object {
+        $ports += (Get-NetTCPConnection -OwningProcess $_.ProcessId -State Listen -ErrorAction SilentlyContinue).LocalPort
+    }
+    foreach ($p in ($ports | Sort-Object -Unique)) {
+        $base = "http://127.0.0.1:$p"
+        if (Test-DshBase $base) { return $base }
+    }
+    return $null
+}
+$DshBase = if (Test-DshBase 'http://127.0.0.1:3080') { 'http://127.0.0.1:3080' } else { Find-DshBase }
+if ($DshBase) {
+    Write-Ok "DSH 基址：$DshBase（已验证在听）"
+} else {
+    Write-Info 'DSH 基址未探得（DSH 可能未运行）——config 写默认 3080，桥启动探活失败会自动扫描'
+}
+
 # ── 2. SnowLuma（官方发行包原样下载安装）──────────────────────────────────────
 Write-Step 2 'SnowLuma'
 # SnowLuma 判定标志 = 发行包根的 index.mjs。三段式发现：
@@ -223,28 +256,38 @@ Write-Step 5 'config.json'
 $cfgPath = Join-Path $Dist 'config.json'
 if (Test-Path $cfgPath) {
     Write-Ok "已存在 $cfgPath（跳过生成）"
-    # 已有 config 但 snowluma.homeDir 空白：用本次检测到的位置补填。
-    # 不做 JSON 往返改写（PS 的 ConvertTo-Json 会重排/深度截断 200 键配置），
-    # 只做文本级精准插入/替换。
+    # 已有 config 的两处自愈（文本级精准插入/替换——PS 的 JSON 往返会重排
+    # 并深度截断 200 键配置）：① homeDir 空白补填检测到的 SnowLuma 位置；
+    # ② dsh.baseUrl 探活失败且探测到可用基址时替换。
+    $raw = Get-Content $cfgPath -Raw -Encoding UTF8
+    $changed = $false
     if ($SnowLumaHome -and (Test-Snowluma $SnowLumaHome)) {
-        $raw = Get-Content $cfgPath -Raw -Encoding UTF8
         $dirJson = ConvertTo-Json $SnowLumaHome   # 带引号转义的字符串字面量
         if ($raw -match '"homeDir"\s*:\s*("")') {
             $raw = $raw -replace '"homeDir"\s*:\s*""', ('"homeDir": ' + $dirJson)
-            [IO.File]::WriteAllText($cfgPath, $raw)
+            $changed = $true
             Write-Ok "snowluma.homeDir 原为空，已补填：$SnowLumaHome"
         } elseif ($raw -notmatch '"snowluma"' -and $raw -notmatch '"homeDir"') {
             $raw = [regex]::Replace($raw, '\{', '{' + "`n  `"snowluma`": { `"homeDir`": $dirJson },", 1)
-            [IO.File]::WriteAllText($cfgPath, $raw)
+            $changed = $true
             Write-Ok "config 缺 snowluma 段，已补填 homeDir：$SnowLumaHome"
         }
     }
+    if ($DshBase) {
+        $m = [regex]::Match($raw, '"baseUrl"\s*:\s*"([^"]*)"')
+        if ($m.Success -and $m.Groups[1].Value -ne $DshBase -and -not (Test-DshBase $m.Groups[1].Value)) {
+            $raw = [regex]::Replace($raw, '"baseUrl"\s*:\s*"[^"]*"', ('"baseUrl": ' + (ConvertTo-Json $DshBase)), 1)
+            $changed = $true
+            Write-Ok "dsh.baseUrl（$($m.Groups[1].Value)）探活失败，已自愈为 $DshBase"
+        }
+    }
+    if ($changed) { [IO.File]::WriteAllText($cfgPath, $raw) }
 } else {
     $owner = Read-Host '  管理员 QQ 号（ownerQQ，AI 回应管理指令的对象）'
     $groups = Read-Host '  允许 AI 参与的群号（逗号分隔，可留空）'
     $privates = Read-Host '  允许 AI 私聊的 QQ 号（逗号分隔，可留空）'
     $cfg = [ordered]@{
-        dsh = @{ baseUrl = 'http://127.0.0.1:3080'; model = '' }
+        dsh = @{ baseUrl = $(if ($DshBase) { $DshBase } else { 'http://127.0.0.1:3080' }); model = '' }
         snowluma = @{ homeDir = $SnowLumaHome }
         ownerQQ = if ($owner) { [int64]$owner } else { $null }
         allow = @{
