@@ -17,11 +17,15 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::social_store::SocialStore;
+use crate::update::{self, ReleaseInfo};
 
 pub struct ToolApiState {
     pub social: Arc<Mutex<SocialStore>>,
     pub onebot: OneBotHttpClient,
     pub cfg: Config,
+    /// 检测到新版本的回投通道（与启动自动检测共用）：主循环收下后
+    /// 打印更新内容 → 下载 staging → 全体空闲时应用并重启。
+    pub update_tx: tokio::sync::mpsc::Sender<ReleaseInfo>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -149,6 +153,7 @@ pub async fn serve(
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
+        .route("/api/update/check", post(update_check))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -502,6 +507,48 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// 手动检查更新（控制台「检查更新」按钮）：立即查 GitHub latest release。
+/// 发现新版则经 update_tx 转发主循环，与启动自动检测共用下载/应用链路；
+/// 应用时机仍是全体空闲自动，不提供手动强制应用（不打断会话）。
+async fn update_check(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    // 沿用控制台令牌（检查含 release 信息，只该给操作者；空 token 本机放行）。
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    // reqwest blocking 不得嵌 tokio——检测放 spawn_blocking。
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let cur = current.clone();
+    let checked = tokio::task::spawn_blocking(move || update::check_latest(&cur))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    match checked {
+        Ok(None) => ok_json(json!({ "hasUpdate": false, "current": current })),
+        Ok(Some(rel)) => {
+            let tag = rel.tag.clone();
+            let notes = rel.notes.clone();
+            // 通道容量 1：启动检测已投递过则丢弃（下载/应用本就在进行）。
+            let _ = state.update_tx.try_send(rel);
+            ok_json(json!({
+                "hasUpdate": true,
+                "current": current,
+                "tag": tag,
+                "notes": notes,
+            }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("检查更新失败：{e}")),
+    }
 }
 
 /// qq_memory_query：记忆文本块（话题/想法/印象——与注入 prompt 的形态一致）。

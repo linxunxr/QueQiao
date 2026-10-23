@@ -546,6 +546,9 @@ async fn run(setup: Setup) {
         current: std::sync::Mutex::new(cfg.clone()),
         first_run: std::sync::atomic::AtomicBool::new(false),
     });
+    // 自动更新通道：启动异步检测与控制台「检查更新」按钮共用（oneshot
+    // 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic）。
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
@@ -556,6 +559,7 @@ async fn run(setup: Setup) {
             social,
             onebot,
             cfg: cfg_clone,
+            update_tx: update_tx.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
@@ -571,9 +575,7 @@ async fn run(setup: Setup) {
         cfg.console_port
     );
 
-    // 自动更新：异步检测（失败静默）；就绪后经 update_ready 通知主循环。
-    // oneshot 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic。
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
+    // 启动时异步检测一次（失败静默）；控制台手动检查经同一通道汇入。
     {
         tokio::spawn(async move {
             let current = env!("CARGO_PKG_VERSION");

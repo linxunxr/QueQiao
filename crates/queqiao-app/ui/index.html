@@ -47,6 +47,7 @@
   <button class="ghost" onclick="startBridge()">启动桥</button>
   <button class="ghost" onclick="stopBridge()">停止桥</button>
   <button class="ghost" onclick="toggleLog()">日志</button>
+  <button class="ghost" onclick="checkUpdate()">检查更新</button>
 </div>
 <div id="log" style="display:none"></div>
 <main>
@@ -219,6 +220,20 @@ async function exportDiag() {
     a.click();
     toast('诊断包已导出', true);
   } catch (e) { toast('导出失败：' + e.message, false); }
+}
+
+async function checkUpdate() {
+  toast('正在检查更新…', true);
+  try {
+    const r = await fetch(BRIDGE + '/api/update/check', { method: 'POST' });
+    const res = await r.json();
+    const v = res.value || res;
+    if (!res.ok) { toast(res.error || '检查失败', false); return; }
+    if (!v.hasUpdate) { toast('已是最新版本 v' + v.current, true); return; }
+    const brief = (v.notes || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).slice(0, 10).join('\n');
+    alert('发现新版本 ' + v.tag + '（当前 v' + v.current + '）\n\n' + brief + '\n\n已开始后台下载，桥空闲时将自动应用并重启。');
+    toast('新版本 ' + v.tag + ' 下载中，空闲时自动应用', true);
+  } catch (e) { toast('检查失败：' + e.message, false); }
 }
 </script>
 </body>
