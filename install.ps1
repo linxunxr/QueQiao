@@ -65,7 +65,9 @@ if (-not $SnowLumaHome -or -not (Test-SnowLuma $SnowLumaHome)) {
         'D:\SnowLuma', 'D:\Tools\SnowLuma', 'C:\SnowLuma'
     )
     # 从 config.json 里找用户已配置的 homeDir（安装过 Node 版桥或设置过的）。
-    foreach ($base in @($InstallDir, "$env:LOCALAPPDATA\QueQiao", (Join-Path $RepoRoot 'dist'))) {
+    # 注意 $InstallDir 此时可能还是空串（交互询问在第 4 步）——空基目录跳过。
+    $bases = @($InstallDir, "$env:LOCALAPPDATA\QueQiao", (Join-Path $RepoRoot 'dist')) | Where-Object { $_ }
+    foreach ($base in $bases) {
         $cfgFile = Join-Path $base 'config.json'
         if (Test-Path $cfgFile) {
             try {
@@ -83,11 +85,12 @@ if (-not $SnowLumaHome -or -not (Test-SnowLuma $SnowLumaHome)) {
         Write-Info '未在常见位置找到 SnowLuma（扫描了用户目录/本地程序目录/常见盘符根，'
         Write-Info '以及 config.json 里的 snowluma.homeDir）。'
         $answer = Read-Host '  若已安装在别处，输入其目录（发行包根，含 index.mjs）；直接回车 = 全新下载安装'
-        if ($answer.Trim() -and (Test-Snowluma $answer.Trim())) {
-            $SnowLumaHome = $answer.Trim()
+        $trimmed = if ($null -ne $answer) { "$answer".Trim() } else { '' }
+        if ($trimmed -and (Test-Snowluma $trimmed)) {
+            $SnowLumaHome = $trimmed
             Write-Ok "使用指定目录：$SnowLumaHome"
-        } elseif ($answer.Trim()) {
-            throw "指定目录未找到 index.mjs（$($answer.Trim())）——请确认是发行包解压根目录"
+        } elseif ($trimmed) {
+            throw "指定目录未找到 index.mjs（$trimmed）——请确认是发行包解压根目录"
         } else {
             $SnowLumaHome = "$env:USERPROFILE\SnowLuma"
         }
