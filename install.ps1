@@ -180,18 +180,29 @@ foreach ($p in 'qq-chat', 'qq-chat-v2') {
     Write-Ok "$p → $presetDst\$p"
 }
 
-# ── 4. 构建 + dist 布局 ──────────────────────────────────────────────────────
-Write-Step 4 '构建 queqiao'
-Push-Location $RepoRoot
-cargo build --release
-if ($LASTEXITCODE -ne 0) { throw '构建失败' }
-Pop-Location
+# ── 4. 部署 queqiao（发布包直接复制；源码布局才本地构建）────────────────────
+Write-Step 4 '部署 queqiao'
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
-Write-Ok "安装目录：$Dist"
-Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
-Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
-Copy-Item (Join-Path $RepoRoot 'THIRD_PARTY_NOTICES.md') $Dist -Force
+# 发布包布局（Release zip）：脚本同目录自带构建好的 exe——直接复制，无需 Rust。
+# 源码布局（git clone）：本地构建（要求 Rust 工具链）。
+$shipped = @('queqiao.exe', 'queqiao-mcp.exe', 'queqiao-app.exe') |
+    Where-Object { Test-Path (Join-Path $RepoRoot $_) }
+if ($shipped.Count -ge 2) {
+    Write-Ok "发布包自带可执行文件（$($shipped.Count) 个）——直接部署，无需 Rust 工具链"
+    foreach ($exe in $shipped) { Copy-Item (Join-Path $RepoRoot $exe) $Dist -Force }
+} else {
+    Write-Info '源码安装：本地构建 release（需 Rust 工具链）…'
+    Push-Location $RepoRoot
+    cargo build --release
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw '构建失败' }
+    Pop-Location
+    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
+    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
+    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-app.exe') $Dist -Force
+}
+$notice = Join-Path $RepoRoot 'THIRD_PARTY_NOTICES.md'
+if (Test-Path $notice) { Copy-Item $notice $Dist -Force }
 if ($NodeBridge -and (Test-Path $NodeBridge)) {
     if (-not (Test-Path (Join-Path $Dist 'config.json'))) {
         Copy-Item (Join-Path $NodeBridge 'config.json') $Dist

@@ -41,8 +41,13 @@ if (-not $InstallDir) {
 }
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
-Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
-Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
+if ($shipped.Count -ge 2) {
+    foreach ($exe in $shipped) { Copy-Item (Join-Path $RepoRoot $exe) $Dist -Force }
+} else {
+    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
+    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
+    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-app.exe') $Dist -Force
+}
 # 首次部署：从 Node 版桥带一份配置与状态（会话映射/唤醒配置沿用，无缝切换）。
 if ($NodeBridge -and (Test-Path $NodeBridge)) {
     if (-not (Test-Path (Join-Path $Dist 'config.json'))) {
