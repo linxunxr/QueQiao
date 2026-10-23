@@ -19,7 +19,7 @@
 
 ### 修复
 
-- 桥运行时 panic（自动更新通道在事件多路复用中被重复消费）；首次向导与升级部署的 preset 源路径错误；Windows PowerShell 对无 BOM UTF-8 脚本的 ANSI 误读（安装器/迁移器均补 BOM）。
+- 桥运行时 panic（自动更新通道在事件多路复用中被重复消费）；首次向导与升级部署的 preset 源路径错误；Windows PowerShell 对无 BOM UTF-8 脚本的 ANSI 误读（安装器/迁移器均补 BOM）；安装器三段式发现的空串崩溃（InstallDir 未定时的 Join-Path 空基目录、非交互场景 Read-Host 返回 null——v0.2.1 用户实测报告，两处均已修）。
 
 ## [0.2.0] - 2026-10-22
 
