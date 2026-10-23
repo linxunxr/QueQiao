@@ -13,6 +13,8 @@
 #     token-usage.jsonl  花费记账
 #     current-role.json  当前人格卡
 #     mode.json          运行模式
+#     tool-calls.jsonl   工具调用审计流水（回溯 AI 做过什么）
+#     qq-activity.log    会话活动历史（Node 版的活动流水，供回溯）
 #   roles/               人格卡（<名称>.md 全部）
 # 不迁：*.log、*.lock、console-token（令牌换新）、agents/（会话工作目录）、
 #       slang-agent/、*-shots/、feedback.json（反馈已处理记录）。
@@ -61,7 +63,8 @@ Copy-One (Join-Path $NodeBridge 'config.json') (Join-Path $InstallDir 'config.js
 # state/ 用户数据白名单
 $stateFiles = @(
     'sessions.json', 'social-v2.json', 'diary.jsonl', 'stickers.json',
-    'slang.json', 'token-usage.jsonl', 'current-role.json', 'mode.json'
+    'slang.json', 'token-usage.jsonl', 'current-role.json', 'mode.json',
+    'tool-calls.jsonl', 'qq-activity.log'
 )
 foreach ($f in $stateFiles) {
     Copy-One (Join-Path $NodeBridge "state\$f") (Join-Path $InstallDir "state\$f")
