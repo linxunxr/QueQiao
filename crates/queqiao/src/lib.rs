@@ -6,6 +6,7 @@
 pub mod config;
 pub mod console;
 pub mod logging;
+pub mod memory;
 pub mod orchestrator;
 pub mod paths;
 pub mod prompt;

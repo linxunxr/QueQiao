@@ -149,6 +149,13 @@ pub async fn serve(
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
+        .route("/api/socialV2/memory", get(memory_list))
+        .route("/api/socialV2/memory-append", post(memory_append))
+        .route("/api/socialV2/memory-remove", post(memory_remove))
+        .route("/api/socialV2/memory-clear", post(memory_clear))
+        .route("/api/socialV2/recent-messages", get(recent_messages))
+        .route("/api/socialV2/my-recent-messages", get(recent_messages))
+        .route("/api/socialV2/message-detail", get(message_detail))
         // CORS：桌面客户端（Tauri webview）与浏览器页面跨域访问本地桥 API。
         // 本服务只绑 127.0.0.1，放开 origin 无外网暴露面。
         .layer(axum::middleware::from_fn(cors_mw))
@@ -495,4 +502,226 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// qq_memory_query：记忆文本块（话题/想法/印象——与注入 prompt 的形态一致）。
+async fn memory_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.memory,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let store = state.social.lock().unwrap();
+    let now = crate::session_manager::SessionManager::now_ms();
+    let block = store
+        .conversation(&key)
+        .map(|st| crate::memory::format_memory(st, now))
+        .unwrap_or_default();
+    ok_json(json!({ "memory": block }))
+}
+
+/// qq_memory_append：追加记忆（activeTopic / pendingThought / memberImpression）。
+async fn memory_append(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.memory) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let category = body
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if content.trim().is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "content 不能为空");
+    }
+    let extra = crate::memory::MemoryExtra {
+        participants: body
+            .get("participants")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        pending_question: body
+            .get("pendingQuestion")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        motivation: body
+            .get("motivation")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        expires_at_ms: body.get("expiresAtMs").and_then(Value::as_u64),
+        target: body
+            .get("target")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    let now = crate::session_manager::SessionManager::now_ms();
+    let mut store = state.social.lock().unwrap();
+    let st = store.conversation_mut(&key);
+    let written = crate::memory::append(st, category, content, &extra, now);
+    st.last_action_at = now;
+    store.save();
+    if written {
+        ok_json(json!({ "appended": true, "category": category }))
+    } else {
+        denied(
+            StatusCode::BAD_REQUEST,
+            "未知 category（activeTopic/pendingThought/memberImpression）或缺少 target",
+        )
+    }
+}
+
+/// qq_memory_remove：按类别 + 内容精确匹配删除。
+async fn memory_remove(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.memory) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let category = body
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut store = state.social.lock().unwrap();
+    let st = store.conversation_mut(&key);
+    let removed = crate::memory::remove(st, category, content);
+    store.save();
+    if removed {
+        ok_json(json!({ "removed": true }))
+    } else {
+        denied(StatusCode::NOT_FOUND, "未找到匹配的记忆条目")
+    }
+}
+
+/// qq_memory_clear：清空类别（或 all）。
+async fn memory_clear(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.memory) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let category = body
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or("all");
+    let mut store = state.social.lock().unwrap();
+    let ok = crate::memory::clear(store.conversation_mut(&key), category);
+    store.save();
+    if ok {
+        ok_json(json!({ "cleared": category }))
+    } else {
+        denied(StatusCode::BAD_REQUEST, "未知 category")
+    }
+}
+
+/// qq_get_recent_messages（含 my-recent 别名）：最近消息（倒序，默认 20 条）。
+async fn recent_messages(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.get_recent,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let limit: usize = q
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20)
+        .min(100);
+    let only_self = q.contains_key("onlySelf");
+    let store = state.social.lock().unwrap();
+    let messages: Vec<Value> = store
+        .conversation(&key)
+        .map(|st| {
+            st.recent_messages
+                .iter()
+                .rev()
+                .filter(|m| !only_self || m.is_self)
+                .take(limit)
+                .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                .collect()
+        })
+        .unwrap_or_default();
+    ok_json(json!({ "messages": messages, "count": messages.len() }))
+}
+
+/// qq_get_message_detail：按 messageId 查单条消息（含媒体信息）。
+async fn message_detail(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.get_message_detail,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let Some(message_id) = q.get("messageId") else {
+        return denied(StatusCode::BAD_REQUEST, "缺少 messageId");
+    };
+    let store = state.social.lock().unwrap();
+    let found = store.conversation(&key).and_then(|st| {
+        st.recent_messages
+            .iter()
+            .chain(st.unread.iter())
+            .find(|m| &m.message_id == message_id)
+            .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+    });
+    match found {
+        Some(m) => ok_json(m),
+        None => denied(
+            StatusCode::NOT_FOUND,
+            "近期记录中找不到该 messageId（只能查本会话缓冲内的消息）",
+        ),
+    }
 }

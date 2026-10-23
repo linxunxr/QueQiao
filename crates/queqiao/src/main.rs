@@ -846,7 +846,32 @@ impl Executor {
                             reply_remaining_ms: self.wake_cfg.reply_remaining_ms,
                         }
                     };
+                    // 记忆注入（Node 版 memoryLine 语义：话题/想法/印象随唤醒出现）。
+                    let memory_block = {
+                        let social = self.social.lock().unwrap();
+                        social
+                            .conversation(&key)
+                            .map(|st| {
+                                let now = now_ms();
+                                let block = queqiao::memory::format_memory(st, now);
+                                if block.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "{block}
+
+"
+                                    )
+                                }
+                            })
+                            .unwrap_or_default()
+                    };
                     let text = queqiao::prompt::build_wake_prompt(&ctx, &reason);
+                    let text = if memory_block.is_empty() {
+                        text
+                    } else {
+                        format!("{memory_block}{text}")
+                    };
                     let sessions = self.sessions.clone();
                     let key_for_task = key.clone();
                     let reason_for_log = reason.clone();
