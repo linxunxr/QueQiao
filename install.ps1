@@ -116,7 +116,8 @@ if (-not $SnowLumaHome -or -not (Test-SnowLuma $SnowLumaHome)) {
         } elseif ($trimmed) {
             throw "指定目录未找到 index.mjs（$trimmed）——请确认是发行包解压根目录"
         } else {
-            $SnowLumaHome = "$env:USERPROFILE\SnowLuma"
+            # 全新下载：装进用户选择的安装目录（与鹊桥同处；未选目录时回落用户目录）。
+            $SnowLumaHome = if ($InstallDir) { Join-Path $InstallDir 'SnowLuma' } else { "$env:USERPROFILE\SnowLuma" }
         }
     }
 }
@@ -168,7 +169,7 @@ if (Test-Snowluma $SnowLumaHome) {
     Write-Ok "已安装到 $SnowLumaHome（$($rel.tag_name)）"
     Write-Info '接下来请启动 SnowLuma：登录目标 QQ → 设置里开启 OneBot 服务；'
     Write-Info '完成后 config/onebot_<QQ号>.json 会出现（queqiao 靠它自动发现 token）。'
-    Read-Host '  按$回车继续（可稍后完成，config.json 的 snowluma.homeDir 已按此路径生成）'
+    Read-Host '  按$回车继续（可稍后完成，config.json 的 snowluma.homeDir 将指向此路径）'
 }
 
 # ── 3. preset 部署 ────────────────────────────────────────────────────────────
@@ -222,6 +223,22 @@ Write-Step 5 'config.json'
 $cfgPath = Join-Path $Dist 'config.json'
 if (Test-Path $cfgPath) {
     Write-Ok "已存在 $cfgPath（跳过生成）"
+    # 已有 config 但 snowluma.homeDir 空白：用本次检测到的位置补填。
+    # 不做 JSON 往返改写（PS 的 ConvertTo-Json 会重排/深度截断 200 键配置），
+    # 只做文本级精准插入/替换。
+    if ($SnowLumaHome -and (Test-Snowluma $SnowLumaHome)) {
+        $raw = Get-Content $cfgPath -Raw -Encoding UTF8
+        $dirJson = ConvertTo-Json $SnowLumaHome   # 带引号转义的字符串字面量
+        if ($raw -match '"homeDir"\s*:\s*("")') {
+            $raw = $raw -replace '"homeDir"\s*:\s*""', ('"homeDir": ' + $dirJson)
+            [IO.File]::WriteAllText($cfgPath, $raw)
+            Write-Ok "snowluma.homeDir 原为空，已补填：$SnowLumaHome"
+        } elseif ($raw -notmatch '"snowluma"' -and $raw -notmatch '"homeDir"') {
+            $raw = [regex]::Replace($raw, '\{', '{' + "`n  `"snowluma`": { `"homeDir`": $dirJson },", 1)
+            [IO.File]::WriteAllText($cfgPath, $raw)
+            Write-Ok "config 缺 snowluma 段，已补填 homeDir：$SnowLumaHome"
+        }
+    }
 } else {
     $owner = Read-Host '  管理员 QQ 号（ownerQQ，AI 回应管理指令的对象）'
     $groups = Read-Host '  允许 AI 参与的群号（逗号分隔，可留空）'
