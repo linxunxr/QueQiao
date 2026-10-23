@@ -138,6 +138,132 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+// ── 三件套编排：DSH → SnowLuma → 桥 ─────────────────────────────────────────
+//
+// SnowLuma 只探测、不启停（Node 版 mcp-host-server.js 2026-09-20 的裁决：
+// EULA §5.4 把"通过自动化脚本部署"专有组件列入须书面授权范围，程序化拉起
+// 落在射程内——不变量 L6"只探测、不部署"）。未运行时给可操作的提示
+// （打开目录请用户双击 launcher.bat）。DSH 与桥是自有/无限制软件，可代劳。
+
+/// 桥 config 的 snowluma 段（homeDir/httpUrl——探测与提示用）。
+fn snowluma_cfg(home: &std::path::Path) -> (String, String) {
+    let mut dir = String::new();
+    let mut http = String::new();
+    if let Ok(raw) = std::fs::read_to_string(home.join("config.json"))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw.trim_start_matches('\u{feff}'))
+        && let Some(sl) = v.get("snowluma").and_then(|s| s.as_object())
+    {
+        dir = sl.get("homeDir").and_then(|x| x.as_str()).unwrap_or("").into();
+        http = sl.get("httpUrl").and_then(|x| x.as_str()).unwrap_or("").into();
+    }
+    (dir, http)
+}
+
+/// 一条 PowerShell 查三态：DSH 进程 / SnowLuma 进程 / queqiao.exe 进程。
+/// 输出 "dsh|snowluma|bridge"（True/False）。
+fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
+    let esc = snowluma_dir.replace('\'', "''");
+    let script = format!(
+        "$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue; \
+         $d = [bool]($procs | Where-Object {{ $_.Name -match '^DeepSeek' -or ($_.CommandLine -and $_.CommandLine -match 'dsh.*bin\\.js +web') }}); \
+         $s = [bool]($procs | Where-Object {{ $_.CommandLine -and $_.CommandLine -like '*{esc}*' }}); \
+         $b = [bool]($procs | Where-Object {{ $_.Name -eq 'queqiao.exe' }}); \
+         \"$d|$s|$b\""
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output();
+    let text = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return (false, false, false),
+    };
+    let mut it = text.split('|').map(|t| t.trim() == "True");
+    let dsh = it.next().unwrap_or(false);
+    // homeDir 未配置时 `-like '**'` 会匹配一切进程——恒判未运行。
+    let snowluma = !snowluma_dir.trim().is_empty() && it.next().unwrap_or(false);
+    (dsh, snowluma, it.next().unwrap_or(false))
+}
+
+/// SnowLuma 的 OneBot HTTP 口是否可达（桥 discover panic 的前置条件——
+/// 一键启动必须等它就绪才起桥）。
+fn http_url_alive(http_url: &str) -> bool {
+    let url = http_url
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let Some((host, port)) = url.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(1200)).is_ok()
+}
+
+/// 找 DSH 桌面版主程序（Electron 惯例装在 LOCALAPPDATA\Programs）。
+fn find_dsh_exe() -> Option<std::path::PathBuf> {
+    let programs = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("Programs");
+    let base = std::fs::read_dir(&programs).ok()?.into_iter().flatten().find_map(|e| {
+        let name = e.file_name().to_string_lossy().to_string();
+        (name.starts_with("DeepSeek") && e.path().is_dir()).then_some(e.path())
+    })?;
+    // 主 exe：目录下最大的 DeepSeek*.exe（Electron 应用同目录常带卸载器等小 exe）。
+    std::fs::read_dir(&base)
+        .ok()?
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_string_lossy().to_string();
+            let size = p.metadata().ok()?.len();
+            (name.starts_with("DeepSeek") && name.ends_with(".exe")).then_some((p, size))
+        })
+        .max_by_key(|(_, size)| *size)
+        .map(|(p, _)| p)
+}
+
+#[tauri::command]
+fn components_status(state: tauri::State<'_, BridgeState>) -> serde_json::Value {
+    let (dir, http) = snowluma_cfg(&state.home);
+    let (dsh, snowluma, bridge_proc) = probe_components(&dir);
+    serde_json::json!({
+        "dsh": dsh,
+        "snowluma": snowluma,
+        "snowlumaHttp": http_url_alive(&http),
+        "snowlumaDir": dir,
+        // 桥：本壳 child 或系统进程任一在跑即运行（手动直跑 queqiao.exe 也算）。
+        "bridge": state.running() || bridge_proc,
+        "dshPath": find_dsh_exe().map(|p| p.display().to_string()),
+    })
+}
+
+#[tauri::command]
+fn start_dsh() -> Result<String, String> {
+    let exe = find_dsh_exe().ok_or_else(|| {
+        "未找到 DeepSeek Harness（LOCALAPPDATA\\Programs\\DeepSeek*）——请手动启动 DSH".to_owned()
+    })?;
+    let name = exe.display().to_string();
+    Command::new(&exe)
+        .creation_flags(0x0800_0000) // DETACHED：DSH 独立运行，生命周期不随客户端
+        .spawn()
+        .map_err(|e| format!("启动 DSH 失败：{e}"))?;
+    Ok(name)
+}
+
+/// 打开 SnowLuma 所在目录（资源管理器）——不是启停，只是给用户可操作的提示。
+#[tauri::command]
+fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String> {
+    let (dir, _) = snowluma_cfg(&state.home);
+    if dir.is_empty() {
+        return Err("config 未配置 snowluma.homeDir".to_owned());
+    }
+    Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开目录失败：{e}"))
+}
+
 #[tauri::command]
 fn bridge_start(app: tauri::AppHandle, state: tauri::State<'_, BridgeState>) -> Result<(), String> {
     state.spawn(&app)
@@ -158,7 +284,10 @@ fn main() {
             bridge_status,
             bridge_start,
             bridge_stop,
-            app_version
+            app_version,
+            components_status,
+            start_dsh,
+            open_snowluma_dir
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -241,4 +370,23 @@ fn home_dir() -> std::path::PathBuf {
         return dir.to_path_buf();
     }
     std::env::current_dir().unwrap_or_else(|_| ".".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 真机冒烟：三件套探测不 panic、结果可解释（具体值随环境，不断言）。
+    #[test]
+    fn probe_components_smoke() {
+        let (dir, http) = snowluma_cfg(std::path::Path::new("."));
+        println!("snowluma_cfg(本地 CWD) = ({dir}, {http})");
+        let (dsh, snowluma, bridge) = probe_components(&dir);
+        println!("probe = dsh:{dsh} snowluma:{snowluma} bridge:{bridge}");
+        println!("http_url_alive(3000) = {}", http_url_alive("http://127.0.0.1:3000"));
+        println!("find_dsh_exe = {:?}", find_dsh_exe().map(|p| p.display().to_string()));
+        // homeDir 未配置：-like '**' 修复回归——必须判未运行。
+        let (_, s2, _) = probe_components("");
+        assert!(!s2, "homeDir 为空时 snowluma 必须判未运行");
+    }
 }

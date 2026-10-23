@@ -30,7 +30,10 @@
   .tag b { cursor:pointer; color:var(--dim); margin-left:5px; font-weight:normal; }
   .chips { display:flex; gap:8px; }
   .chips input { flex:1; background:#0d1114; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 9px; }
-  #bridgebar { display:flex; gap:14px; align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); background:#141a20; }
+  #bridgebar { display:flex; gap:14px; align-items:center; padding:10px 18px; border-bottom:1px solid var(--line); background:#141a20; flex-wrap:wrap; }
+.comp { font-size:12px; color:var(--dim); padding:2px 8px; border:1px solid var(--line); border-radius:4px; white-space:nowrap; }
+.comp.on { color:var(--ok); border-color:var(--ok); }
+.comp.off { color:#e05560; border-color:#e05560; }
   #dot { width:10px; height:10px; border-radius:50%; background:#666; }
   #dot.on { background:var(--ok); box-shadow:0 0 6px var(--ok); }
   #dot.off { background:#e05560; }
@@ -42,9 +45,11 @@
 <body>
 <header><h1>鹊桥</h1><span class="ver" id="ver"></span><span class="hint" id="mode"></span></header>
 <div id="bridgebar">
-  <div id="dot"></div>
-  <span class="hint" id="bridgeMsg">桥：检测中…</span>
-  <button class="ghost" onclick="startBridge()">启动桥</button>
+  <span class="comp" id="c-dsh">DSH：检测中…</span>
+  <span class="comp" id="c-sl">SnowLuma：检测中…</span>
+  <span class="comp" id="c-bridge"><span id="bridgeMsg">桥：检测中…</span></span>
+  <span class="hint" id="orchMsg" style="flex:1"></span>
+  <button onclick="startAll()">一键启动</button>
   <button class="ghost" onclick="stopBridge()">停止桥</button>
   <button class="ghost" onclick="toggleLog()">日志</button>
   <button class="ghost" onclick="checkUpdate()">检查更新</button>
@@ -106,26 +111,77 @@
 <script>
 const BRIDGE = localStorage.getItem('bridgeBase') || 'http://127.0.0.1:3100';
 const $ = id => document.getElementById(id);
-function setDot(on, missing) {
-  const d = $('dot'); d.className = missing ? 'off' : (on ? 'on' : '');
-  $('bridgeMsg').textContent = missing ? '桥：未找到 queqiao.exe' : (on ? '桥：运行中' : '桥：已停止');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 浏览器直开控制台页时无 Tauri 桥——判空防脚本中断（Tauri-only 调用全部经 T）。
+const T = window.__TAURI__ || null;
+
+async function refreshComponents() {
+  let st = { dsh: false, snowluma: false, snowlumaHttp: false, bridge: false };
+  try { st = await T.core.invoke('components_status'); } catch (e) { /* 非 Tauri 环境保持默认 */ }
+  setComp('c-dsh', st.dsh, 'DSH', '未运行（可代劳启动）');
+  const slOk = st.snowluma && st.snowlumaHttp;
+  setComp('c-sl', slOk, 'SnowLuma', st.snowluma ? '运行中，OneBot 未就绪' : '未运行（不代劳：双击 launcher.bat）');
+  setComp('c-bridge', st.bridge, '桥', '已停止', '运行中');
+  return st;
 }
-async function refreshBridge() {
+function setComp(id, ok, name, offText, onText) {
+  const el = $(id);
+  el.textContent = name + '：' + (ok ? (onText || '运行 ✓') : offText);
+  el.className = 'comp ' + (ok ? 'on' : 'off');
+}
+
+// 一键启动编排：DSH（没跑自动拉起，自有软件）→ SnowLuma（只探测不代劳，
+// EULA 边界——提示+打开目录，等 OneBot HTTP 就绪）→ 桥（就绪后才起，
+// 避开桥 discover 阶段 SnowLuma 缺位即退出的行为）。
+let orchBusy = false;
+async function startAll() {
+  if (orchBusy) return;
+  orchBusy = true;
+  const msg = $('orchMsg');
   try {
-    const r = await window.__TAURI__.core.invoke('bridge_status');
-    setDot(r.running, !r.path);
-  } catch (e) { setDot(false, false); }
+    msg.textContent = '检测各组件…';
+    let st = await refreshComponents();
+    if (!st.dsh) {
+      msg.textContent = 'DSH 未运行——正在启动…';
+      try { const p = await T.core.invoke('start_dsh'); toast('已拉起 ' + p, true); }
+      catch (e) { toast(String(e), false); }
+      for (let i = 0; i < 10 && !(await refreshComponents()).dsh; i++) await sleep(3000);
+    }
+    st = await refreshComponents();
+    if (!st.snowlumaHttp) {
+      if (!st.snowluma) {
+        msg.textContent = '等待 SnowLuma——请双击其目录下 launcher.bat 并登录 QQ';
+        try { await T.core.invoke('open_snowluma_dir'); } catch (e) { }
+        toast('SnowLuma 不自动启动（授权边界）——手动启动后自动继续', true);
+      } else {
+        msg.textContent = 'SnowLuma 已运行——等待 OneBot 服务就绪（登录 QQ 并开启 OneBot）';
+      }
+    }
+    let ready = st.snowlumaHttp;
+    for (let i = 0; !ready && i < 100; i++) { await sleep(3000); ready = (await refreshComponents()).snowlumaHttp; }
+    if (!ready) { msg.textContent = '等待超时：SnowLuma OneBot 一直未就绪——就绪后可再点一键启动'; toast('等待 SnowLuma 超时', false); return; }
+    msg.textContent = 'SnowLuma 就绪——启动桥…';
+    try { await T.core.invoke('bridge_start'); }
+    catch (e) { toast(String(e), false); return; }
+    msg.textContent = '三件套就绪 ✓';
+    toast('DSH / SnowLuma / 桥 已全部就绪', true);
+    load();
+  } finally {
+    orchBusy = false;
+    setTimeout(() => { if ($('orchMsg').textContent.indexOf('超时') < 0) $('orchMsg').textContent = ''; }, 6000);
+  }
 }
-async function startBridge() { try { await window.__TAURI__.core.invoke('bridge_start'); } catch (e) { alert(e); } setTimeout(refreshBridge, 800); }
-async function stopBridge() { await window.__TAURI__.core.invoke('bridge_stop'); setTimeout(refreshBridge, 400); }
+
+async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { alert(e); } refreshComponents(); }
 function toggleLog() { const l = $('log'); l.style.display = l.style.display === 'none' ? 'block' : 'none'; }
-window.__TAURI__.event.listen('bridge-log', e => {
+if (T) T.event.listen('bridge-log', e => {
   const l = $('log'); l.textContent += (l.textContent ? '
 ' : '') + e.payload;
   l.scrollTop = l.scrollHeight;
 });
-window.__TAURI__.event.listen('bridge-state', e => setDot(e.payload.running, e.payload.missing));
-setInterval(refreshBridge, 5000);
+if (T) T.event.listen('bridge-state', () => refreshComponents());
+setInterval(refreshComponents, 5000);
+refreshComponents();
 
 let cfg = null;
 const chipLists = { groups: [], private: [] };
@@ -214,7 +270,7 @@ async function save() {
 }
 // 版本号不依赖桥在线：Tauri 客户端直接报自身版本（桥与客户端同版本发布）；
 // 浏览器模式回落到桥在线后 load() 用 _version 填。
-(async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await window.__TAURI__.core.invoke('app_version'); } catch (e) {} })();
+(async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await T.core.invoke('app_version'); } catch (e) {} })();
 load();
 
 async function exportDiag() {
