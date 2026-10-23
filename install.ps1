@@ -30,6 +30,13 @@ $ErrorActionPreference = 'Stop'
 # install.ps1 在仓库根（Release zip 里在安装根）：RepoRoot 即脚本所在目录。
 $RepoRoot = $PSScriptRoot
 
+$DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
+$Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
+
+function Write-Step($n, $msg) { Write-Host "`n== $n/6 $msg ==" -ForegroundColor Cyan }
+function Write-Ok($msg) { Write-Host "  $msg" -ForegroundColor Green }
+function Write-Info($msg) { Write-Host "  $msg" -ForegroundColor Yellow }
+
 # ── 0. 选择安装目录（最先做：后续 config 扫描与 SnowLuma 发现都依赖它）──────
 Write-Host "`n== 0/6 选择安装目录 ==" -ForegroundColor Cyan
 $defaultDir = "$env:LOCALAPPDATA\QueQiao"
@@ -52,12 +59,6 @@ if (-not $InstallDir) {
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Write-Ok "安装目录：$InstallDir"
-$DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
-$Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
-
-function Write-Step($n, $msg) { Write-Host "`n== $n/6 $msg ==" -ForegroundColor Cyan }
-function Write-Ok($msg) { Write-Host "  $msg" -ForegroundColor Green }
-function Write-Info($msg) { Write-Host "  $msg" -ForegroundColor Yellow }
 
 # ── 1. DSH ────────────────────────────────────────────────────────────────────
 Write-Step 1 'DSH（DeepSeek Harness）'
