@@ -9,6 +9,13 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x）：缺陷修复与文档，不含行为变更。
 
+## [0.3.0] - 2026-10-23
+
+### 新增
+
+- **轻量记忆域（迁移数据的完整消费链）**：三类记忆——进行中的话题（activeTopic，24h 过期、追加刷新）、想说还没说的（pendingThought，2h TTL）、对群友的印象（memberImpression，按人 trait 去重、50 人上限淘汰）。桥工具 API 新增 6 端点（memory / memory-append / memory-remove / memory-clear / recent-messages / message-detail）；MCP 工具面 6→11（新增 `qq_memory_append` / `qq_memory_query` / `qq_memory_remove` / `qq_get_recent_messages` / `qq_get_message_detail`）。唤醒 prompt 自动注入记忆块（【进行中的话题】【你想说但还没说的】【对群友的印象】），DSH 侧可随时回看近消息与消息详情。
+- **Node 版桥迁移清单补全**：`migrate-from-node.ps1` 补 `state/tool-calls.jsonl`（工具调用审计流水）与 `state/qq-activity.log`（活动历史）——现 15 项，覆盖 config、DSH 会话映射、唤醒状态、社交消息流水、日记、记忆、表情包、黑话、花费记账与全部人格卡。配合记忆域，迁移后数据即刻可消费：实测迁移起桥后记忆查询可读出 Node 版积累的话题与群友印象，并随唤醒 prompt 注入。
+
 ## [0.2.1] - 2026-10-23
 
 ### 新增
