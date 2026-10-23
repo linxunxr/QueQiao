@@ -131,8 +131,13 @@ let cfg = null;
 const chipLists = { groups: [], private: [] };
 
 async function load() {
-  const r = await fetch(BRIDGE + '/api/config');
-  cfg = await r.json();
+  let raw;
+  try { const r = await fetch(BRIDGE + '/api/config'); raw = await r.json(); }
+  catch (e) {
+    document.getElementById('status').textContent = '桥未连接——启动桥后自动加载配置';
+    return;
+  }
+  cfg = raw;
   document.getElementById('ver').textContent = 'queqiao ' + (cfg._version || '');
   document.getElementById('mode').textContent = cfg._firstRun ? '· 首次设置：完成后保存即可启动' : '';
   const v = (id, val) => { const el = document.getElementById(id); if (el !== null) el.value = val ?? ''; };
@@ -207,6 +212,9 @@ async function save() {
     setTimeout(load, 600);
   } else { toast('保存失败：' + (res.error || '未知错误'), false); status.textContent = ''; }
 }
+// 版本号不依赖桥在线：Tauri 客户端直接报自身版本（桥与客户端同版本发布）；
+// 浏览器模式回落到桥在线后 load() 用 _version 填。
+(async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await window.__TAURI__.core.invoke('app_version'); } catch (e) {} })();
 load();
 
 async function exportDiag() {

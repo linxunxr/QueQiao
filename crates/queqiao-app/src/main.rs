@@ -132,6 +132,12 @@ fn bridge_status(state: tauri::State<'_, BridgeState>) -> serde_json::Value {
     })
 }
 
+/// 客户端自身版本（顶栏常显用——不依赖桥在线；桥与客户端同版本发布）。
+#[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 fn bridge_start(app: tauri::AppHandle, state: tauri::State<'_, BridgeState>) -> Result<(), String> {
     state.spawn(&app)
@@ -151,7 +157,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             bridge_status,
             bridge_start,
-            bridge_stop
+            bridge_stop,
+            app_version
         ])
         .setup(|app| {
             let handle = app.handle().clone();
