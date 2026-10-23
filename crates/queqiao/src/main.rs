@@ -232,8 +232,9 @@ fn main() {
 struct Setup {
     ws_url: String,
     ws_token: String,
-    http_base: String,
-    http_token: String,
+    /// 同步 discover 阶段构建（reqwest blocking client 不得在 async
+    /// 上下文创建——runtime-in-runtime panic）。
+    onebot_http: OneBotHttpClient,
     cfg: queqiao::config::Config,
     dsh: std::sync::Arc<std::sync::Mutex<DshClient<ReqwestTransport>>>,
     sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
@@ -337,8 +338,7 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
     Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
         ws_token: ws.token.clone(),
-        http_base: found.base_url.clone(),
-        http_token: found.token.clone(),
+        onebot_http: OneBotHttpClient::new(&found.base_url, &found.token, 8000),
         cfg,
         dsh,
         sessions,
@@ -351,8 +351,7 @@ async fn run(setup: Setup) {
     let ws_url = setup.ws_url;
     let dsh_arc = setup.dsh;
     let sessions_arc = setup.sessions;
-    let http_base = setup.http_base;
-    let http_token = setup.http_token;
+    let onebot_http = setup.onebot_http;
     let social_arc = setup.social;
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
@@ -552,7 +551,7 @@ async fn run(setup: Setup) {
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
-        let onebot = OneBotHttpClient::new(&http_base, &http_token, 8000);
+        let onebot = onebot_http.clone();
         let port = cfg_clone.console_port;
         let console_token = cfg_clone.console_token.clone();
         let state = std::sync::Arc::new(queqiao::tools_api::ToolApiState {
