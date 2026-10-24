@@ -162,6 +162,8 @@ pub async fn serve(
         .route("/api/socialV2/slang/submit", post(slang_submit))
         .route("/api/dsh/catalog", get(dsh_catalog))
         .route("/api/session/reset", post(session_reset))
+        .route("/api/roles", get(roles_list))
+        .route("/api/role", post(role_switch))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -524,6 +526,91 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// 人格卡列表（控制台切换用）：roles/*.md 名单 + 当前角色与 perConv 覆盖。
+async fn roles_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let home = crate::paths::queqiao_home();
+    let mut cards: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(home.join("roles")) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(stem) = name.strip_suffix(".md")
+                && crate::role_card_store::sanitize_output_name(stem)
+            {
+                cards.push(stem.to_owned());
+            }
+        }
+    }
+    cards.sort();
+    let current: Value = std::fs::read_to_string(home.join("state").join("current-role.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or(Value::Null);
+    ok_json(json!({ "roles": cards, "current": current }))
+}
+
+/// 切换当前人格（控制台）：写 current-role.json 的 role 字段（保留 perConv
+/// 等其余字段；原子写）。注入无缓存，下一条消息即刻生效。
+async fn role_switch(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let role = body
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if role.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "role 不能为空");
+    }
+    if !crate::role_card_store::sanitize_output_name(&role) {
+        return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
+    }
+    let home = crate::paths::queqiao_home();
+    if !home.join("roles").join(format!("{role}.md")).exists() {
+        return denied(StatusCode::NOT_FOUND, &format!("roles/{role}.md 不存在"));
+    }
+    let file = home.join("state").join("current-role.json");
+    let mut current: Value = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|raw| serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or_else(|| json!({}));
+    if !current.is_object() {
+        current = json!({});
+    }
+    current["role"] = json!(role);
+    let body_text = serde_json::to_string_pretty(&current).unwrap_or_else(|_| "{}".into());
+    if let Err(e) = crate::state::atomic_write_json(&file, &body_text) {
+        return denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写 current-role.json 失败：{e}"),
+        );
+    }
+    ok_json(json!({ "switched": true, "role": role }))
 }
 
 /// DSH 模型目录（控制台换模型下拉用；session.modelCatalog 回落 session.models）。

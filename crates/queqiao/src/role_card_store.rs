@@ -19,6 +19,11 @@ struct RoleStateFile {
     per_conv: BTreeMap<String, String>,
 }
 
+/// 角色名合法性（列卡/写入共用 core 判定）。
+pub fn sanitize_output_name(name: &str) -> bool {
+    sanitize_role_name(name).is_some()
+}
+
 /// 当前会话生效的角色名（perConv 覆盖全局；净化后拼 roles/<名>.md）。
 pub fn current_role_name(home: &Path, conv_key: &str) -> Option<String> {
     let raw = std::fs::read_to_string(home.join("state").join("current-role.json")).ok()?;

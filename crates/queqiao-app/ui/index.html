@@ -127,6 +127,16 @@
   </section>
 
   <section>
+    <h2>人格卡</h2>
+    <div class="row">
+      <div class="field" style="flex:2 1 240px"><label>当前人格（全局；按会话覆盖需编辑 current-role.json 的 perConv）</label>
+        <select id="f-role"><option value="">（加载中…）</option></select>
+        <div class="hint">切换后下一条消息注入即刻生效（无需重启）</div></div>
+      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="switchRole()">切换人格</button></div>
+    </div>
+  </section>
+
+  <section>
     <h2>DSH（AI 侧）</h2>
     <div class="row">
       <div class="field"><label>基址（baseUrl）</label><input id="f-dshBase" placeholder="http://127.0.0.1:3080"><div class="hint">探活失败会自动扫描端口</div></div>
@@ -384,6 +394,27 @@ async function exportDiag() {
   } catch (e) { toast('导出失败：' + e.message, false); }
 }
 
+async function loadRoles() {
+  try {
+    const r = await fetch(BRIDGE + '/api/roles');
+    const res = await r.json();
+    const v = res.value || {};
+    const cur = (v.current && v.current.role) || '';
+    const sel = document.getElementById('f-role');
+    sel.innerHTML = (v.roles || []).map(n => `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`).join('') || '<option value="">（roles/ 下没有 .md 卡片）</option>';
+  } catch (e) { document.getElementById('f-role').innerHTML = '<option value="">（桥未连接）</option>'; }
+}
+async function switchRole() {
+  const role = document.getElementById('f-role').value;
+  if (!role) { toast('先选择一个人格', false); return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/role', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role }) });
+    const res = await r.json();
+    if (res.ok) { toast('已切换为 ' + role + '（下一条消息生效）', true); }
+    else { toast(res.error || '切换失败', false); }
+  } catch (e) { toast('切换失败：' + e.message, false); }
+}
+
 async function checkUpdate() {
   toast('正在检查更新…', true);
   try {
@@ -403,6 +434,7 @@ async function checkUpdate() {
 // 浏览器模式回落到桥在线后 load() 用 _version 填。
 (async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await T.core.invoke('app_version'); } catch (e) {} })();
 load();
+loadRoles();
 (async function tick() {
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
   if (!document.hidden) {
