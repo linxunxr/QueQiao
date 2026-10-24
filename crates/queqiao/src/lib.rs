@@ -12,6 +12,7 @@ pub mod paths;
 pub mod prompt;
 pub mod role_card_store;
 pub mod session_manager;
+pub mod slang_store;
 pub mod social_store;
 pub mod state;
 pub mod sticker_store;

@@ -80,6 +80,36 @@ fn redact(line: &str) -> String {
 }
 
 /// 本地时间 HH:MM:SS（本地时区；chrono 不引入——从系统 API 取）。
+/// 完整本地时间戳 YYYY-MM-DD HH:MM:SS（kernel32 GetLocalTime；时间行注入用）。
+pub fn local_timestamp() -> Option<String> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct SystemTime {
+            year: u16,
+            month: u16,
+            day_of_week: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            ms: u16,
+        }
+        unsafe extern "system" {
+            fn GetLocalTime(lpsystemtime: *mut SystemTime);
+        }
+        let mut st = SystemTime::default();
+        unsafe { GetLocalTime(&mut st) };
+        Some(format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            st.year, st.month, st.day, st.hour, st.minute, st.second
+        ))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 fn local_clock() -> String {
     // 取本地时间：用 PowerShell 太重，直接读 TZ 环境不可靠——Windows 下
     // GetLocalTime 经 kernel32 最准。简化：chrono 已在依赖树里（间接），

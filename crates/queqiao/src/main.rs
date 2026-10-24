@@ -30,6 +30,11 @@ use queqiao::update;
 
 /// 消息是否 @ 了 bot（at 段 qq 匹配——self_id 本批从 login_info 取，简化为
 /// 任意 at 段都视为 @ 自己之外的目标：at_me 需要精确 self_id，接线批次补全）。
+fn now_local_str(_now_ms: u64) -> String {
+    // kernel32 GetLocalTime（非 Windows 回落毫秒数）。
+    queqiao::logging::local_timestamp().unwrap_or_else(|| _now_ms.to_string())
+}
+
 fn at_self(body: &MessageBody) -> bool {
     match body {
         MessageBody::Array(segments) => segments.iter().any(|s| {
@@ -626,6 +631,7 @@ async fn run(setup: Setup) {
             reply_remaining_ms: cfg.social_v2.wait.default_quiet_ms,
         },
         sticker: cfg.social_v2.sticker.clone(),
+        slang: cfg.slang.clone(),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -778,6 +784,7 @@ struct Executor {
     social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
     wake_cfg: WakePromptConfig,
     sticker: queqiao::config::StickerConfig,
+    slang: queqiao::config::SlangConfig,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -906,11 +913,43 @@ impl Executor {
                     } else {
                         String::new()
                     };
-                    let text = if memory_block.is_empty() && sticker_block.is_empty() {
-                        text
+                    // 黑话表与当前时间前缀（Node withSlangContext：时间行 + 黑话块
+                    // 统一在投递层注入，唤醒 prompt 内不出现第二份）。
+                    let slang_block = if self.slang.enabled {
+                        let file =
+                            queqiao::slang_store::slang_file(&queqiao::paths::queqiao_home());
+                        match queqiao::slang_store::load(&file) {
+                            Ok(entries) => {
+                                let block = queqiao_core::slang::build_context(
+                                    &entries,
+                                    self.slang.inject_max,
+                                );
+                                if block.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "{block}
+
+"
+                                    )
+                                }
+                            }
+                            Err(e) => {
+                                queqiao::logging::log(&format!("[slang] {e}"));
+                                String::new()
+                            }
+                        }
                     } else {
-                        format!("{memory_block}{sticker_block}{text}")
+                        String::new()
                     };
+                    let time_line = format!(
+                        "【当前时间】{}
+
+",
+                        now_local_str(now)
+                    );
+                    let text =
+                        format!("{time_line}{slang_block}{memory_block}{sticker_block}{text}");
                     let sessions = self.sessions.clone();
                     let key_for_task = key.clone();
                     let reason_for_log = reason.clone();

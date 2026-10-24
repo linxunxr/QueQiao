@@ -155,6 +155,8 @@ pub async fn serve(
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/update/check", post(update_check))
         .route("/api/tokens/summary", get(tokens_summary))
+        .route("/api/socialV2/slang/query", get(slang_query))
+        .route("/api/socialV2/slang/submit", post(slang_submit))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -517,6 +519,141 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// qq_slang_query：查已确认黑话表（按出现次数排序；含 candidate 供 AI 了解学习态）。
+async fn slang_query(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.slang_query,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let _ = key;
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let query = q
+        .get("query")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    let mut matched: Vec<&queqiao_core::slang::SlangEntry> = if query.is_empty() {
+        entries.iter().collect()
+    } else {
+        entries
+            .iter()
+            .filter(|e| {
+                format!("{} {} {} {}", e.content, e.meaning, e.usage, e.example)
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect()
+    };
+    matched.sort_by_key(|e| std::cmp::Reverse(e.count));
+    let items: Vec<serde_json::Value> = matched
+        .iter()
+        .take(30)
+        .map(|e| serde_json::to_value(*e).unwrap_or_default())
+        .collect();
+    ok_json(json!({ "total": entries.len(), "matched": matched.len(), "slang": items }))
+}
+
+/// qq_slang_submit：AI 提交/更新词条（candidate 待确认；同 content 覆盖释义）。
+async fn slang_submit(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.slang_submit) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "content 不能为空");
+    }
+    let meaning = body
+        .get("meaning")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let usage = body
+        .get("usage")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let example = body
+        .get("example")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let mut entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let now_iso = crate::logging::local_timestamp().unwrap_or_default();
+    match entries.iter_mut().find(|e| e.content == content) {
+        Some(e) => {
+            // 同词更新：AI 侧补充释义，保留人工确认态。
+            if !meaning.is_empty() {
+                e.meaning = meaning;
+            }
+            if !usage.is_empty() {
+                e.usage = usage;
+            }
+            if !example.is_empty() {
+                e.example = example;
+            }
+            e.count += 1;
+            e.updated_at = now_iso;
+            ok_json(
+                json!({ "updated": true, "entry": serde_json::to_value(&*e).unwrap_or_default() }),
+            )
+        }
+        None => {
+            let entry = queqiao_core::slang::SlangEntry {
+                content,
+                meaning,
+                usage,
+                example,
+                status: "candidate".into(),
+                source: "ai".into(),
+                count: 1,
+                evidence: vec![queqiao_core::slang::SlangEvidence {
+                    key,
+                    sender: "ai".into(),
+                    text: "AI 提交".into(),
+                    time: crate::session_manager::SessionManager::now_ms(),
+                }],
+                created_at: now_iso.clone(),
+                updated_at: now_iso,
+                ..Default::default()
+            };
+            let v = serde_json::to_value(&entry).unwrap_or_default();
+            entries.push(entry);
+            let _ = crate::slang_store::save(&file, entries);
+            ok_json(json!({ "updated": false, "entry": v }))
+        }
+    }
 }
 
 /// 花费汇总（Node /api/tokens/summary 子集）：仅控制台可用——记账是给操作者

@@ -33,6 +33,7 @@ pub mod runtime;
 pub mod schedule;
 pub mod search;
 pub mod session_router;
+pub mod slang;
 pub mod sticker;
 pub mod token_ledger;
 pub mod triggers;

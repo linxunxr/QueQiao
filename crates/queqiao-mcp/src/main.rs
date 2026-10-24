@@ -149,6 +149,27 @@ const TOOLS: &[ToolDef] = &[
         ],
     },
     ToolDef {
+        name: "qq_slang_query",
+        description: "查群聊黑话表（梗/网络用语的含义与用法，按出现次数排序）",
+        endpoint: "slang/query",
+        method: "GET",
+        flag: Some("slangQuery"),
+        params: &[("query", "string", false, "关键词（匹配词条/含义/用法）")],
+    },
+    ToolDef {
+        name: "qq_slang_submit",
+        description: "提交/更新一条黑话释义（同词条已存在则补充释义；新词条为 candidate 待确认）",
+        endpoint: "slang/submit",
+        method: "POST",
+        flag: Some("slangSubmit"),
+        params: &[
+            ("content", "string", true, "黑话词条本身（50 字内）"),
+            ("meaning", "string", true, "含义（300 字内）"),
+            ("usage", "string", false, "用法说明（可选）"),
+            ("example", "string", false, "使用示例（可选）"),
+        ],
+    },
+    ToolDef {
         name: "qq_list_stickers",
         description: "表情库查询（query 匹配备注/标签/用途/id/md5；返回 id+备注供选择）",
         endpoint: "sticker-list",
