@@ -380,12 +380,10 @@ fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String>
 async fn check_update_direct() -> Result<serde_json::Value, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let cur = current.clone();
-    let checked = tauri::async_runtime::spawn_blocking(move || {
-        queqiao::update::check_latest(&cur)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e)?;
+    let checked = tauri::async_runtime::spawn_blocking(move || queqiao::update::check_latest(&cur))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e)?;
     Ok(match checked {
         None => serde_json::json!({ "hasUpdate": false, "current": current }),
         Some(rel) => serde_json::json!({
