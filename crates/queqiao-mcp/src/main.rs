@@ -149,6 +149,58 @@ const TOOLS: &[ToolDef] = &[
         ],
     },
     ToolDef {
+        name: "qq_list_stickers",
+        description: "表情库查询（query 匹配备注/标签/用途/id/md5；返回 id+备注供选择）",
+        endpoint: "sticker-list",
+        method: "GET",
+        flag: Some("listStickers"),
+        params: &[
+            (
+                "query",
+                "string",
+                false,
+                "关键词（匹配 desc/localNote/usage/tags）",
+            ),
+            ("limit", "number", false, "条数（默认 48，上限 500）"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_sticker_image",
+        description: "看表情图（返回 URL 供看图确认含义，再决定发不发）",
+        endpoint: "sticker-image",
+        method: "GET",
+        flag: Some("getStickerImage"),
+        params: &[("stickerId", "string", true, "表情 id/md5/URL 任一")],
+    },
+    ToolDef {
+        name: "qq_send_sticker",
+        description: "发一张收藏表情（一条消息只一张、不混文字；先 qq_list_stickers 选 id）",
+        endpoint: "send-sticker",
+        method: "POST",
+        flag: Some("sendSticker"),
+        params: &[
+            ("stickerId", "string", true, "表情 id/md5/URL 任一"),
+            (
+                "replyToMessageId",
+                "number",
+                false,
+                "引用回复的消息 id（可选）",
+            ),
+        ],
+    },
+    ToolDef {
+        name: "qq_sticker_note",
+        description: "记下对一个表情的理解（note/tags/usage——下次选择更准）",
+        endpoint: "sticker-note",
+        method: "POST",
+        flag: Some("stickerNote"),
+        params: &[
+            ("stickerId", "string", true, "表情 id/md5/URL 任一"),
+            ("note", "string", false, "你的理解（如：被戳中时用）"),
+            ("tags", "json", false, "标签数组（如 [\"开心\", \"接梗\"]）"),
+        ],
+    },
+    ToolDef {
         name: "qq_get_message_detail",
         description: "按 messageId 查看单条消息详情（含媒体信息）",
         endpoint: "message-detail",

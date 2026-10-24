@@ -33,6 +33,7 @@ pub mod runtime;
 pub mod schedule;
 pub mod search;
 pub mod session_router;
+pub mod sticker;
 pub mod triggers;
 pub mod v2_wait;
 pub mod wake;

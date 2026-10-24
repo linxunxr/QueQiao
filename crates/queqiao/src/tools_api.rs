@@ -161,6 +161,10 @@ pub async fn serve(
         .route("/api/socialV2/recent-messages", get(recent_messages))
         .route("/api/socialV2/my-recent-messages", get(recent_messages))
         .route("/api/socialV2/message-detail", get(message_detail))
+        .route("/api/socialV2/sticker-list", get(sticker_list))
+        .route("/api/socialV2/sticker-image", get(sticker_image))
+        .route("/api/socialV2/sticker-note", post(sticker_note))
+        .route("/api/socialV2/send-sticker", post(send_sticker))
         // CORS：桌面客户端（Tauri webview）与浏览器页面跨域访问本地桥 API。
         // 本服务只绑 127.0.0.1，放开 origin 无外网暴露面。
         .layer(axum::middleware::from_fn(cors_mw))
@@ -553,6 +557,225 @@ async fn update_check(
             }))
         }
         Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("检查更新失败：{e}")),
+    }
+}
+
+/// qq_list_stickers：表情库查询（query 匹配 desc/localNote/usage/tags/id/md5）。
+async fn sticker_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.list_stickers,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let _ = key;
+    let home = crate::paths::queqiao_home();
+    let entries = match crate::sticker_store::load(&crate::sticker_store::sticker_file(&home)) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let query = q
+        .get("query")
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(48)
+        .clamp(1, 500);
+    let filtered: Vec<&queqiao_core::sticker::StickerEntry> = if query.is_empty() {
+        entries.iter().collect()
+    } else {
+        entries
+            .iter()
+            .filter(|e| {
+                let hay = format!(
+                    "{} {} {} {} {} {} {} {}",
+                    e.desc,
+                    e.local_note,
+                    e.usage,
+                    e.id,
+                    e.res_id,
+                    e.md5,
+                    e.tags.join(" "),
+                    e.url
+                )
+                .to_lowercase();
+                hay.contains(&query)
+            })
+            .collect()
+    };
+    let matched = filtered.len();
+    let truncated = matched > limit;
+    let items: Vec<serde_json::Value> = filtered
+        .into_iter()
+        .take(limit)
+        .map(|e| serde_json::to_value(e).unwrap_or_default())
+        .collect();
+    ok_json(json!({
+        "total": entries.len(),
+        "matched": matched,
+        "truncated": truncated,
+        "stickers": items,
+    }))
+}
+
+/// qq_get_sticker_image：看图（返回 URL 与备注——AI 凭 URL 看，确认含义再发）。
+async fn sticker_image(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.get_sticker_image,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let _ = key;
+    let home = crate::paths::queqiao_home();
+    let entries = match crate::sticker_store::load(&crate::sticker_store::sticker_file(&home)) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let id = q.get("stickerId").map(String::as_str).unwrap_or_default();
+    match queqiao_core::sticker::find_sticker(&entries, id) {
+        Some(e) => ok_json(json!({
+            "id": e.id, "url": e.url, "desc": e.desc,
+            "localNote": e.local_note, "tags": e.tags, "usage": e.usage,
+        })),
+        None => denied(StatusCode::NOT_FOUND, "表情未找到（id/md5/URL 任一匹配）"),
+    }
+}
+
+/// qq_sticker_note：AI 认知更新（note/tags/usage——单行化后入库）。
+async fn sticker_note(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let flag =
+        state.cfg.social_v2.tools.sticker_note || state.cfg.social_v2.tools.set_sticker_remark;
+    let key = match state.authorize(&headers, &key, flag) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let _ = key;
+    let id = body
+        .get("stickerId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let note = body.get("note").and_then(Value::as_str).map(str::to_string);
+    let tags: Option<Vec<String>> = body.get("tags").and_then(|t| t.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect()
+    });
+    let usage = body
+        .get("usage")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if note.is_none() && tags.is_none() && usage.is_none() {
+        return denied(StatusCode::BAD_REQUEST, "至少提供 note / tags / usage 之一");
+    }
+    let home = crate::paths::queqiao_home();
+    let file = crate::sticker_store::sticker_file(&home);
+    let mut entries = match crate::sticker_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    match queqiao_core::sticker::apply_sticker_note(&mut entries, id, note, tags, usage) {
+        Some(updated) => {
+            if let Err(e) = crate::sticker_store::save(&file, &entries) {
+                return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+            }
+            ok_json(serde_json::to_value(&updated).unwrap_or_default())
+        }
+        None => denied(StatusCode::NOT_FOUND, "表情未找到"),
+    }
+}
+
+/// qq_send_sticker：发一张收藏表情（image 段 = 表情 URL；一次一张不混文字）。
+async fn send_sticker(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.send_sticker) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let id = body
+        .get("stickerId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let home = crate::paths::queqiao_home();
+    let file = crate::sticker_store::sticker_file(&home);
+    let mut entries = match crate::sticker_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let Some(entry) = queqiao_core::sticker::find_sticker(&entries, id).cloned() else {
+        return denied(
+            StatusCode::NOT_FOUND,
+            "表情未找到（先 qq_list_stickers 查）",
+        );
+    };
+    if entry.url.is_empty() {
+        return denied(
+            StatusCode::CONFLICT,
+            "该表情无 URL（QQ 端未提供），无法发送",
+        );
+    }
+    let mut segments = vec![queqiao_onebot::segment::image(&entry.url)];
+    if let Some(reply_to) = body.get("replyToMessageId").and_then(Value::as_i64) {
+        segments.insert(0, queqiao_onebot::segment::reply(reply_to));
+    }
+    let message = queqiao_onebot::segment::message(&segments);
+    let result = if let Some(group) = key.strip_prefix("group:") {
+        state
+            .onebot
+            .send_group_msg(group.parse().unwrap_or(0), &message)
+    } else {
+        let user = key.strip_prefix("private:").unwrap_or("0");
+        state
+            .onebot
+            .send_private_msg(user.parse().unwrap_or(0), &message)
+    };
+    match result {
+        Ok(message_id) => {
+            // 使用计数 + 记账（与 send_message 同款）。
+            let _ = queqiao_core::sticker::mark_sticker_used(&mut entries, id, &key);
+            let _ = crate::sticker_store::save(&file, &entries);
+            {
+                let mut store = state.social.lock().unwrap();
+                let now = crate::session_manager::SessionManager::now_ms();
+                let st = store.conversation_mut(&key);
+                st.last_action_at = now;
+                st.last_ai_reply_at = now;
+                store.save();
+            }
+            ok_json(json!({ "messageId": message_id, "sticker": entry.desc }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("OneBot 发送失败：{e}")),
     }
 }
 

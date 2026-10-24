@@ -14,5 +14,6 @@ pub mod role_card_store;
 pub mod session_manager;
 pub mod social_store;
 pub mod state;
+pub mod sticker_store;
 pub mod tools_api;
 pub mod update;

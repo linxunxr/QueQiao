@@ -623,6 +623,7 @@ async fn run(setup: Setup) {
             reply_quiet_ms: cfg.social_v2.wait.default_quiet_ms,
             reply_remaining_ms: cfg.social_v2.wait.default_quiet_ms,
         },
+        sticker: cfg.social_v2.sticker.clone(),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -772,6 +773,7 @@ struct Executor {
     reconnect: std::sync::Arc<tokio::sync::Notify>,
     social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
     wake_cfg: WakePromptConfig,
+    sticker: queqiao::config::StickerConfig,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -880,10 +882,30 @@ impl Executor {
                             .unwrap_or_default()
                     };
                     let text = queqiao::prompt::build_wake_prompt(&ctx, &reason);
-                    let text = if memory_block.is_empty() {
+                    // 表情包块（Node stickerLine 语义：策略提示 + 常用摘要，
+                    // 位于记忆块之后；库空或开关关则省略）。
+                    let sticker_block = if self.sticker.enabled && self.sticker.include_in_prompt {
+                        let home = queqiao::paths::queqiao_home();
+                        match queqiao::sticker_store::load(&queqiao::sticker_store::sticker_file(
+                            &home,
+                        )) {
+                            Ok(entries) if !entries.is_empty() => format!(
+                                "{}\n{}\n\n",
+                                queqiao_core::sticker::build_sticker_strategy_hint(),
+                                queqiao_core::sticker::build_sticker_context(
+                                    &entries,
+                                    self.sticker.prompt_max_stickers
+                                )
+                            ),
+                            _ => String::new(),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let text = if memory_block.is_empty() && sticker_block.is_empty() {
                         text
                     } else {
-                        format!("{memory_block}{text}")
+                        format!("{memory_block}{sticker_block}{text}")
                     };
                     let sessions = self.sessions.clone();
                     let key_for_task = key.clone();
