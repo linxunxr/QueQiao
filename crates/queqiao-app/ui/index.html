@@ -482,7 +482,6 @@ async function checkUpdate() {
   } catch (e) { toast('检查失败：' + e.message + (bridgeOnline ? '' : '（桥未运行）'), false); return; }
   try {
     if (!resOk) { toast(errMsg || '检查失败', false); return; }
-    if (!res.ok) { toast(res.error || '检查失败', false); return; }
     if (!v.hasUpdate) { toast('已是最新版本 v' + v.current, true); return; }
     const brief = (v.notes || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).slice(0, 10).join('\n');
     const follow = bridgeOnline

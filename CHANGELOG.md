@@ -18,6 +18,7 @@
 
 ### 修复
 
+- **客户端"检查更新"必报 `res is not defined`**（v0.4.1 引入）：直查改造把 `const res` 挪进浏览器回落分支的块级作用域，漏删旧检查行 `if (!res.ok)`——Tauri 客户端走直查分支时该变量未定义必抛 ReferenceError（GitHub 请求本身成功，死在结果处理上）；浏览器回落路径 res 有定义而正常，掩盖了三版。已删残留行并用 Node 提取函数真跑五分支场景验证。
 - **SnowLuma 状态假阳**：探测命令行含 homeDir 明文，双开客户端时互相命中对方探测进程致 UI 假显示"运行中"（真机抓到）——匹配排除 powershell 自身。
 - **浏览按钮闪 PowerShell 窗**：CREATE_NO_WINDOW 只隐藏控制台宿主，WinForms 对话框不受影响（原"对话框须可见故不加"为错误推理）。
 
