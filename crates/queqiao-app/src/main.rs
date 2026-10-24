@@ -244,19 +244,32 @@ fn find_dsh_exe() -> Option<std::path::PathBuf> {
         .map(|(p, _)| p)
 }
 
+/// 组件三态查询。async + spawn_blocking：WMI 进程枚举在系统忙时可达秒级，
+/// 同步命令占主线程会让 UI 周期性冻结（实测体感"时不时卡住"）。
 #[tauri::command]
-fn components_status(state: tauri::State<'_, BridgeState>) -> serde_json::Value {
-    let (dir, http) = snowluma_cfg(&state.home);
-    let (dsh, snowluma, bridge_proc) = probe_components(&dir);
-    serde_json::json!({
-        "dsh": dsh,
-        "snowluma": snowluma,
-        "snowlumaHttp": http_url_alive(&http),
-        "snowlumaDir": dir,
-        // 桥：本壳 child 或系统进程任一在跑即运行（手动直跑 queqiao.exe 也算）。
-        "bridge": state.running() || bridge_proc,
-        "dshPath": find_dsh_exe().map(|p| p.display().to_string()),
+async fn components_status(
+    state: tauri::State<'_, BridgeState>,
+) -> Result<serde_json::Value, String> {
+    let home = state.home.clone();
+    let child_running = state.running();
+    let st = tauri::async_runtime::spawn_blocking(move || {
+        let (dir, http) = snowluma_cfg(&home);
+        let (dsh, snowluma, bridge_proc) = probe_components(&dir);
+        serde_json::json!({
+            "dsh": dsh,
+            "snowluma": snowluma,
+            "snowlumaHttp": http_url_alive(&http),
+            "snowlumaDir": dir,
+            "dshPath": find_dsh_exe().map(|p| p.display().to_string()),
+            "bridgeProc": bridge_proc,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?;
+    let mut st = st;
+    // 桥：本壳 child 或系统进程任一在跑即运行（手动直跑 queqiao.exe 也算）。
+    st["bridge"] = serde_json::json!(child_running || st["bridgeProc"].as_bool().unwrap_or(false));
+    Ok(st)
 }
 
 #[tauri::command]

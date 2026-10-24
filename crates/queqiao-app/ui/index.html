@@ -393,11 +393,17 @@ async function checkUpdate() {
 (async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await T.core.invoke('app_version'); } catch (e) {} })();
 load();
 (async function tick() {
-  const st = await refreshComponents();
-  bridgeOnline = st.bridge;
-  refreshSessions();
-  setTimeout(tick, 5000);
+  // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
+  if (!document.hidden) {
+    const st = await refreshComponents();
+    bridgeOnline = st.bridge;
+    refreshSessions();
+  }
+  setTimeout(tick, 10000);
 })();
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { refreshComponents().then(st => { bridgeOnline = st.bridge; refreshSessions(); }); }
+});
 </script>
 </body>
 </html>
