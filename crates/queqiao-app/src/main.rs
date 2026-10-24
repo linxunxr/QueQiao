@@ -46,6 +46,65 @@ fn take_bridge_autostart_flag(home: &std::path::Path) -> Option<bool> {
     flag
 }
 
+/// 看门狗驱动（Node watchdog.mjs 的客户端形态）：30s 一轮探测三件套——
+/// bridge=控制台口 TCP 探活（进程活着但 HTTP 卡死也测得出），dsh/snowluma
+/// 复用进程探测。告警**直发 OneBot HTTP 私聊管理员，不经桥本身**——
+/// 桥挂了告警才发得出。重启动作不接管（SnowLuma 授权边界、DSH 形态多样，
+/// 告警先行的最小可用）。
+fn start_watchdog(home: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        let mut state = queqiao_core::watchdog::WatchdogState::default();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            // config 读取（ownerQQ/snowluma httpUrl+token/consolePort）。
+            let (mut owner, mut http, mut token, mut port) = (None, String::new(), String::new(), 3100u16);
+            if let Ok(raw) = std::fs::read_to_string(home.join("config.json"))
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
+            {
+                owner = v.get("ownerQQ").and_then(|x| x.as_i64());
+                if let Some(sl) = v.get("snowluma").and_then(|x| x.as_object()) {
+                    http = sl.get("httpUrl").and_then(|x| x.as_str()).unwrap_or("").into();
+                    token = sl.get("accessToken").and_then(|x| x.as_str()).unwrap_or("").into();
+                }
+                if let Some(p) = v.get("consolePort").and_then(|x| x.as_u64()) {
+                    port = p as u16;
+                }
+            }
+            let bridge_alive = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+            let (dsh, snowluma, _) = probe_components("");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let actions =
+                queqiao_core::watchdog::evaluate(&mut state, [bridge_alive, dsh, snowluma], now, false);
+            for a in actions {
+                let text = match &a {
+                    queqiao_core::watchdog::WatchdogAction::Alert { target, detail } => {
+                        format!("[看门狗] {target} 故障：{detail}")
+                    }
+                    queqiao_core::watchdog::WatchdogAction::Recovered { target } => {
+                        format!("[看门狗] {target} 已恢复")
+                    }
+                    queqiao_core::watchdog::WatchdogAction::Restart { .. } => continue,
+                };
+                println!("[watchdog] {text}");
+                // 直发管理员私聊（不经桥）。无 ownerQQ/token 配置则只打日志。
+                if let Some(qq) = owner
+                    && !http.is_empty()
+                    && !token.is_empty()
+                {
+                    let client = queqiao_onebot::client::OneBotHttpClient::new(&http, &token, 5000);
+                    let msg = queqiao_onebot::segment::message(&[queqiao_onebot::segment::text(&text)]);
+                    if let Err(e) = client.send_private_msg(qq as u64, &msg) {
+                        println!("[watchdog] 告警发送失败：{e}");
+                    }
+                }
+            }
+        }
+    });
+}
+
 fn find_bridge(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("QUEQIAO_BRIDGE_EXE")
         && std::path::Path::new(&p).exists()
@@ -376,6 +435,11 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            // 看门狗（客户端进程跑——桥卡死时告警仍可发）。
+            {
+                let state = app.state::<BridgeState>();
+                start_watchdog(state.home.clone());
+            }
             {
                 let state = app.state::<BridgeState>();
                 let found = find_bridge(&handle);

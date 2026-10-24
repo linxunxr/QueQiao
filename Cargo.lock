@@ -2554,6 +2554,8 @@ dependencies = [
 name = "queqiao-app"
 version = "0.3.4"
 dependencies = [
+ "queqiao-core",
+ "queqiao-onebot",
  "serde_json",
  "tauri",
  "tauri-build",

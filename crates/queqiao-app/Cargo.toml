@@ -11,6 +11,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 serde_json = { workspace = true }
+queqiao-onebot = { path = "../queqiao-onebot", features = ["io"] }
+queqiao-core = { path = "../queqiao-core" }
 
 [[bin]]
 name = "queqiao-app"

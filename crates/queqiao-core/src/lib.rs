@@ -37,6 +37,7 @@ pub mod sticker;
 pub mod token_ledger;
 pub mod triggers;
 pub mod v2_wait;
+pub mod watchdog;
 pub mod wake;
 
 pub const APP_NAME: &str = "queqiao";
