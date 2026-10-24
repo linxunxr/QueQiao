@@ -120,6 +120,15 @@ if ($shipped.Count -ge 2) {
 # 仓库根都带此文件，统一补齐；ps1 无运行锁，直拷即可。
 $migrateScript = Join-Path $RepoRoot 'migrate-from-node.ps1'
 if (Test-Path $migrateScript) { Copy-Item $migrateScript $Dist -Force }
+# 脚本自身也随升级更新：安装目录 scripts\ 下有一份副本，清单不含自己则
+# 手动升级链每次执行的都是旧副本、新逻辑（含上面的补齐）永远不生效
+# （v0.4.4 真机部署抓到）。zip 布局执行的是包内脚本、目标是安装目录另一
+# 份文件无锁；源码布局 InstallDir 指回仓库时源=目标，try 兜底跳过即可。
+$srcUpgrade = Join-Path $RepoRoot 'scripts\upgrade.ps1'
+if (Test-Path $srcUpgrade) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dist 'scripts') | Out-Null
+    try { Copy-Item $srcUpgrade (Join-Path $Dist 'scripts\upgrade.ps1') -Force } catch { }
+}
 # 首次部署：从 Node 版桥带一份配置与状态（会话映射/唤醒配置沿用，无缝切换）。
 if ($NodeBridge -and (Test-Path $NodeBridge)) {
     if (-not (Test-Path (Join-Path $Dist 'config.json'))) {
