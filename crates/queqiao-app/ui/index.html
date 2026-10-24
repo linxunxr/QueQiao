@@ -141,9 +141,9 @@
     <h2>DSH（AI 侧）</h2>
     <div class="row">
       <div class="field"><label>基址（baseUrl）</label><input id="f-dshBase" placeholder="http://127.0.0.1:3080"><div class="hint">探活失败会自动扫描端口</div></div>
-      <div class="field"><label>模型（model）</label><input id="f-dshModel" placeholder="留空用 DSH 当前模型"></div>
-      <div class="field"><label>提供方（provider）</label><input id="f-dshProvider" placeholder="如 deepseek-official / omniroute"></div>
-      <div class="field"><label>思考强度（reasoningEffort）</label><input id="f-dshEffort" placeholder="max / high / medium / low / none（路由别名模型用 none）"><div class="hint">改动后下一条消息自动重选模型（热生效）</div></div>
+      <div class="field"><label>提供方（provider）</label><select id="f-dshProvider"><option value="">（桥在线时自动列出）</option></select></div>
+      <div class="field"><label>模型（model）</label><select id="f-dshModel"><option value="">（先选提供方）</option></select></div>
+      <div class="field"><label>思考强度（reasoningEffort）</label><select id="f-dshEffort"><option value="max">max</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="none">none（跟随默认，路由别名必须用这档）</option></select><div class="hint">改动保存后下一条消息自动重选模型（热生效）</div></div>
     </div>
   </section>
 
@@ -345,6 +345,8 @@ function addChip(k) {
   if (val && !chipLists[k].includes(val)) { chipLists[k].push(val); renderChips(); }
   inp.value = '';
 }
+document.getElementById('f-dshProvider').addEventListener('change', fillModels);
+document.getElementById('f-dshModel').addEventListener('change', fillModels);
 document.getElementById('add-group').addEventListener('keydown', e => { if (e.key === 'Enter') addChip('groups'); });
 document.getElementById('add-private').addEventListener('keydown', e => { if (e.key === 'Enter') addChip('private'); });
 
@@ -402,6 +404,42 @@ async function exportDiag() {
   } catch (e) { toast('导出失败：' + e.message, false); }
 }
 
+let dshCatalog = null;
+async function loadCatalog() {
+  const p = $('f-dshProvider'), m = $('f-dshModel');
+  try {
+    const r = await fetch(BRIDGE + '/api/dsh/catalog');
+    const res = await r.json();
+    dshCatalog = res.value || null;
+    const groups = (dshCatalog && dshCatalog.groups) || [];
+    if (!groups.length) { p.innerHTML = '<option value="">（目录为空——手填 config.json 的 dsh 段）</option>'; return; }
+    p.innerHTML = groups.map(g => `<option value="${g.id}">${g.name || g.id}</option>`).join('');
+    const curP = (cfg && cfg.dsh && cfg.dsh.provider) || groups[0].id;
+    if ([...p.options].some(o => o.value === curP)) p.value = curP;
+    fillModels();
+  } catch (e) {
+    p.innerHTML = '<option value="">（桥未连接）</option>';
+    m.innerHTML = '<option value="">（桥未连接）</option>';
+  }
+}
+function fillModels() {
+  const p = $('f-dshProvider'), m = $('f-dshModel'), e = $('f-dshEffort');
+  const groups = (dshCatalog && dshCatalog.groups) || [];
+  const g = groups.find(x => x.id === p.value);
+  const models = (g && g.models) || [];
+  const curM = (cfg && cfg.dsh && cfg.dsh.model) || '';
+  m.innerHTML = models.map(x => `<option value="${x.id}">${x.name || x.id}${x.hasReasoning === false ? '（无思考档位）' : ''}</option>`).join('') || '<option value="">（该提供方无模型）</option>';
+  if (curM && [...m.options].some(o => o.value === curM)) m.value = curM;
+  // effort 选项按所选模型目录声明收敛；无声明（路由别名）只剩 none。
+  const sel = models.find(x => x.id === m.value);
+  const efforts = (sel && (sel.efforts || (sel.reasoning && sel.reasoning.efforts))) || [];
+  const curE = (cfg && cfg.dsh && cfg.dsh.reasoningEffort) || 'max';
+  const full = ['max', 'high', 'medium', 'low', 'none'];
+  const list = efforts.length ? efforts.map(x => typeof x === 'string' ? x : x.id).filter(id => full.includes(id)) : ['none'];
+  if (!list.includes('none')) list.push('none');
+  e.innerHTML = list.map(id => `<option value="${id}">${id === 'none' ? 'none（跟随默认，路由别名必须用这档）' : id}</option>`).join('');
+  e.value = list.includes(curE) ? curE : list[0];
+}
 async function loadRoles() {
   try {
     const r = await fetch(BRIDGE + '/api/roles');
@@ -458,8 +496,9 @@ async function checkUpdate() {
 // 版本号不依赖桥在线：Tauri 客户端直接报自身版本（桥与客户端同版本发布）；
 // 浏览器模式回落到桥在线后 load() 用 _version 填。
 (async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await T.core.invoke('app_version'); } catch (e) {} })();
-load();
 loadRoles();
+loadCatalog();
+(async () => { await load(); fillModels(); })();
 (async function tick() {
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
   if (!document.hidden) {
