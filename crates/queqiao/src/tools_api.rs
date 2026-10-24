@@ -154,6 +154,7 @@ pub async fn serve(
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/update/check", post(update_check))
+        .route("/api/tokens/summary", get(tokens_summary))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -516,6 +517,29 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// 花费汇总（Node /api/tokens/summary 子集）：仅控制台可用——记账是给操作者
+/// 看的，agent token 一律拒绝（Node 同语义）。
+async fn tokens_summary(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用");
+        }
+    }
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("token-usage.jsonl");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let summary = queqiao_core::token_ledger::summarize(&text);
+    ok_json(serde_json::to_value(&summary).unwrap_or_default())
 }
 
 /// 手动检查更新（控制台「检查更新」按钮）：立即查 GitHub latest release。

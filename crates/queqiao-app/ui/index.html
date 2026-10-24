@@ -78,6 +78,11 @@
     <div class="hint" style="margin-top:6px">DSH 未跑会自动拉起；SnowLuma 按授权边界不代劳（EULA §5.4）——未就绪时打开其目录请手动启动；桥等两者就绪后自动启动。</div>
   </section>
 
+  <section>
+    <h2>花费（token 记账）</h2>
+    <div id="costBody" class="hint">检测中…</div>
+  </section>
+
   <section id="sessions">
     <h2>会话概要</h2>
     <div id="sessionsBody" class="hint">检测中…</div>
@@ -398,9 +403,26 @@ load();
     const st = await refreshComponents();
     bridgeOnline = st.bridge;
     refreshSessions();
+    refreshCost();
   }
   setTimeout(tick, 10000);
 })();
+async function refreshCost() {
+  const body = $('costBody');
+  if (!bridgeOnline) { body.textContent = '桥未运行——启动后显示累计花费。'; return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/tokens/summary');
+    const res = await r.json();
+    const v = res.value || {};
+    if (!v.rows) { body.textContent = '还没有用量记录。'; return; }
+    const byKey = (v.byKey || []).slice(0, 5).map(k => `<tr><td>${k.key}</td><td>${k.turns}</td><td>¥${k.cost.toFixed(3)}</td></tr>`).join('');
+    const est = v.estimatedRows ? `（${v.estimatedRows} 行按兜底价估算）` : '';
+    body.innerHTML = `<div style="font-size:20px;margin-bottom:6px">累计 ¥${v.cost.toFixed(3)}${est}</div>` +
+      `<div class="hint" style="margin-bottom:8px">tokens：命中 ${v.cacheHit} / 未命中 ${v.cacheMiss} / 输出 ${v.output} · 回合 ${v.turns} · 记录 ${v.rows} 行</div>` +
+      (byKey ? `<table><tr><th>会话</th><th>回合</th><th>花费</th></tr>${byKey}</table>` : '');
+  } catch (e) { body.textContent = '（花费数据不可读）'; }
+}
+
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { refreshComponents().then(st => { bridgeOnline = st.bridge; refreshSessions(); }); }
 });
