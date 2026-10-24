@@ -166,29 +166,50 @@ if (Test-Path $PatchFile) {
 
 Write-Host '== 4/4 启动步骤 ==' -ForegroundColor Cyan
 # 升级时若程序在跑：旧进程仍映射旧文件（已转 .old）——退出重开才加载新版。
-# 客户端启动会自动拉起桥，这里只需退出全部旧进程再启动客户端。
-$running = Get-CimInstance Win32_Process -Filter "Name='queqiao-app.exe' OR Name='queqiao.exe'" -ErrorAction SilentlyContinue
+# 重启恢复升级前状态：客户端在跑 → 重启客户端（是否带桥经一次性标记文件
+# 传递，桥被手动停了就不拉）；只有桥在跑 → 只重启桥。
+$appRunning = [bool](Get-CimInstance Win32_Process -Filter "Name='queqiao-app.exe'" -ErrorAction SilentlyContinue)
+$bridgeRunning = [bool](Get-CimInstance Win32_Process -Filter "Name='queqiao.exe'" -ErrorAction SilentlyContinue)
+$running = $appRunning -or $bridgeRunning
 $appExe = Join-Path $Dist 'queqiao-app.exe'
+$bridgeExe = Join-Path $Dist 'queqiao.exe'
 if ($running) {
-    Write-Host "`n  检测到鹊桥正在运行（$(@($running).Count) 个进程）——退出重开才加载新版。" -ForegroundColor Yellow
+    Write-Host "`n  检测到鹊桥正在运行（客户端:$appRunning 桥:$bridgeRunning）——退出重开才加载新版。" -ForegroundColor Yellow
     $answer = Read-Host '  现在自动重启鹊桥？（回车 = 是；n = 稍后自己从托盘退出再开）'
     $go = if ($null -ne $answer) { "$answer".Trim() } else { '' }
     if ($go -notmatch '^[nN]') {
-        foreach ($p in $running) {
-            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-        }
+        Get-CimInstance Win32_Process -Filter "Name='queqiao-app.exe' OR Name='queqiao.exe'" -ErrorAction SilentlyContinue |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Start-Sleep -Seconds 2
-        if (Test-Path $appExe) {
+        if ($appRunning) {
+            # 一次性标记：客户端启动读后即删——桥是否带起按升级前状态。
+            $bridgeFlag = if ($bridgeRunning) { 'true' } else { 'false' }
             try {
-                Start-Process $appExe -WorkingDirectory $Dist
-                Write-Host "  已重启新版客户端（自动带起桥）：$appExe" -ForegroundColor Green
-            } catch {
-                # 进程已退出而启动失败——不能让用户面前全停，明确给出手动路径。
-                Write-Host "  启动失败（$($_.Exception.Message)）" -ForegroundColor Red
-                Write-Host "  请手动启动：cd $Dist ; .\queqiao-app.exe" -ForegroundColor Yellow
+                $stateDir = Join-Path $Dist 'state'
+                New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+                Set-Content (Join-Path $stateDir 'bridge-autostart') $bridgeFlag -Encoding ASCII
+            } catch { }
+            $restartNote = if ($bridgeRunning) { '桥一并恢复' } else { '桥保持停止，需要时一键启动' }
+            if (Test-Path $appExe) {
+                try {
+                    Start-Process $appExe -WorkingDirectory $Dist
+                    Write-Host "  已重启新版客户端（$restartNote）：$appExe" -ForegroundColor Green
+                } catch {
+                    # 进程已退出而启动失败——不能让用户面前全停，明确给出手动路径。
+                    Write-Host "  启动失败（$($_.Exception.Message)）" -ForegroundColor Red
+                    Write-Host "  请手动启动：cd $Dist ; .\queqiao-app.exe" -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "  $Dist 无 queqiao-app.exe——手动启动：cd $Dist ; .\queqiao.exe" -ForegroundColor Yellow
             }
-        } else {
-            Write-Host "  $Dist 无 queqiao-app.exe——手动启动：cd $Dist ; .\queqiao.exe" -ForegroundColor Yellow
+        } elseif ($bridgeRunning -and (Test-Path $bridgeExe)) {
+            # 只有桥在跑（无客户端）：恢复桥本身即可。
+            try {
+                Start-Process $bridgeExe -WorkingDirectory $Dist
+                Write-Host "  已重启新版桥：$bridgeExe" -ForegroundColor Green
+            } catch {
+                Write-Host "  桥启动失败（$($_.Exception.Message)）——手动：cd $Dist ; .\queqiao.exe" -ForegroundColor Red
+            }
         }
     } else {
         Write-Host '  跳过重启——旧窗口仍是旧代码；托盘退出（点 × 只隐藏不退）后从桌面快捷方式重开。' -ForegroundColor Yellow

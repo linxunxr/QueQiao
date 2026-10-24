@@ -32,6 +32,20 @@ struct BridgeState {
     home: std::path::PathBuf,
 }
 
+/// 读升级脚本留下的一次性桥自启标记（state/bridge-autostart）。
+/// Some(true/false) = 按升级前状态决定是否拉桥（读后即删）；None = 正常
+/// 启动无标记（默认拉桥）。
+fn take_bridge_autostart_flag(home: &std::path::Path) -> Option<bool> {
+    let marker = home.join("state").join("bridge-autostart");
+    let flag = std::fs::read_to_string(&marker)
+        .ok()
+        .map(|s| s.trim() == "true");
+    if flag.is_some() {
+        let _ = std::fs::remove_file(&marker);
+    }
+    flag
+}
+
 fn find_bridge(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("QUEQIAO_BRIDGE_EXE")
         && std::path::Path::new(&p).exists()
@@ -304,9 +318,15 @@ fn main() {
                 *state.path.lock().unwrap() = found.clone();
                 if let Some(p) = found {
                     println!("[app] 桥程序：{}", p.display());
-                    // 自动启动桥（崩溃由退出事件通知，UI 可手动重启）。
-                    if let Err(e) = state.spawn(&handle) {
-                        println!("[app] {e}");
+                    // 自动启动桥；升级脚本重启时经一次性标记（state/bridge-autostart）
+                    // 传递"升级前桥是否在跑"——桥被手动停了就不拉，保持用户意图。
+                    // 读后即删；正常启动无标记，默认拉桥。
+                    if take_bridge_autostart_flag(&state.home).unwrap_or(true) {
+                        if let Err(e) = state.spawn(&handle) {
+                            println!("[app] {e}");
+                        }
+                    } else {
+                        println!("[app] 桥保持停止（升级前未运行）——需要时总览页一键启动");
                     }
                 } else {
                     println!("[app] 未找到 queqiao.exe——UI 将显示引导");
@@ -382,6 +402,25 @@ fn home_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_autostart_flag_three_states() {
+        let dir = std::env::temp_dir().join(format!("qq-flag-{}", std::process::id()));
+        let state = dir.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let marker = state.join("bridge-autostart");
+        // 无标记：None（默认拉桥）
+        assert_eq!(take_bridge_autostart_flag(&dir), None);
+        // true：Some(true) 且读后即删（一次性语义）
+        std::fs::write(&marker, "true").unwrap();
+        assert_eq!(take_bridge_autostart_flag(&dir), Some(true));
+        assert!(!marker.exists(), "标记须读后即删");
+        // false：Some(false)——升级前桥被手动停，不拉
+        std::fs::write(&marker, "false").unwrap();
+        assert_eq!(take_bridge_autostart_flag(&dir), Some(false));
+        assert!(!marker.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 真机冒烟：三件套探测不 panic、结果可解释（具体值随环境，不断言）。
     #[test]
