@@ -151,7 +151,7 @@ $block = @"
 "@
 if (Test-Path $PatchFile) {
     $existing = Get-Content $PatchFile -Raw -Encoding UTF8
-    $pattern = '(?s)# === qq-bridge MCP BEGIN ===.*?# === qq-bridge MCP END ===\r?\n?'
+    $pattern = '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?'
     if ($existing -match $pattern) {
         $updated = $existing -replace $pattern, $block
         Set-Content $PatchFile $updated -Encoding UTF8 -NoNewline
