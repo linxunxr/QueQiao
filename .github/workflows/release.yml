@@ -73,7 +73,9 @@ jobs:
           升级部署：双击 upgrade.bat
           （构建 + dist 布局 + DSH preset 注册；也可直接用本包已构建的 exe）。
           详见仓库 README：https://github.com/linxunxr/QueQiao
-          '@ | Out-File "$Stage/安装说明.txt" -Encoding utf8
+          # 文件名用 ASCII：PS5.1 Compress-Archive 不打 UTF-8 名标志，中文名
+          # 在非中文系统解压乱码（内容仍是中文）。
+          '@ | Out-File "$Stage/INSTALL-NOTES.txt" -Encoding utf8
           Compress-Archive -Path "$Stage/*" -DestinationPath "queqiao-$Tag-win64.zip" -Force
           Get-Item "queqiao-$Tag-win64.zip"
 
