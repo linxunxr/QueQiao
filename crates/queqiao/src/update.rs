@@ -158,6 +158,8 @@ pub fn write_apply_bat(staging: &Path, home: &Path) -> Result<PathBuf, String> {
          cd /d \"{}\"\r\n\
          del queqiao.exe.old >nul 2>&1\r\n\
          del queqiao-mcp.exe.old >nul 2>&1\r\n\
+         del queqiao-app.exe.old >nul 2>&1\r\n\
+         {}\
          {}\
          {}\
          if exist \"{staging}\\install.bat\" copy /y \"{staging}\\install.bat\" install.bat >nul\r\n\
@@ -170,6 +172,9 @@ pub fn write_apply_bat(staging: &Path, home: &Path) -> Result<PathBuf, String> {
         home.display(),
         swap("queqiao.exe"),
         swap("queqiao-mcp.exe"),
+        // 客户端一并换：正在运行亦可 rename（Windows 锁删除不锁改名），退出后
+        // 重开即新版——否则客户端停在旧版，总览/一键启动等 UI 永远不更新。
+        swap("queqiao-app.exe"),
         staging = staging.display()
     );
     std::fs::write(&bat, content).map_err(|e| format!("写 apply 脚本失败：{e}"))?;
@@ -202,6 +207,8 @@ mod tests {
         let content = std::fs::read_to_string(&bat).unwrap();
         assert!(content.contains("ren \"queqiao.exe\" \"queqiao.exe.old\""));
         assert!(content.contains("ren \"queqiao-mcp.exe\" \"queqiao-mcp.exe.old\""));
+        assert!(content.contains("ren \"queqiao-app.exe\" \"queqiao-app.exe.old\""));
+        assert!(content.contains("del queqiao-app.exe.old"));
         assert!(content.contains("start \"\" queqiao.exe"));
         assert!(content.contains(&format!("cd /d \"{}\"", dir.display())));
         let _ = std::fs::remove_dir_all(&dir);

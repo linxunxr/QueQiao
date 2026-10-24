@@ -574,17 +574,25 @@ async fn run(setup: Setup) {
         cfg.console_port
     );
 
-    // 启动时异步检测一次（失败静默）；控制台手动检查经同一通道汇入。
+    // 启动查一次 + 之后每小时轮询（长跑不重启的桥也能发现新版）；失败静默；
+    // 控制台手动检查经同一通道汇入。tag 去重防轮询重复触发下载。
     {
         tokio::spawn(async move {
-            let current = env!("CARGO_PKG_VERSION");
-            let checked = tokio::task::spawn_blocking(move || update::check_latest(current))
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .flatten();
-            if let Some(rel) = checked {
-                let _ = update_tx.send(rel).await;
+            let mut sent_tag = String::new();
+            loop {
+                let current = env!("CARGO_PKG_VERSION");
+                let checked = tokio::task::spawn_blocking(move || update::check_latest(current))
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten();
+                if let Some(rel) = checked
+                    && rel.tag != sent_tag
+                {
+                    sent_tag = rel.tag.clone();
+                    let _ = update_tx.send(rel).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             }
         });
     }
