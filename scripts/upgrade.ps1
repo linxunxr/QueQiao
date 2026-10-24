@@ -84,14 +84,35 @@ if (-not $InstallDir) {
 }
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
+
+# exe 部署：目标正被运行（客户端/桥/mcp 进程在跑）时 Copy-Item 撞写入锁。
+# Windows 运行中 exe 可改名不可覆盖——先试直拷，IOException 则旧文件转
+# .old 再拷新版（运行中的旧进程不受影响，退出后重开即新版；.old 仍被
+# 占用时清理失败不报错，下次升级再清——与桥自动更新 apply 脚本同技巧）。
+function Deploy-Exe($src, $distDir) {
+    $name = Split-Path -Leaf $src
+    $dst = Join-Path $distDir $name
+    if (Test-Path $dst) {
+        Remove-Item "$dst.old" -Force -ErrorAction SilentlyContinue
+        try {
+            Copy-Item $src $dst -Force -ErrorAction Stop
+        } catch [System.IO.IOException] {
+            Move-Item $dst "$dst.old" -Force
+            Copy-Item $src $dst -Force
+            Write-Host "  $name 正在运行——旧版转 .old，新版已就位（重开该程序生效）" -ForegroundColor Yellow
+        }
+    } else {
+        Copy-Item $src $dst -Force
+    }
+}
 if ($shipped.Count -ge 2) {
-    foreach ($exe in $shipped) { Copy-Item (Join-Path $RepoRoot $exe) $Dist -Force }
+    foreach ($exe in $shipped) { Deploy-Exe (Join-Path $RepoRoot $exe) $Dist }
     $notice = Join-Path $RepoRoot 'THIRD_PARTY_NOTICES.md'
     if (Test-Path $notice) { Copy-Item $notice $Dist -Force }
 } else {
-    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
-    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
-    Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-app.exe') $Dist -Force
+    foreach ($exe in @('queqiao.exe', 'queqiao-mcp.exe', 'queqiao-app.exe')) {
+        Deploy-Exe (Join-Path $RepoRoot "target\release\$exe") $Dist
+    }
 }
 # 首次部署：从 Node 版桥带一份配置与状态（会话映射/唤醒配置沿用，无缝切换）。
 if ($NodeBridge -and (Test-Path $NodeBridge)) {
