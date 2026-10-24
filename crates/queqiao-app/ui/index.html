@@ -75,7 +75,7 @@
       <button class="ghost" onclick="checkUpdate()">检查更新</button>
       <span class="hint" id="orchMsg"></span>
     </div>
-    <div class="hint" style="margin-top:6px">DSH 未跑会自动拉起；SnowLuma 按授权边界不代劳（EULA §5.4）——未就绪时打开其目录请手动启动；桥等两者就绪后自动启动。</div>
+    <div class="hint" style="margin-top:6px">DSH 未跑自动拉起；SnowLuma 按 A 档授权（"安装、启动和运行"）代为拉起官方 launcher.bat——QQ 登录与 OneBot 开启仍需你在其窗口完成；桥等两者就绪后自动启动。</div>
   </section>
 
   <section>
@@ -198,7 +198,7 @@ async function refreshComponents() {
   try { st = await T.core.invoke('components_status'); } catch (e) { /* 非 Tauri 环境保持默认 */ }
   setCard('dsh', st.dsh, st.dsh ? '运行中' : '未运行（一键启动可代劳）');
   const slOk = st.snowluma && st.snowlumaHttp;
-  setCard('sl', slOk, slOk ? '运行中 · OneBot 就绪' : (st.snowluma ? '运行中 · OneBot 未就绪（登录 QQ 并开启 OneBot）' : '未运行（不代劳：双击 launcher.bat）'));
+  setCard('sl', slOk, slOk ? '运行中 · OneBot 就绪' : (st.snowluma ? '运行中 · OneBot 未就绪（登录 QQ 并开启 OneBot）' : '未运行（一键启动可代为拉起）'));
   setCard('bridge', st.bridge, st.bridge ? '运行中' : '已停止');
   return st;
 }
@@ -228,9 +228,15 @@ async function startAll() {
     st = await refreshComponents();
     if (!st.snowlumaHttp) {
       if (!st.snowluma) {
-        msg.textContent = '等待 SnowLuma——请双击其目录下 launcher.bat 并登录 QQ';
-        try { await T.core.invoke('open_snowluma_dir'); } catch (e) { }
-        toast('SnowLuma 不自动启动（授权边界）——手动启动后自动继续', true);
+        msg.textContent = 'SnowLuma 未运行——正在代为启动（A 档授权：脚本启动官方发行包）…';
+        try {
+          await T.core.invoke('start_snowluma');
+          toast('已启动 SnowLuma——请在其中登录 QQ 并开启 OneBot，就绪后自动继续', true);
+        } catch (e) {
+          msg.textContent = 'SnowLuma 启动失败——请手动双击其目录下 launcher.bat';
+          toast(String(e), false);
+          try { await T.core.invoke('open_snowluma_dir'); } catch (e2) { }
+        }
       } else {
         msg.textContent = 'SnowLuma 已运行——等待 OneBot 服务就绪（登录 QQ 并开启 OneBot）';
       }

@@ -359,6 +359,34 @@ fn start_dsh() -> Result<String, String> {
     Ok(name)
 }
 
+/// 拉起已安装的 SnowLuma（A 档授权原文："通过脚本……在用户本地安装、启动和
+/// 运行"——2026-09-20 L6 裁决的"不程序化启停"在'启动'这一点上已被书面授权
+/// 覆盖；'停止'仍未授权，不做）。按官方随附方式：launcher.bat、带自身控制台
+/// 窗口、不注入不修改。
+#[tauri::command]
+fn start_snowluma(state: tauri::State<'_, BridgeState>) -> Result<String, String> {
+    let (dir, _) = snowluma_cfg(&state.home);
+    if dir.is_empty() {
+        return Err("config 未配置 snowluma.homeDir（设置页填写后重试）".to_owned());
+    }
+    let launcher = std::path::Path::new(&dir).join("launcher.bat");
+    if !launcher.exists() {
+        return Err(format!(
+            "{} 下没有 launcher.bat——请先安装 SnowLuma（安装器可从官方渠道下载）",
+            dir
+        ));
+    }
+    // 直接 spawn .bat：std 自动经 cmd 执行；无控制台的 GUI 父进程会为新进程
+    // 分配控制台窗口——正是手动双击 launcher.bat 的官方形态（登录/输出都在
+    // 这个窗口里）。不用 `cmd /c start`——无控制台父进程本就开新窗口，且
+    // start 的窗口标题引号语义在参数数组里易歧义（实测踩过）。
+    Command::new(&launcher)
+        .current_dir(&dir)
+        .spawn()
+        .map_err(|e| format!("启动 SnowLuma 失败：{e}"))?;
+    Ok(dir)
+}
+
 /// 打开 SnowLuma 所在目录（资源管理器）——不是启停，只是给用户可操作的提示。
 #[tauri::command]
 fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String> {
@@ -501,7 +529,8 @@ fn main() {
             open_snowluma_dir,
             migrate_from_node,
             check_update_direct,
-            pick_folder
+            pick_folder,
+            start_snowluma
         ])
         .setup(|app| {
             let handle = app.handle().clone();
