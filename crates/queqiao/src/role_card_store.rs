@@ -64,6 +64,13 @@ pub fn hint_v2(home: &Path, conv_key: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    /// 文件系统测试互斥（同一 temp 根下的目录操作存在偶发竞态，实测 1/30
+    /// 复现——串行化消除；锁粒度到模块即可）。
+    static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn fs_guard() -> std::sync::MutexGuard<'static, ()> {
+        FS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn setup(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("qq-role-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -78,6 +85,7 @@ mod tests {
 
     #[test]
     fn global_and_per_conv_role() {
+        let _fs = fs_guard();
         let home = setup(
             "a",
             &[
@@ -101,6 +109,7 @@ mod tests {
 
     #[test]
     fn missing_role_or_card_returns_empty() {
+        let _fs = fs_guard();
         let home = setup("a", &[("state/current-role.json", r#"{"role":"不存在"}"#)]);
         assert_eq!(hint_v2(&home, "group:1", 6000), "");
         let empty = setup("b0", &[]);
@@ -110,6 +119,7 @@ mod tests {
 
     #[test]
     fn traversal_name_neutralized() {
+        let _fs = fs_guard();
         // 用户手改 current-role.json 写恶意名：净化层剥掉路径字符后若指向
         // 不存在的卡即返回空——不存在读 ROLES_DIR 之外文件的可能。
         let home = setup(

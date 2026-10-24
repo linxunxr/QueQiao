@@ -49,8 +49,15 @@ pub fn save(file: &Path, entries: &[StickerEntry]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// 文件系统测试互斥（temp 目录操作偶发竞态，串行化消除）。
+    static FS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn fs_guard() -> std::sync::MutexGuard<'static, ()> {
+        FS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn roundtrip_and_corruption_guard() {
+        let _fs = fs_guard();
         let dir = std::env::temp_dir().join(format!("qq-stk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
