@@ -164,6 +164,7 @@ pub fn write_apply_bat(staging: &Path, home: &Path) -> Result<PathBuf, String> {
          {}\
          if exist \"{staging}\\install.bat\" copy /y \"{staging}\\install.bat\" install.bat >nul\r\n\
          if exist \"{staging}\\upgrade.bat\" copy /y \"{staging}\\upgrade.bat\" upgrade.bat >nul\r\n\
+         if exist \"{staging}\\migrate-from-node.ps1\" copy /y \"{staging}\\migrate-from-node.ps1\" migrate-from-node.ps1 >nul\r\n\
          if exist \"{staging}\\THIRD_PARTY_NOTICES.md\" copy /y \"{staging}\\THIRD_PARTY_NOTICES.md\" THIRD_PARTY_NOTICES.md >nul\r\n\
          if exist \"{staging}\\dsh\" xcopy /e /y /i \"{staging}\\dsh\" dist-preset-update >nul 2>&1\r\n\
          rd /s /q \"{staging}\" >nul 2>&1\r\n\
@@ -209,6 +210,12 @@ mod tests {
         assert!(content.contains("ren \"queqiao-mcp.exe\" \"queqiao-mcp.exe.old\""));
         assert!(content.contains("ren \"queqiao-app.exe\" \"queqiao-app.exe.old\""));
         assert!(content.contains("del queqiao-app.exe.old"));
+        // 迁移脚本必须随更新补齐（客户端"从 Node 版迁移"按钮运行时硬依赖；
+        // 与 upgrade.ps1 同款缺口——2026-10-24 真机存量目录缺它，点按钮即报错）。
+        assert!(content.contains(&format!(
+            "copy /y \"{}\\migrate-from-node.ps1\" migrate-from-node.ps1",
+            dir.join("update-staging").display()
+        )));
         assert!(content.contains("start \"\" queqiao.exe"));
         assert!(content.contains(&format!("cd /d \"{}\"", dir.display())));
         let _ = std::fs::remove_dir_all(&dir);
