@@ -154,9 +154,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "active-members",
         method: "GET",
         flag: Some("getActiveMembers"),
-        params: &[
-            ("limit", "number", false, "人数上限（默认 10，最大 20）"),
-        ],
+        params: &[("limit", "number", false, "人数上限（默认 10，最大 20）")],
     },
     ToolDef {
         name: "qq_slang_query",
@@ -342,6 +340,108 @@ fn input_schema(def: &ToolDef) -> Value {
 }
 
 /// 转发工具调用到桥 HTTP。GET 走查询串，POST 走 JSON body。
+/// 工具调用审计（Node tool-calls.jsonl 同源）：call/result 两行流水，
+/// args 里 token 类参数打码。失败不影响工具调用本身。
+fn audit_tool_call(def: &ToolDef, args: &Value, result: &Result<Value, String>, key: &str) {
+    use std::io::Write;
+    let home = std::env::var("QUEQIAO_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let _ = std::fs::create_dir_all(home.join("state"));
+    let file = home.join("state").join("tool-calls.jsonl");
+    let now = chrono_like_now();
+    // token 类参数打码（审计流水会随诊断包导出）。
+    let mut sanitized = args.clone();
+    if let Some(obj) = sanitized.as_object_mut() {
+        for k in ["agentToken", "token", "consoleToken"] {
+            if let Some(v) = obj.get_mut(k)
+                && v.as_str().is_some_and(|x| !x.is_empty())
+            {
+                *v = json!("***");
+            }
+        }
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+    else {
+        return;
+    };
+    let tool = format!("mcp__queqiao__{}", def.name);
+    let call = json!({
+        "type": "call", "time": now, "key": key, "tool": tool,
+        "args": serde_json::to_string(&sanitized).unwrap_or_default(),
+    });
+    let _ = writeln!(f, "{call}");
+    let result_line = match result {
+        Ok(_) => {
+            json!({"type": "result", "time": now, "key": key, "tool": tool, "ok": true, "error": null})
+        }
+        Err(e) => {
+            json!({"type": "result", "time": now, "key": key, "tool": tool, "ok": false, "error": e})
+        }
+    };
+    let _ = writeln!(f, "{result_line}");
+}
+
+fn chrono_like_now() -> String {
+    // ISO 时间戳（免引 chrono：systemtime→UTC 手拼，精度秒足够审计用途）。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = now / 86400;
+    let (y, m, d) = civil_from_days(days as i64);
+    let secs = now % 86400;
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let mut y = 1970i64;
+    let mut rest = days;
+    loop {
+        let len = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if rest < len {
+            break;
+        }
+        rest -= len;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let ml = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for (m, &l) in (1u32..).zip(ml.iter()) {
+        if rest < l {
+            return (y, m, rest as u32 + 1);
+        }
+        rest -= l;
+    }
+    (y, 12, 31)
+}
+
 fn call_tool(def: &ToolDef, args: &Value, console_token: &str) -> Result<Value, String> {
     let bridge =
         std::env::var("QUEQIAO_BRIDGE").unwrap_or_else(|_| "http://127.0.0.1:3100".to_owned());
@@ -442,7 +542,14 @@ fn handle_request(
                     "result": { "content": [ { "type": "text", "text": format!("工具 {name} 已被 config.socialV2.tools 关闭") } ], "isError": true }
                 });
             }
-            match call_tool(def, &args, console_token) {
+            let key = args
+                .get("conversationKey")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let result = call_tool(def, &args, console_token);
+            audit_tool_call(def, &args, &result, &key);
+            match result {
                 Ok(value) => json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": { "content": [ { "type": "text", "text": value.to_string() } ] }

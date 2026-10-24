@@ -168,6 +168,8 @@ pub async fn serve(
         .route("/api/tokens/series", get(tokens_series))
         .route("/api/tokens/turns", get(tokens_turns))
         .route("/api/socialV2/active-members", get(active_members))
+        .route("/api/socialV2/tool-log", get(tool_log))
+        .route("/api/socialV2/tool-log/clear", post(tool_log_clear))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -532,6 +534,61 @@ async fn diagnostics(
     }))
 }
 
+/// 工具调用审计查询（Node readToolLog）：尾 N 条 call/result 流水。
+/// 仅控制台——agent token 一律拒绝（防 AI 审计自己越权）。
+async fn tool_log(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用");
+        }
+    }
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 500);
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("tool-calls.jsonl");
+    let raw = std::fs::read_to_string(&file).unwrap_or_default();
+    let entries: Vec<Value> = raw
+        .lines()
+        .rev()
+        .take(limit)
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    ok_json(json!({ "entries": entries }))
+}
+
+/// 清空审计流水（控制台）。
+async fn tool_log_clear(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用");
+        }
+    }
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("tool-calls.jsonl");
+    let _ = std::fs::write(&file, "");
+    ok_json(json!({ "cleared": true }))
+}
+
 /// qq_get_active_members：会话活跃成员（recentMessages 按 sender 聚合）。
 async fn active_members(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
@@ -546,7 +603,10 @@ async fn active_members(
         Ok(k) => k,
         Err(e) => return e,
     };
-    let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(10);
     let store = state.social.lock().unwrap();
     let recent = store
         .conversation(&key)

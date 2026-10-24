@@ -173,8 +173,14 @@ pub fn active_members(
             continue;
         }
         let uid = m.user_id.clone().unwrap_or_default();
-        let k = if uid.is_empty() { m.sender.clone() } else { uid.clone() };
-        let e = map.entry(k).or_insert((m.sender.clone(), None, 0, 0, false));
+        let k = if uid.is_empty() {
+            m.sender.clone()
+        } else {
+            uid.clone()
+        };
+        let e = map
+            .entry(k)
+            .or_insert((m.sender.clone(), None, 0, 0, false));
         if e.1.is_none() && !uid.is_empty() {
             e.1 = Some(uid);
         }
@@ -193,8 +199,14 @@ pub fn active_members(
         })
         .collect();
     out.sort_by(|a, b| {
-        let (ca, cb) = (a["count"].as_u64().unwrap_or(0), b["count"].as_u64().unwrap_or(0));
-        let (ta, tb) = (a["lastTime"].as_u64().unwrap_or(0), b["lastTime"].as_u64().unwrap_or(0));
+        let (ca, cb) = (
+            a["count"].as_u64().unwrap_or(0),
+            b["count"].as_u64().unwrap_or(0),
+        );
+        let (ta, tb) = (
+            a["lastTime"].as_u64().unwrap_or(0),
+            b["lastTime"].as_u64().unwrap_or(0),
+        );
         cb.cmp(&ca).then(tb.cmp(&ta))
     });
     out.truncate(limit.clamp(1, 20));
