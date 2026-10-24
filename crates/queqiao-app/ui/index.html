@@ -92,7 +92,8 @@
     <h2>数据迁移（从 Node 版 qq-bridge）</h2>
     <div class="row">
       <div class="field" style="flex:3 1 320px"><label>Node 版桥路径（含 config.json 与 state/）</label><input id="f-nodeBridge" placeholder="如 D:\100work\103Tools\qq-bridge"></div>
-      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="migrateNode()">迁移到本安装目录</button></div>
+      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="browseNodeBridge()">浏览…</button></div>
+      <div class="field" style="flex:0 0 auto; align-self:end"><button onclick="migrateNode()">迁移到本安装目录</button></div>
     </div>
     <div class="hint">带走 config、DSH 会话映射、唤醒状态、记忆、日记、表情包、黑话、人格卡等 15 项；目标同名文件默认跳过（不覆盖）。迁移后重启桥生效。</div>
     <pre id="migrateOut" style="display:none; background:#0a0e12; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:11px/1.5 Consolas,monospace; color:#9fb0c0; white-space:pre-wrap; max-height:200px; overflow-y:auto; margin-top:8px"></pre>
@@ -251,6 +252,13 @@ async function startAll() {
 }
 
 async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { alert(e); } refreshComponents(); }
+
+async function browseNodeBridge() {
+  try {
+    const p = await T.core.invoke('pick_folder', { title: '选择 Node 版桥（qq-bridge）目录' });
+    if (p) document.getElementById('f-nodeBridge').value = p;
+  } catch (e) { toast('目录选择不可用：' + e, false); }
+}
 
 async function migrateNode() {
   const dir = document.getElementById('f-nodeBridge').value.trim();

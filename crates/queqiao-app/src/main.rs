@@ -373,6 +373,38 @@ fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String>
         .map_err(|e| format!("打开目录失败：{e}"))
 }
 
+/// 系统目录选择对话框（WinForms FolderBrowserDialog，STA；install.ps1 同款）。
+/// 返回 None = 用户取消。
+#[tauri::command]
+async fn pick_folder(title: String) -> Result<Option<String>, String> {
+    let script = format!(
+        r#"Add-Type -AssemblyName System.Windows.Forms
+$d = New-Object System.Windows.Forms.FolderBrowserDialog
+$d.Description = '{}'
+if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }} else {{ Write-Output '' }}"#,
+        title.replace('\'', "''")
+    );
+    // 对话框必须可见（不加 CREATE_NO_WINDOW）；阻塞 UI 线程不可接受——
+    // spawn_blocking 里等，命令本身 async。
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("打开目录选择失败：{e}"))?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if path.is_empty() { None } else { Some(path) })
+}
+
 /// 直查 GitHub latest（不经桥——桥挂了升级入口恰恰必须可用）。
 /// 检测到新版时顺带拉桥的下载通道（桥在线则自动下载/空闲应用；桥离线
 /// 只提示有新版，用户先恢复桥再点一次即可）。
@@ -466,7 +498,8 @@ fn main() {
             start_dsh,
             open_snowluma_dir,
             migrate_from_node,
-            check_update_direct
+            check_update_direct,
+            pick_folder
         ])
         .setup(|app| {
             let handle = app.handle().clone();
