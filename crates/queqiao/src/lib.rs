@@ -10,6 +10,7 @@ pub mod memory;
 pub mod orchestrator;
 pub mod paths;
 pub mod prompt;
+pub mod role_card_store;
 pub mod session_manager;
 pub mod social_store;
 pub mod state;

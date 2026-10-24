@@ -240,9 +240,14 @@ async fn prompt(
     };
     let store = state.social.lock().unwrap();
     let st = store.conversation(&key);
+    // 角色卡（Node 同源）：唤醒 prompt 只注角色名，全文卡由此端点给 AI——
+    // V2 装配（模式筛小节 + 一代指令兜底过滤 + 截断）。
+    let home = crate::paths::queqiao_home();
+    let role_name = crate::role_card_store::current_role_name(&home, &key);
+    let role_hint = crate::role_card_store::hint_v2(&home, &key, state.cfg.role.max_inject_chars);
     ok_json(json!({
         "conversationKey": key,
-        "role": { "name": "", "note": "角色卡加载在控制台批次接入" },
+        "role": { "name": role_name, "hint": role_hint },
         "unread": st.map(|s| s.unread.len()).unwrap_or(0),
         "wakeConfig": st.map(|s| s.wake_config.clone()).unwrap_or_default(),
         "recommendations": state.cfg.social_v2.provide_recommendations,

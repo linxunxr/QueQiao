@@ -28,6 +28,7 @@ pub mod media_cache;
 pub mod rate;
 pub mod recall;
 pub mod retry;
+pub mod role_card;
 pub mod runtime;
 pub mod schedule;
 pub mod search;

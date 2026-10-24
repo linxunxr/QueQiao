@@ -619,7 +619,6 @@ async fn run(setup: Setup) {
         reconnect: reconnect.clone(),
         social: social_arc.clone(),
         wake_cfg: WakePromptConfig {
-            role_name: String::new(), // current-role.json 读取在控制台批次接入
             pre_sleep_ms: cfg.social_v2.wake.pre_sleep_wait_ms,
             reply_quiet_ms: cfg.social_v2.wait.default_quiet_ms,
             reply_remaining_ms: cfg.social_v2.wait.default_quiet_ms,
@@ -777,7 +776,6 @@ struct Executor {
 
 /// 唤醒文本构造参数（配置切片）。
 struct WakePromptConfig {
-    role_name: String,
     pre_sleep_ms: u64,
     reply_quiet_ms: u64,
     reply_remaining_ms: u64,
@@ -843,7 +841,13 @@ impl Executor {
                         };
                         queqiao::prompt::PromptContext {
                             key: key.clone(),
-                            role_name: self.wake_cfg.role_name.clone(),
+                            // 当前角色（current-role.json，perConv 覆盖全局）——
+                            // 唤醒 prompt 只注角色名一行，全文卡由 qq_get_prompt 查。
+                            role_name: queqiao::role_card_store::current_role_name(
+                                &queqiao::paths::queqiao_home(),
+                                &key,
+                            )
+                            .unwrap_or_default(),
                             agent_token: token,
                             unread_count: unread,
                             last_message: last_msg,
