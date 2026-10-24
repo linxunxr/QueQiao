@@ -27,22 +27,34 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
 
+# 布局检测（与 install.ps1 同款）：发布包（zip 根自带构建好的 exe）直接
+# 复制、无需 Rust 工具链；源码布局（git clone）才本地构建。
+$shipped = @('queqiao.exe', 'queqiao-mcp.exe', 'queqiao-app.exe') |
+    Where-Object { Test-Path (Join-Path $RepoRoot $_) }
 Write-Host '== 1/4 release 构建 ==' -ForegroundColor Cyan
-Push-Location $RepoRoot
-cargo build --release
-if ($LASTEXITCODE -ne 0) { throw '构建失败' }
-Pop-Location
+if ($shipped.Count -ge 2) {
+    Write-Host "  发布包自带可执行文件（$(@($shipped).Count) 个）——跳过构建，无需 Rust 工具链" -ForegroundColor Green
+} else {
+    Push-Location $RepoRoot
+    cargo build --release
+    if ($LASTEXITCODE -ne 0) { throw '构建失败' }
+    Pop-Location
+}
 
 Write-Host '== 2/4 dist 布局 ==' -ForegroundColor Cyan
 $defaultDir = "$env:LOCALAPPDATA\QueQiao"
 if (-not $InstallDir) {
     $answer = Read-Host "  安装目录（回车 = [$defaultDir]，或输入已有安装路径）"
-    $InstallDir = if ($answer.Trim()) { $answer.Trim() } else { $defaultDir }
+    # PS5.1：Read-Host 在 stdin 关闭/非交互时返回 $null——防 .Trim() 崩溃。
+    $trimmed = if ($null -ne $answer) { "$answer".Trim() } else { '' }
+    $InstallDir = if ($trimmed) { $trimmed } else { $defaultDir }
 }
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 if ($shipped.Count -ge 2) {
     foreach ($exe in $shipped) { Copy-Item (Join-Path $RepoRoot $exe) $Dist -Force }
+    $notice = Join-Path $RepoRoot 'THIRD_PARTY_NOTICES.md'
+    if (Test-Path $notice) { Copy-Item $notice $Dist -Force }
 } else {
     Copy-Item (Join-Path $RepoRoot 'target\release\queqiao.exe') $Dist -Force
     Copy-Item (Join-Path $RepoRoot 'target\release\queqiao-mcp.exe') $Dist -Force
@@ -66,7 +78,7 @@ if ($NodeBridge -and (Test-Path $NodeBridge)) {
 Write-Host '== 3/4 DSH MCP 注册 ==' -ForegroundColor Cyan
 $McpExe = Join-Path $Dist 'queqiao-mcp.exe'
 $PatchFile = Join-Path $DshHome "profiles\$Profile\cordis.patch.yml"
-if (-not (Test-Path (PatchFile)) -and (Test-Path (Join-Path $DshHome 'profiles'))) {
+if (-not (Test-Path $PatchFile) -and (Test-Path (Join-Path $DshHome 'profiles'))) {
     New-Item -ItemType File -Path $PatchFile -Force | Out-Null
 }
 $block = @"
