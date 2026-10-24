@@ -442,6 +442,8 @@ async fn run(setup: Setup) {
             no_action_limit: cfg.social_v2.wake.no_action_limit,
             turn_lease_ms: 30 * 60_000,
             pending_fallback_ms: 35 * 60_000,
+            history_trim_cooldown_ms: 10 * 60_000,
+            history_trim_resend_ms: 3_000,
         },
         DiaryRules {
             enabled: cfg.social_v2.diary.enabled,
@@ -759,6 +761,8 @@ fn bridge_mux_envelope(
                 key,
                 session_id,
                 ok,
+                // 原文透传给决策层——413 历史超限判定在 core（is_history_limit_error）。
+                error_text: (!ok).then(|| reason.to_string()),
             })
         }
         // 其余帧（assistant/message、tool/*…）刷新租约心跳。
@@ -947,6 +951,15 @@ impl Executor {
                 }
                 BridgeAction::RefundWakeTime { key, at } => {
                     println!("[{now}] RefundWakeTime {key} @{at}");
+                }
+                BridgeAction::RetireSession { key } => {
+                    // 413 历史超限退役：桥侧记忆保留，下次投递 fail-closed 重建。
+                    if let Ok(mut m) = self.sessions.lock() {
+                        m.retire(&key);
+                    }
+                    queqiao::logging::log(&format!("[{now}] RetireSession {key}（映射已退役）"));
+                    // mux follow 的 sessionId 已失效——重连按新映射重建。
+                    self.reconnect.notify_one();
                 }
                 BridgeAction::SaveState => {}
                 BridgeAction::Log { message } => {

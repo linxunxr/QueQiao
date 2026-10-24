@@ -42,6 +42,9 @@ pub enum TimerKind {
     DiaryTick,
     /// 主动检查（30~90min 随机间隔）。
     ProactiveCheck,
+    /// 历史超限退役后的重投（默认 3s；到点绕频率判定直接重发唤醒——
+    /// 失败回合已退配额，重投不该再吃频率窗）。
+    HistoryTrim,
 }
 
 /// 入站事件（bin 归一后的决策输入）。
@@ -67,6 +70,8 @@ pub enum BridgeEvent {
         key: String,
         session_id: String,
         ok: bool,
+        /// 失败回合的错误文本（reason 原文；413 判定用）。
+        error_text: Option<String>,
     },
     /// SnowLuma 心跳（`status.good` 权威健康信号；None 为旧运行时缺字段）。
     UpstreamHeartbeat { good: Option<bool> },
@@ -93,6 +98,9 @@ pub enum BridgeAction {
     CancelTimer { key: String, timer: TimerKind },
     /// 失败回合退配额：回滚指定时刻记的唤醒（迁移红线之三）。
     RefundWakeTime { key: String, at: u64 },
+    /// 退役 DSH 会话映射（413 历史超限 / not-found：桥侧记忆保留，
+    /// 下次投递按 fail-closed 重建新会话）。
+    RetireSession { key: String },
     /// 状态落盘（节流由 bin 决定）。
     SaveState,
     /// 运行日志（桥日志与对拍轨迹都吃这个）。

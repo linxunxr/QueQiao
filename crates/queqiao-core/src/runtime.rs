@@ -50,6 +50,8 @@ pub struct SessionRuntime {
     pub pending_timer: Option<PendingTimer>,
     pub turn: Option<TurnState>,
     /// 最近一次真实唤醒的时刻（error 回合退配额的回滚锚点）。
+    /// 历史超限上次退役时间戳（0=无；冷却防误判循环——Node historyTrimAt 内存语义一致）。
+    pub history_trim_at: u64,
     pub last_wake_at: Option<u64>,
     /// 唤醒在途（SendPrompt 已发、回合未开始——Node pendingWakeKeys）。
     pub prompt_in_flight: bool,
@@ -71,6 +73,7 @@ impl SessionRuntime {
             pending_queue: Vec::new(),
             pending_timer: None,
             turn: None,
+            history_trim_at: 0,
             last_wake_at: None,
             prompt_in_flight: false,
         }
@@ -97,6 +100,10 @@ pub struct DecideRules {
     pub turn_lease_ms: u64,
     /// 暂存兜底时长（默认 35min，必须 > 租约）。
     pub pending_fallback_ms: u64,
+    /// 历史超限退役冷却（默认 10min：冷却内重复 413 不再触发，防误判循环）。
+    pub history_trim_cooldown_ms: u64,
+    /// 历史超限退役后的重投延迟（默认 3s）。
+    pub history_trim_resend_ms: u64,
 }
 
 impl Default for DecideRules {
@@ -108,6 +115,8 @@ impl Default for DecideRules {
             no_action_limit: 3,
             turn_lease_ms: 30 * 60_000,
             pending_fallback_ms: 35 * 60_000,
+            history_trim_cooldown_ms: 10 * 60_000,
+            history_trim_resend_ms: 3_000,
         }
     }
 }
@@ -234,7 +243,9 @@ pub fn decide(
             }
             Vec::new()
         }
-        BridgeEvent::TurnEnded { ok, .. } => on_turn_ended(rt, *ok, now_ms, rules),
+        BridgeEvent::TurnEnded { ok, error_text, .. } => {
+            on_turn_ended(rt, *ok, error_text.as_deref(), now_ms, rules)
+        }
         BridgeEvent::UpstreamHeartbeat { .. } => Vec::new(),
     }
 }
@@ -361,6 +372,8 @@ fn on_timer(
         }
         TimerKind::PendingWakeFallback => on_fallback(rt, now_ms, rules),
         TimerKind::SleepUntil => fire_wake(rt, "timeout", now_ms, rules),
+        // 413 退役重投：绕频率判定（失败回合已退配额），直接重发唤醒。
+        TimerKind::HistoryTrim => force_wake(rt, "history-trim", now_ms, rules),
         TimerKind::DiaryTick => {
             // 日记三路径判定（定点 / 安静提前 / 冷却）。
             let input = DiaryTickInput {
@@ -422,9 +435,43 @@ fn on_fallback(rt: &mut SessionRuntime, now_ms: u64, rules: &DecideRules) -> Vec
     }
 }
 
+/// 历史超限重投（绕频率判定）：与 fire_wake 同样记账与动作，但不吃频率窗——
+/// 失败回合已退配额，重投再被限流会把 413 修复死锁在冷却里。
+fn force_wake(
+    rt: &mut SessionRuntime,
+    reason: &str,
+    now_ms: u64,
+    rules: &DecideRules,
+) -> Vec<BridgeAction> {
+    rt.wake_times.push(now_ms);
+    let len = rt.wake_times.len();
+    if len > 200 {
+        rt.wake_times.drain(0..len - 200);
+    }
+    rt.last_wake_at = Some(now_ms);
+    rt.prompt_in_flight = true;
+    vec![
+        BridgeAction::SendPrompt {
+            key: rt.key.clone(),
+            reason: reason.to_owned(),
+        },
+        BridgeAction::ScheduleTimer {
+            key: rt.key.clone(),
+            timer: TimerKind::TurnLease,
+            delay_ms: rules.turn_lease_ms,
+        },
+        BridgeAction::ScheduleTimer {
+            key: rt.key.clone(),
+            timer: TimerKind::PendingWakeFallback,
+            delay_ms: rules.pending_fallback_ms,
+        },
+    ]
+}
+
 fn on_turn_ended(
     rt: &mut SessionRuntime,
     ok: bool,
+    error_text: Option<&str>,
     now_ms: u64,
     rules: &DecideRules,
 ) -> Vec<BridgeAction> {
@@ -455,6 +502,30 @@ fn on_turn_ended(
             });
             actions.push(BridgeAction::Log {
                 message: format!("[{}] error 回合退配额（回滚 @{at}）", rt.key),
+            });
+        }
+        // 历史超限（413 chat_history_too_large）：重试无效——退役 DSH 会话
+        // 重建（桥侧记忆保留）+ 3s 后重投；10min 冷却防误判循环
+        //（Node [history-trim] 同源；连续 413 不该把会话锁进频率限制）。
+        if let Some(text) = error_text
+            && crate::retry::is_history_limit_error(text)
+            && now_ms.saturating_sub(rt.history_trim_at) > rules.history_trim_cooldown_ms
+        {
+            rt.history_trim_at = now_ms;
+            actions.push(BridgeAction::Log {
+                message: format!(
+                    "[{}] 会话历史超上游硬限，退役重建 DSH 会话（桥侧记忆保留），{}s 后重投",
+                    rt.key,
+                    rules.history_trim_resend_ms / 1000
+                ),
+            });
+            actions.push(BridgeAction::RetireSession {
+                key: rt.key.clone(),
+            });
+            actions.push(BridgeAction::ScheduleTimer {
+                key: rt.key.clone(),
+                timer: TimerKind::HistoryTrim,
+                delay_ms: rules.history_trim_resend_ms,
             });
         }
         rt.last_wake_at = None;
@@ -641,6 +712,7 @@ mod tests {
                 key: "group:4242".to_owned(),
                 session_id: "s-1".into(),
                 ok: true,
+                error_text: None,
             },
             9000 + 61_000,
         );
@@ -679,6 +751,7 @@ mod tests {
                 key: "group:4242".to_owned(),
                 session_id: "s-1".into(),
                 ok: false,
+                error_text: None,
             },
             12000,
         );
@@ -757,6 +830,7 @@ mod tests {
                     key: "group:4242".to_owned(),
                     session_id: "s".into(),
                     ok: true,
+                    error_text: None,
                 },
                 (round + 1) * 1000 + 100,
             );
@@ -788,6 +862,7 @@ mod tests {
                 key: "group:4242".to_owned(),
                 session_id: "s".into(),
                 ok: true,
+                error_text: None,
             },
             8500,
         );
@@ -881,5 +956,118 @@ mod tests {
         let actions = decide1(&mut rt, &BridgeEvent::MessageArrived(Box::new(m)), 1000);
         assert!(actions.is_empty());
         assert!(rt.pending_timer.is_none());
+    }
+}
+
+#[cfg(test)]
+mod history_trim_tests {
+    use super::*;
+    use crate::action::{BridgeAction, BridgeEvent, TimerKind};
+
+    fn rt() -> SessionRuntime {
+        SessionRuntime::new("group:1", TriggerRules::default())
+    }
+    fn decide1(rt: &mut SessionRuntime, event: &BridgeEvent, now_ms: u64) -> Vec<BridgeAction> {
+        let rules = DecideRules::default();
+        let diary = DiaryRules::default();
+        let now_local = crate::diary::CivilTime {
+            date: crate::diary::CivilDate {
+                year: 2026,
+                month: 10,
+                day: 21,
+            },
+            hour: 12,
+            minute: 0,
+        };
+        let mut rng = || 0.99;
+        decide(rt, event, now_ms, now_local, &rules, &diary, &mut rng)
+    }
+    fn err_turn(text: &str) -> BridgeEvent {
+        BridgeEvent::TurnEnded {
+            key: "group:1".into(),
+            session_id: "s-1".into(),
+            ok: false,
+            error_text: Some(text.into()),
+        }
+    }
+
+    /// 413 → 退役 + 3s 重投定时器；重投 fire 绕频率直接 SendPrompt。
+    #[test]
+    fn history_limit_retires_and_reschedules() {
+        let mut r = rt();
+        // 先有在途回合（退配额路径成立）。
+        let _ = decide1(&mut r, &err_turn("413 chat_history_too_large"), 10_000_000);
+        let mut r2 = rt();
+        r2.last_wake_at = Some(10_000_000);
+        r2.wake_times = vec![10_000_000];
+        let actions = decide1(&mut r2, &err_turn("413 chat_history_too_large"), 10_001_000);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, BridgeAction::RetireSession { key } if key == "group:1"))
+        );
+        let sched = actions.iter().find_map(|a| match a {
+            BridgeAction::ScheduleTimer {
+                timer: TimerKind::HistoryTrim,
+                delay_ms,
+                ..
+            } => Some(*delay_ms),
+            _ => None,
+        });
+        assert_eq!(sched, Some(3000), "重投延迟取 rules.history_trim_resend_ms");
+        assert_eq!(r2.history_trim_at, 10_001_000, "冷却戳记录");
+
+        // 冷却内第二次 413：退配额照常，但不再退役。
+        let mut r3 = rt();
+        r3.last_wake_at = Some(10_000_000);
+        r3.history_trim_at = 10_001_000;
+        let actions = decide1(&mut r3, &err_turn("413 chat_history_too_large"), 10_002_000);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, BridgeAction::RetireSession { .. })),
+            "冷却内不重复退役"
+        );
+
+        // 冷却过后再 413：重新退役（前一步已 take 掉 last_wake_at，重设防早退守卫）。
+        r3.last_wake_at = Some(10_003_000);
+        let actions = decide1(&mut r3, &err_turn("413 chat_history_too_large"), 10_700_000);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, BridgeAction::RetireSession { .. }))
+        );
+    }
+
+    /// 重投 fire：绕频率判定（窗口塞满也必须发——退配额已回滚，不能再被限流死锁）。
+    #[test]
+    fn history_trim_fires_despite_rate_limit() {
+        let mut r = rt();
+        // 塞满分钟窗（正常唤醒会被拒）。
+        r.wake_times = vec![10_000_000, 10_000_001];
+        let actions = decide1(
+            &mut r,
+            &BridgeEvent::TimerFired {
+                key: "group:1".into(),
+                timer: TimerKind::HistoryTrim,
+            },
+            2000,
+        );
+        assert!(actions.iter().any(
+            |a| matches!(a, BridgeAction::SendPrompt { reason, .. } if reason == "history-trim")
+        ));
+    }
+
+    /// 非 413 错误不触发退役。
+    #[test]
+    fn other_errors_do_not_retire() {
+        let mut r = rt();
+        r.last_wake_at = Some(10_000_000);
+        let actions = decide1(&mut r, &err_turn("503 chat_admission_busy"), 10_001_000);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, BridgeAction::RetireSession { .. }))
+        );
     }
 }
