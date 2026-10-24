@@ -165,6 +165,12 @@ if (Test-Path $PatchFile) {
 }
 
 Write-Host '== 4/4 启动步骤 ==' -ForegroundColor Cyan
+# 升级时若程序在跑：旧进程仍映射旧文件（已转 .old）——必须退出重开才加载新版。
+$running = Get-CimInstance Win32_Process -Filter "Name='queqiao-app.exe' OR Name='queqiao.exe'" -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host "`n  ⚠ 检测到鹊桥正在运行（$(@($running).Count) 个进程）——新版本已就位但旧窗口仍在跑旧代码。" -ForegroundColor Yellow
+    Write-Host '  请从系统托盘图标右键退出（点窗口 × 只是隐藏到托盘，进程不退），再从桌面快捷方式重开。' -ForegroundColor Yellow
+}
 Write-Host @"
   1. 停 Node 版桥（结束 node bridge.js 或其窗口）
   2. 启动：cd $Dist ; .\queqiao.exe
