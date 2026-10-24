@@ -165,11 +165,34 @@ if (Test-Path $PatchFile) {
 }
 
 Write-Host '== 4/4 启动步骤 ==' -ForegroundColor Cyan
-# 升级时若程序在跑：旧进程仍映射旧文件（已转 .old）——必须退出重开才加载新版。
+# 升级时若程序在跑：旧进程仍映射旧文件（已转 .old）——退出重开才加载新版。
+# 客户端启动会自动拉起桥，这里只需退出全部旧进程再启动客户端。
 $running = Get-CimInstance Win32_Process -Filter "Name='queqiao-app.exe' OR Name='queqiao.exe'" -ErrorAction SilentlyContinue
+$appExe = Join-Path $Dist 'queqiao-app.exe'
 if ($running) {
-    Write-Host "`n  ⚠ 检测到鹊桥正在运行（$(@($running).Count) 个进程）——新版本已就位但旧窗口仍在跑旧代码。" -ForegroundColor Yellow
-    Write-Host '  请从系统托盘图标右键退出（点窗口 × 只是隐藏到托盘，进程不退），再从桌面快捷方式重开。' -ForegroundColor Yellow
+    Write-Host "`n  检测到鹊桥正在运行（$(@($running).Count) 个进程）——退出重开才加载新版。" -ForegroundColor Yellow
+    $answer = Read-Host '  现在自动重启鹊桥？（回车 = 是；n = 稍后自己从托盘退出再开）'
+    $go = if ($null -ne $answer) { "$answer".Trim() } else { '' }
+    if ($go -notmatch '^[nN]') {
+        foreach ($p in $running) {
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+        if (Test-Path $appExe) {
+            try {
+                Start-Process $appExe -WorkingDirectory $Dist
+                Write-Host "  已重启新版客户端（自动带起桥）：$appExe" -ForegroundColor Green
+            } catch {
+                # 进程已退出而启动失败——不能让用户面前全停，明确给出手动路径。
+                Write-Host "  启动失败（$($_.Exception.Message)）" -ForegroundColor Red
+                Write-Host "  请手动启动：cd $Dist ; .\queqiao-app.exe" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "  $Dist 无 queqiao-app.exe——手动启动：cd $Dist ; .\queqiao.exe" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host '  跳过重启——旧窗口仍是旧代码；托盘退出（点 × 只隐藏不退）后从桌面快捷方式重开。' -ForegroundColor Yellow
+    }
 }
 Write-Host @"
   1. 停 Node 版桥（结束 node bridge.js 或其窗口）
