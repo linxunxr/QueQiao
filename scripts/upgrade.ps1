@@ -129,6 +129,44 @@ if ($NodeBridge -and (Test-Path $NodeBridge)) {
     Write-Host '  请自备 config.json（参考仓库 config 形状）后放入 dist/ 再启动。' -ForegroundColor Yellow
 }
 
+# ── SnowLuma 迁入安装目录（A 档授权："与 Node.js 一同部署到客户端目录"）──
+# 存量用户 homeDir 可能指向安装目录之外的散落位置（旧安装习惯/独立安装），
+# 统一迁到 <InstallDir>\SnowLuma，启动/探测/数据都归拢在安装目录。
+$slCfg = Join-Path $Dist 'config.json'
+if (Test-Path $slCfg) {
+    try {
+        $j = Get-Content $slCfg -Raw -Encoding UTF8 | ConvertFrom-Json
+        $hd = if ($j.snowluma) { [string]$j.snowluma.homeDir } else { '' }
+        $target = Join-Path $Dist 'SnowLuma'
+        if ($hd -and (Test-Path (Join-Path $hd 'launcher.bat')) -and `
+            (-not (Resolve-Path $hd).Path.StartsWith((Resolve-Path $Dist).Path, [StringComparison]::OrdinalIgnoreCase))) {
+            Write-Host "`n== SnowLuma 迁入安装目录 ==" -ForegroundColor Cyan
+            Write-Host "  检测到 homeDir 指向安装目录之外：$hd"
+            if (Test-Path (Join-Path $target 'launcher.bat')) {
+                Write-Host "  安装目录下已有 SnowLuma——仅更新 config.homeDir 指向它（旧目录不动）" -ForegroundColor Yellow
+                $j.snowluma.homeDir = $target
+                $j | ConvertTo-Json -Depth 20 | Out-File $slCfg -Encoding utf8
+            } else {
+                $answer = Read-Host '  迁移过来？（回车 = 迁；n = 保持原位）'
+                $mv = if ($null -ne $answer) { "$answer".Trim() } else { '' }
+                if ($mv -notmatch '^[nN]') {
+                    # 该 SnowLuma 正在运行会锁目录——先停（A 档覆盖启动；停止限本目录迁移场景自用）。
+                    Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+                        Where-Object { $_.CommandLine -like "*$hd*" -and $_.CommandLine -like '*index.mjs*' } |
+                        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                    Start-Sleep 2
+                    Move-Item $hd $target
+                    $j.snowluma.homeDir = $target
+                    $j | ConvertTo-Json -Depth 20 | Out-File $slCfg -Encoding utf8
+                    Write-Host "  已迁入：$target（config.homeDir 已更新）" -ForegroundColor Green
+                } else {
+                    Write-Host "  保持原位（$hd）" -ForegroundColor Yellow
+                }
+            }
+        }
+    } catch { Write-Host "  SnowLuma 迁移检测跳过：$($_.Exception.Message)" -ForegroundColor DarkGray }
+}
+
 Write-Host '== 3/4 DSH MCP 注册 ==' -ForegroundColor Cyan
 $McpExe = Join-Path $Dist 'queqiao-mcp.exe'
 $PatchFile = Join-Path $DshHome "profiles\$Profile\cordis.patch.yml"
