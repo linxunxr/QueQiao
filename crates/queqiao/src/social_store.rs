@@ -160,6 +160,47 @@ fn random_hex24() -> String {
     out
 }
 
+/// 活跃成员聚合（Node /api/socialV2/active-members）：recentMessages 按
+/// 发言者聚合（count/lastTime/isOwner），count 降序 top N；自发消息不计。
+pub fn active_members(
+    recent: &[crate::state::MessageRecord],
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<String, (String, Option<String>, u64, u64, bool)> = BTreeMap::new();
+    for m in recent {
+        if m.is_self {
+            continue;
+        }
+        let uid = m.user_id.clone().unwrap_or_default();
+        let k = if uid.is_empty() { m.sender.clone() } else { uid.clone() };
+        let e = map.entry(k).or_insert((m.sender.clone(), None, 0, 0, false));
+        if e.1.is_none() && !uid.is_empty() {
+            e.1 = Some(uid);
+        }
+        e.2 += 1;
+        if m.time > e.3 {
+            e.3 = m.time;
+        }
+        if m.is_owner {
+            e.4 = true;
+        }
+    }
+    let mut out: Vec<serde_json::Value> = map
+        .into_iter()
+        .map(|(_, (sender, user_id, count, last_time, is_owner))| {
+            serde_json::json!({ "sender": sender, "userId": user_id, "count": count, "lastTime": last_time, "isOwner": is_owner })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        let (ca, cb) = (a["count"].as_u64().unwrap_or(0), b["count"].as_u64().unwrap_or(0));
+        let (ta, tb) = (a["lastTime"].as_u64().unwrap_or(0), b["lastTime"].as_u64().unwrap_or(0));
+        cb.cmp(&ca).then(tb.cmp(&ta))
+    });
+    out.truncate(limit.clamp(1, 20));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

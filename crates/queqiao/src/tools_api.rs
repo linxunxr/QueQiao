@@ -167,6 +167,7 @@ pub async fn serve(
         .route("/api/socialV2/sticker-sync", post(sticker_sync))
         .route("/api/tokens/series", get(tokens_series))
         .route("/api/tokens/turns", get(tokens_turns))
+        .route("/api/socialV2/active-members", get(active_members))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -529,6 +530,30 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// qq_get_active_members：会话活跃成员（recentMessages 按 sender 聚合）。
+async fn active_members(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    let key = match state.authorize(
+        &headers,
+        q.get("conversationKey").map(String::as_str).unwrap_or(""),
+        state.cfg.social_v2.tools.get_active_members,
+    ) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+    let store = state.social.lock().unwrap();
+    let recent = store
+        .conversation(&key)
+        .map(|st| st.recent_messages.clone())
+        .unwrap_or_default();
+    drop(store);
+    ok_json(json!({ "key": key, "members": crate::social_store::active_members(&recent, limit) }))
 }
 
 /// 花费时间序列（控制台趋势图用；仅控制台）。

@@ -149,6 +149,16 @@ const TOOLS: &[ToolDef] = &[
         ],
     },
     ToolDef {
+        name: "qq_get_active_members",
+        description: "会话活跃成员（近期谁在说话、说多少条、管理员标注）",
+        endpoint: "active-members",
+        method: "GET",
+        flag: Some("getActiveMembers"),
+        params: &[
+            ("limit", "number", false, "人数上限（默认 10，最大 20）"),
+        ],
+    },
+    ToolDef {
         name: "qq_slang_query",
         description: "查群聊黑话表（梗/网络用语的含义与用法，按出现次数排序）",
         endpoint: "slang/query",
