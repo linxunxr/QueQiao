@@ -448,11 +448,13 @@ fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String>
 }
 
 /// 系统目录选择对话框（WinForms FolderBrowserDialog，STA；install.ps1 同款）。
-/// 返回 None = 用户取消。
+/// 返回 None = 用户取消。脚本首行把控制台输出切 UTF-8——回传的路径可能含
+/// 中文（用户目录名），PS5.1 默认 GBK 会被 UTF-8 解码成乱码路径。
 #[tauri::command]
 async fn pick_folder(title: String) -> Result<Option<String>, String> {
     let script = format!(
-        r#"Add-Type -AssemblyName System.Windows.Forms
+        r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+Add-Type -AssemblyName System.Windows.Forms
 $d = New-Object System.Windows.Forms.FolderBrowserDialog
 $d.Description = '{}'
 if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }} else {{ Write-Output '' }}"#,
@@ -477,7 +479,11 @@ if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }} else {{ Write-O
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| format!("打开目录选择失败：{e}"))?;
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // trim BOM：子进程输出万一带头 BOM（脚本侧已用无 BOM encoder，双保险）。
+    let path = String::from_utf8_lossy(&out.stdout)
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string();
     Ok(if path.is_empty() { None } else { Some(path) })
 }
 
@@ -541,8 +547,15 @@ fn migrate_from_node(
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
         .map_err(|e| format!("启动迁移脚本失败：{e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    // 脚本侧已把输出切 UTF-8（无 BOM）；万一仍带头 BOM，去之（双保险）。
+    let stdout = String::from_utf8_lossy(&out.stdout)
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr)
+        .trim_start_matches('\u{feff}')
+        .trim()
+        .to_string();
     if !out.status.success() {
         return Err(format!("{stderr}\n{stdout}"));
     }

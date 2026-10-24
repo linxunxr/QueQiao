@@ -30,6 +30,9 @@ param(
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
+# 输出按 UTF-8（无 BOM）：客户端以 UTF-8 回传 UI（from_utf8_lossy），PS5.1
+# 默认 GBK 控制台编码会把中文全变替换符（2026-10-24 真机迁移输出全乱码）。
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 function Write-Ok($m) { Write-Host "  $m" -ForegroundColor Green }
 function Write-Info($m) { Write-Host "  $m" -ForegroundColor Yellow }
 
