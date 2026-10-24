@@ -228,6 +228,75 @@ pub fn find_sticker<'a>(entries: &'a [StickerEntry], r#ref: &str) -> Option<&'a 
     entries.iter().find(|e| sticker_url_key(&e.url) == key)
 }
 
+/// QQ 收藏合并（Node mergeStickerLibrary）：QQ 侧字段（id/resId/url/md5/desc）
+/// 更新，AI 认知（localNote/tags/usage/useCount/lastUsedAt/lastContext）保留；
+/// `complete=true`（一次拉全）时清理 QQ 端已删的 qq 来源条目——count 截断的
+/// 部分结果不能证明其他表情被删。
+pub fn merge_sticker_library(
+    existing: Vec<StickerEntry>,
+    fetched: &[ValueLoose],
+    complete: bool,
+    now_iso: &str,
+) -> Vec<StickerEntry> {
+    let mut out: Vec<StickerEntry> = existing
+        .into_iter()
+        .filter_map(|e| normalize_entry(&e.into()))
+        .collect();
+    let fetched_ids: Vec<String> = fetched
+        .iter()
+        .map(|f| f.id().trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    for item in fetched {
+        let id = item.id().trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let old = out.iter().find(|e| e.id == id);
+        let mut merged = StickerEntry {
+            id: id.clone(),
+            res_id: item.res_id().trim().to_string(),
+            url: {
+                let u = item.url().trim().to_string();
+                if u.is_empty() {
+                    old.map(|o| o.url.clone()).unwrap_or_default()
+                } else {
+                    u
+                }
+            },
+            md5: {
+                let m = item.md5().trim().to_uppercase();
+                if m.is_empty() {
+                    old.map(|o| o.md5.clone()).unwrap_or_default()
+                } else {
+                    m
+                }
+            },
+            desc: item.desc(),
+            local_note: old.map(|o| o.local_note.clone()).unwrap_or_default(),
+            tags: old.map(|o| o.tags.clone()).unwrap_or_default(),
+            usage: old.map(|o| o.usage.clone()).unwrap_or_default(),
+            source: old.map(|o| o.source.clone()).unwrap_or_else(|| "qq".into()),
+            use_count: old.map(|o| o.use_count).unwrap_or(0),
+            last_used_at: old.map(|o| o.last_used_at).unwrap_or(0),
+            last_context: old.map(|o| o.last_context.clone()).unwrap_or_default(),
+            created_at: old
+                .map(|o| o.created_at.clone())
+                .unwrap_or_else(|| now_iso.to_string()),
+            updated_at: now_iso.to_string(),
+        };
+        merged.desc = sanitize_sticker_text(&merged.desc, 200);
+        match out.iter().position(|e| e.id == id) {
+            Some(i) => out[i] = merged,
+            None => out.push(merged),
+        }
+    }
+    if complete {
+        out.retain(|e| e.source != "qq" || fetched_ids.contains(&e.id));
+    }
+    out
+}
+
 /// 注入 AI 的「可用表情包」摘要（Node buildStickerContext）：按 useCount
 /// 降序、有备注优先，取 max 条；带跨会话安全框定。
 pub fn build_sticker_context(entries: &[StickerEntry], max: usize) -> String {
@@ -425,6 +494,39 @@ mod tests {
         assert_eq!(e.tags, vec!["a".to_string()]);
         let v2: ValueLoose = serde_json::from_value(json!({ "resId": "y" })).unwrap();
         assert!(normalize_entry(&v2).is_some(), "resId 也可作 id");
+    }
+
+    #[test]
+    fn merge_preserves_ai_cognition_and_prunes() {
+        let mut local = entry("s1", "旧备注", 7, "");
+        local.local_note = "AI 认知".into();
+        local.tags = vec!["梗".into()];
+        let fetched: Vec<ValueLoose> = vec![
+            serde_json::from_value(json!({
+                "emoji_id": "s1", "url": "https://new/1", "md5": "aa", "desc": "QQ 新备注"
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({ "emoji_id": "s2", "url": "https://n/2" })).unwrap(),
+        ];
+        let out = merge_sticker_library(vec![local], &fetched, true, "2026-10-24T00:00:00Z");
+        assert_eq!(out.len(), 2, "新增 s2 合入");
+        let s1 = out.iter().find(|e| e.id == "s1").unwrap();
+        assert_eq!(s1.desc, "QQ 新备注", "QQ 侧备注更新");
+        assert_eq!(s1.local_note, "AI 认知", "AI 认知保留");
+        assert_eq!(s1.tags, vec!["梗".to_string()]);
+        assert_eq!(s1.use_count, 7);
+        assert_eq!(s1.url, "https://new/1");
+        // complete 清理：qq 来源不在拉取清单的条目被移除，manual/ai 保留。
+        let mut gone = entry("s3", "", 0, "");
+        gone.source = "qq".into();
+        let mut keep = entry("s4", "", 0, "");
+        keep.source = "manual".into();
+        let out2 = merge_sticker_library(vec![gone.clone(), keep], &fetched, true, "t");
+        assert!(!out2.iter().any(|e| e.id == "s3"), "QQ 端已删被清理");
+        assert!(out2.iter().any(|e| e.id == "s4"), "manual 来源保留");
+        // 非完整拉取（count 截断）不清理。
+        let out3 = merge_sticker_library(vec![gone], &fetched, false, "t");
+        assert!(out3.iter().any(|e| e.id == "s3"), "部分结果不清理");
     }
 
     #[test]

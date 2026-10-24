@@ -164,6 +164,7 @@ pub async fn serve(
         .route("/api/session/reset", post(session_reset))
         .route("/api/roles", get(roles_list))
         .route("/api/role", post(role_switch))
+        .route("/api/socialV2/sticker-sync", post(sticker_sync))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -880,6 +881,80 @@ async fn update_check(
     }
 }
 
+/// QQ 收藏同步（Node syncStickerLibrary）：fetch_custom_face_detail → merge
+/// （AI 认知保留、QQ 侧字段更新、complete 清理已删）→ 存库。TTL 缓存
+/// （syncTtlMs 默认 60s）；data 非法**放弃同步**（绝不能拿空数组清库）。
+fn sync_stickers(state: &ToolApiState, force: bool) -> Vec<queqiao_core::sticker::StickerEntry> {
+    use std::sync::Mutex;
+    static SYNCED_AT: Mutex<u64> = Mutex::new(0);
+    let home = crate::paths::queqiao_home();
+    let file = crate::sticker_store::sticker_file(&home);
+    let local = match crate::sticker_store::load(&file) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(), // 只读不写降级
+    };
+    if !state.cfg.social_v2.sticker.enabled {
+        return local;
+    }
+    let now = crate::session_manager::SessionManager::now_ms();
+    let ttl = state.cfg.social_v2.sticker.sync_ttl_ms;
+    let synced = *SYNCED_AT.lock().unwrap_or_else(|e| e.into_inner());
+    if !force && synced > 0 && now.saturating_sub(synced) < ttl {
+        return local;
+    }
+    let count = state.cfg.social_v2.sticker.max_list_count.clamp(1, 500);
+    let resp = state
+        .onebot
+        .call("fetch_custom_face_detail", json!({ "count": count }));
+    let Ok(resp) = resp else {
+        return local; // 失败降级用本地
+    };
+    // 校验三关：status ok / retcode 0 / data 是数组——任何一关不过都放弃同步。
+    let ok = resp.get("status").and_then(Value::as_str) == Some("ok")
+        && resp.get("retcode").and_then(Value::as_i64) == Some(0);
+    let Some(data) = resp.get("data").and_then(Value::as_array) else {
+        return local;
+    };
+    if !ok {
+        return local;
+    }
+    let fetched: Vec<queqiao_core::sticker::ValueLoose> = data
+        .iter()
+        .filter_map(|v| serde_json::from_value::<queqiao_core::sticker::ValueLoose>(v.clone()).ok())
+        .collect();
+    let complete = fetched.len() < count;
+    let now_iso = crate::logging::local_timestamp().unwrap_or_default();
+    let merged = queqiao_core::sticker::merge_sticker_library(local, &fetched, complete, &now_iso);
+    let n = merged.len();
+    if crate::sticker_store::save(&file, &merged).is_ok() {
+        *SYNCED_AT.lock().unwrap_or_else(|e| e.into_inner()) = now;
+        crate::logging::log(&format!(
+            "[sticker] 已同步 QQ 收藏表情 {} 个（本地库 {n} 条，{}）",
+            fetched.len(),
+            if complete { "全量" } else { "部分" }
+        ));
+    }
+    merged
+}
+
+/// 强制同步（控制台按钮/AI 明确要求时）。
+async fn sticker_sync(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let entries = sync_stickers(&state, true);
+    ok_json(json!({ "total": entries.len() }))
+}
+
 /// qq_list_stickers：表情库查询（query 匹配 desc/localNote/usage/tags/id/md5）。
 async fn sticker_list(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
@@ -961,11 +1036,8 @@ async fn sticker_image(
         Err(e) => return e,
     };
     let _ = key;
-    let home = crate::paths::queqiao_home();
-    let entries = match crate::sticker_store::load(&crate::sticker_store::sticker_file(&home)) {
-        Ok(v) => v,
-        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
-    };
+    // 看图也懒同步（收藏可能在会话过程中新增）。
+    let entries = sync_stickers(&state, false);
     let id = q.get("stickerId").map(String::as_str).unwrap_or_default();
     match queqiao_core::sticker::find_sticker(&entries, id) {
         Some(e) => ok_json(json!({
