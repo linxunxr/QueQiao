@@ -84,6 +84,12 @@ impl SessionManager {
             return Ok(existing.clone());
         }
         self.verify_preset()?;
+        // DSH 对不存在路径直接 workspace/invalid-path（realpath ENOENT）——先
+        // 建目录再 create（Node 版 mkdirSync recursive 同款）。旧会话有映射
+        // 不走此处，新会话首次落此：安装目录 state/agents 从未被创建过
+        // （迁移清单不迁 agents/），2026-10-24 真机新会话全卡在 create。
+        std::fs::create_dir_all(&self.agent_dir)
+            .map_err(|e| format!("建 agent 目录失败（{}）：{e}", self.agent_dir))?;
         let mut dsh = self.dsh.lock().map_err(|e| e.to_string())?;
         // workspace/create 对相同 path 幂等；统一 workspace 让 GUI 不散落。
         let ws = dsh
@@ -93,9 +99,11 @@ impl SessionManager {
                 Self::now_ms(),
             )
             .map_err(|e| format!("workspace/create 失败：{e}"))?
-            .result
-            .value
-            .unwrap_or(Value::Null);
+            // 业务错误原样透出（DSH 的 code/message）：曾直接挖 result.value，
+            // ok=false 时错误被吞、统一报"缺 workspaceId"，真因（invalid-path）
+            // 藏在 value=null 后面——日志只见现象不见原因。
+            .unwrap("workspace/create")
+            .map_err(|e| format!("workspace/create 失败：{e}"))?;
         let workspace_id = ws
             .get("workspace")
             .and_then(|w| w.get("workspaceId"))
