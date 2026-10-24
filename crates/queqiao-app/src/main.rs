@@ -322,7 +322,10 @@ fn probe_addrs(http_url: &str) -> Vec<std::net::SocketAddr> {
         return vec![addr];
     }
     use std::net::ToSocketAddrs;
-    (host, port).to_socket_addrs().map(|it| it.collect()).unwrap_or_default()
+    (host, port)
+        .to_socket_addrs()
+        .map(|it| it.collect())
+        .unwrap_or_default()
 }
 
 /// SnowLuma 的 OneBot HTTP 口是否可达（桥 discover panic 的前置条件——
