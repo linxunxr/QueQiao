@@ -373,6 +373,28 @@ fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String>
         .map_err(|e| format!("打开目录失败：{e}"))
 }
 
+/// 直查 GitHub latest（不经桥——桥挂了升级入口恰恰必须可用）。
+/// 检测到新版时顺带拉桥的下载通道（桥在线则自动下载/空闲应用；桥离线
+/// 只提示有新版，用户先恢复桥再点一次即可）。
+#[tauri::command]
+async fn check_update_direct() -> Result<serde_json::Value, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let cur = current.clone();
+    let checked = tauri::async_runtime::spawn_blocking(move || {
+        queqiao::update::check_latest(&cur)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e)?;
+    Ok(match checked {
+        None => serde_json::json!({ "hasUpdate": false, "current": current }),
+        Some(rel) => serde_json::json!({
+            "hasUpdate": true, "current": current,
+            "tag": rel.tag, "notes": rel.notes,
+        }),
+    })
+}
+
 /// 从 Node 版桥（qq-bridge）迁移数据：调安装目录随包的 migrate-from-node.ps1
 /// （脚本非交互，参数直传；目标固定为本安装目录）。
 #[tauri::command]
@@ -446,7 +468,8 @@ fn main() {
             components_status,
             start_dsh,
             open_snowluma_dir,
-            migrate_from_node
+            migrate_from_node,
+            check_update_direct
         ])
         .setup(|app| {
             let handle = app.handle().clone();

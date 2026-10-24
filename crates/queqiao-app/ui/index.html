@@ -417,15 +417,32 @@ async function switchRole() {
 
 async function checkUpdate() {
   toast('正在检查更新…', true);
+  // 客户端直查 GitHub（不经桥——桥挂了升级入口恰恰必须可用）；
+  // 浏览器直开控制台页（无 Tauri）回落桥端点。
+  let v, resOk = true, errMsg = '';
   try {
-    const r = await fetch(BRIDGE + '/api/update/check', { method: 'POST' });
-    const res = await r.json();
-    const v = res.value || res;
+    if (T) { v = await T.core.invoke('check_update_direct'); }
+    else {
+      const r = await fetch(BRIDGE + '/api/update/check', { method: 'POST' });
+      const res = await r.json();
+      v = res.value || res; resOk = res.ok !== false; errMsg = res.error || '';
+    }
+  } catch (e) { toast('检查失败：' + e.message + (bridgeOnline ? '' : '（桥未运行）'), false); return; }
+  try {
+    if (!resOk) { toast(errMsg || '检查失败', false); return; }
     if (!res.ok) { toast(res.error || '检查失败', false); return; }
     if (!v.hasUpdate) { toast('已是最新版本 v' + v.current, true); return; }
     const brief = (v.notes || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).slice(0, 10).join('\n');
-    alert('发现新版本 ' + v.tag + '（当前 v' + v.current + '）\n\n' + brief + '\n\n已开始后台下载，桥空闲时将自动应用并重启。');
-    toast('新版本 ' + v.tag + ' 下载中，空闲时自动应用', true);
+    const follow = bridgeOnline
+      ? '\n\n已开始后台下载，桥空闲时将自动应用并重启。'
+      : '\n\n桥当前未运行——自动下载暂不可用。先启动桥（或一键启动），再点一次检查更新即可开始下载。';
+    alert('发现新版本 ' + v.tag + '（当前 v' + v.current + '）\n\n' + brief + follow);
+    if (bridgeOnline) {
+      try { await fetch(BRIDGE + '/api/update/check', { method: 'POST' }); } catch (e) { }
+      toast('新版本 ' + v.tag + ' 下载中，空闲时自动应用', true);
+    } else {
+      toast('发现新版本 ' + v.tag + '（桥未运行，待桥在线后下载）', true);
+    }
   } catch (e) { toast('检查失败：' + e.message, false); }
 }
 

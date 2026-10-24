@@ -228,7 +228,19 @@ fn main() {
     );
 
     // 发现段全部同步（reqwest blocking 不嵌 tokio——M2/M3 同款约束）。
-    let setup = discover(cfg);
+    // SnowLuma 缺位等待重试（30s 一轮，无限——升级重启/开机自启常早于它；
+    // 期间日志可见，就绪后自动进入决策循环）。
+    let setup = loop {
+        match discover(cfg.clone()) {
+            Some(s) => break s,
+            None => {
+                queqiao::logging::log(
+                    "SnowLuma 未就绪（未运行或 OneBot 未开启），30 秒后重试——就绪后自动继续",
+                );
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        }
+    };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(run(setup));
 }
@@ -246,18 +258,21 @@ struct Setup {
     social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
 }
 
-fn discover(cfg: queqiao::config::Config) -> Setup {
+fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
     let home = std::path::PathBuf::from(&cfg.snowluma.home_dir);
     let accounts = read_accounts(&home);
     println!("SnowLuma 账号配置：{} 份", accounts.len());
     let mut probe = HttpProbe;
-    let found = discover_connection(
+    let Ok(found) = discover_connection(
         &mut probe,
         Some(&cfg.snowluma.access_token),
         &cfg.snowluma.http_url,
         &accounts,
-    )
-    .expect("SnowLuma 连接自发现失败（确认 SnowLuma 已登录且 OneBot 已开启）");
+    ) else {
+        // SnowLuma 未就绪不是致命错（升级重启/开机自启常早于它）：调用方
+        // 带间隔重试，就绪后自动进入决策循环——检查更新等控制台能力不受影响。
+        return None;
+    };
     println!(
         "OneBot 已发现：账号 {}（{}）via {}",
         found
@@ -345,8 +360,12 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
         .expect("social-v2.json 加载失败"),
     ));
 
-    let ws = found.ws.as_ref().expect("该账号没有 wsServers 配置");
-    Setup {
+    // 账号开了 OneBot HTTP 但没开 WS（或配置缺 wsServers）：与 SnowLuma 未就绪
+    // 同路等待重试——用户在 SnowLuma 里补开 WS 后自动继续，不 panic。
+    let Some(ws) = found.ws.as_ref() else {
+        return None;
+    };
+    Some(Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
         ws_token: ws.token.clone(),
         onebot_http: OneBotHttpClient::new(&found.base_url, &found.token, 8000),
@@ -354,7 +373,7 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
         dsh,
         sessions,
         social,
-    }
+    })
 }
 
 async fn run(setup: Setup) {
