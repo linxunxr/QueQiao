@@ -384,8 +384,9 @@ $d.Description = '{}'
 if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }} else {{ Write-Output '' }}"#,
         title.replace('\'', "''")
     );
-    // 对话框必须可见（不加 CREATE_NO_WINDOW）；阻塞 UI 线程不可接受——
-    // spawn_blocking 里等，命令本身 async。
+    // CREATE_NO_WINDOW 只隐藏控制台宿主（不闪 PowerShell 窗）；WinForms
+    // 对话框是 GUI 窗口、由 STA 消息循环创建，不受其影响照常弹出。
+    // spawn_blocking 里等，命令本身 async（不冻 UI）。
     let out = tauri::async_runtime::spawn_blocking(move || {
         std::process::Command::new("powershell")
             .args([
@@ -396,6 +397,7 @@ if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }} else {{ Write-O
                 "-Command",
                 &script,
             ])
+            .creation_flags(0x0800_0000)
             .output()
     })
     .await
