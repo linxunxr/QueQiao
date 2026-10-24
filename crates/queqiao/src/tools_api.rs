@@ -23,6 +23,9 @@ pub struct ToolApiState {
     pub social: Arc<Mutex<SocialStore>>,
     pub onebot: OneBotHttpClient,
     pub cfg: Config,
+    /// 模型目录查询与控制台重置用（bin 注入）。
+    pub dsh: Arc<Mutex<queqiao_dsh::client::DshClient<queqiao_dsh::client::ReqwestTransport>>>,
+    pub sessions: Arc<Mutex<crate::session_manager::SessionManager>>,
     /// 检测到新版本的回投通道（与启动自动检测共用）：主循环收下后
     /// 打印更新内容 → 下载 staging → 全体空闲时应用并重启。
     pub update_tx: tokio::sync::mpsc::Sender<ReleaseInfo>,
@@ -157,6 +160,8 @@ pub async fn serve(
         .route("/api/tokens/summary", get(tokens_summary))
         .route("/api/socialV2/slang/query", get(slang_query))
         .route("/api/socialV2/slang/submit", post(slang_submit))
+        .route("/api/dsh/catalog", get(dsh_catalog))
+        .route("/api/session/reset", post(session_reset))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -519,6 +524,73 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// DSH 模型目录（控制台换模型下拉用；session.modelCatalog 回落 session.models）。
+async fn dsh_catalog(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let Ok(mut dsh) = state.dsh.lock() else {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, "dsh 锁中毒");
+    };
+    let now = crate::session_manager::SessionManager::now_ms();
+    let catalog = match dsh
+        .call_unary("session/modelCatalog", Some(json!({})), now)
+        .and_then(|o| o.unwrap("session/modelCatalog"))
+    {
+        Ok(v) => v,
+        Err(_) => match dsh
+            .call_unary("session/models", Some(json!({})), now)
+            .and_then(|o| o.unwrap("session/models"))
+        {
+            Ok(v) => v,
+            Err(e) => return denied(StatusCode::BAD_GATEWAY, &format!("模型目录查询失败：{e}")),
+        },
+    };
+    match serde_json::to_value(&catalog) {
+        Ok(v) => ok_json(v),
+        Err(e) => denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("目录序列化失败：{e}"),
+        ),
+    }
+}
+
+/// 会话重置（控制台）：退役本地映射，下次投递按 fail-closed 重建空历史会话。
+async fn session_reset(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let Ok(mut m) = state.sessions.lock() else {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, "sessions 锁中毒");
+    };
+    m.retire(&key);
+    ok_json(json!({ "retired": true, "conversationKey": key }))
 }
 
 /// qq_slang_query：查已确认黑话表（按出现次数排序；含 candidate 供 AI 了解学习态）。

@@ -27,6 +27,11 @@ pub struct SessionManager {
     agent_dir: String,
     /// preset 可用性缓存（启动时校验一次；fail-closed 红线的执行点）。
     preset_verified: bool,
+    /// 模型钉选配置快照（热更时由 bin 同步；sig 变化触发重选）。
+    dsh_model: (String, String, String), // (provider, model, reasoningEffort)
+    /// 会话 → 已应用模型 sig（Node modelAppliedSessions+epoch 的等价物：
+    /// sig 含全部三参，配置变化天然失效重选）。
+    model_applied: std::collections::HashMap<String, String>,
 }
 
 impl SessionManager {
@@ -53,6 +58,8 @@ impl SessionManager {
             workspace_title: workspace_title.to_owned(),
             agent_dir: agent_dir.to_owned(),
             preset_verified: false,
+            dsh_model: Default::default(),
+            model_applied: std::collections::HashMap::new(),
         })
     }
 
@@ -164,9 +171,82 @@ impl SessionManager {
         Ok(())
     }
 
+    /// 热更同步模型钉选配置（bin 在 config 热更时调用；sig 变化后重选）。
+    pub fn set_dsh_model(&mut self, provider: &str, model: &str, effort: &str) {
+        self.dsh_model = (provider.to_owned(), model.to_owned(), effort.to_lowercase());
+    }
+
+    /// 模型钉选（Node ensureChatModel）：sig 缓存命中跳过；effort 为 none/空
+    /// 不带字段（路由别名模型必须不带档位）；「不支持思考档位」降级去档重试
+    /// （钉模型优先于档位——旧日志 112 条同错的慢性根因）；not-found 上抛
+    /// 由 deliver_prompt 的退役重建路径处理。
+    fn ensure_chat_model(&mut self, session_id: &str) -> Result<(), String> {
+        let (provider, model, effort) = self.dsh_model.clone();
+        if provider.is_empty() && model.is_empty() {
+            return Ok(()); // 未配置 = 用 DSH 默认
+        }
+        let sig = format!("{provider}/{model}/{effort}");
+        if self.model_applied.get(session_id) == Some(&sig) {
+            return Ok(());
+        }
+        let with_effort = effort != "none" && !effort.is_empty();
+        let mut dsh = self.dsh.lock().map_err(|e| e.to_string())?;
+        let build = |eff: bool| {
+            let mut payload = json!({
+                "sessionId": session_id,
+                "provider": provider,
+                "model": model,
+            });
+            if eff {
+                payload["reasoningEffort"] = json!(effort);
+            }
+            payload
+        };
+        let now = Self::now_ms();
+        match dsh.call_unary("session/selectModel", Some(build(with_effort)), now) {
+            Ok(_) => {
+                drop(dsh);
+                self.model_applied.insert(session_id.to_owned(), sig);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if with_effort && msg.contains("does not support reasoning effort") {
+                    // 降级：去档位重试——思考强度交给 DSH/路由默认。
+                    let r = dsh.call_unary("session/selectModel", Some(build(false)), now);
+                    drop(dsh);
+                    match r {
+                        Ok(_) => {
+                            self.model_applied
+                                .insert(session_id.to_owned(), format!("{provider}/{model}/none"));
+                            Ok(())
+                        }
+                        Err(e2) => Err(format!("selectModel 失败（去档重试）：{e2}")),
+                    }
+                } else if msg.to_lowercase().contains("not") && msg.to_lowercase().contains("found")
+                {
+                    Err(format!("not-found: {msg}"))
+                } else {
+                    Err(format!("selectModel 失败：{msg}"))
+                }
+            }
+        }
+    }
+
     /// 投递 prompt（mode=queue，文本段）。会话在 DSH 侧不存在时退役重建一次。
     pub fn deliver_prompt(&mut self, key: &str, text: &str) -> Result<(), String> {
         let session_id = self.ensure_session(key)?;
+        if let Err(e) = self.ensure_chat_model(&session_id) {
+            if e.starts_with("not-found") {
+                // 与 DSH 侧会话消失同路：退役重建一次再投。
+                self.retire(key);
+                let session_id = self.ensure_session(key)?;
+                self.ensure_chat_model(&session_id)?;
+            } else {
+                // 钉模型失败不阻塞投递（会话跑 DSH 默认模型）——记日志继续。
+                // 连续失败每条都会重试（sig 未缓存）。
+            }
+        }
         let payload = json!({
             "sessionId": session_id,
             "mode": "queue",

@@ -330,6 +330,12 @@ fn discover(cfg: queqiao::config::Config) -> Setup {
         )
         .expect("sessions.json 加载失败"),
     ));
+    {
+        let d = &cfg.dsh;
+        if let Ok(mut m) = sessions.lock() {
+            m.set_dsh_model(&d.provider, &d.model, &d.reasoning_effort);
+        }
+    }
 
     let social = std::sync::Arc::new(std::sync::Mutex::new(
         queqiao::social_store::SocialStore::load(
@@ -566,6 +572,8 @@ async fn run(setup: Setup) {
             onebot,
             cfg: cfg_clone,
             update_tx: update_tx.clone(),
+            dsh: dsh_arc.clone(),
+            sessions: sessions_arc.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {

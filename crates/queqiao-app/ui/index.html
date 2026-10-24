@@ -131,6 +131,8 @@
     <div class="row">
       <div class="field"><label>基址（baseUrl）</label><input id="f-dshBase" placeholder="http://127.0.0.1:3080"><div class="hint">探活失败会自动扫描端口</div></div>
       <div class="field"><label>模型（model）</label><input id="f-dshModel" placeholder="留空用 DSH 当前模型"></div>
+      <div class="field"><label>提供方（provider）</label><input id="f-dshProvider" placeholder="如 deepseek-official / omniroute"></div>
+      <div class="field"><label>思考强度（reasoningEffort）</label><input id="f-dshEffort" placeholder="max / high / medium / low / none（路由别名模型用 none）"><div class="hint">改动后下一条消息自动重选模型（热生效）</div></div>
     </div>
   </section>
 
@@ -297,6 +299,8 @@ async function load() {
   v('f-slHome', cfg.snowluma && cfg.snowluma.homeDir);
   v('f-dshBase', cfg.dsh && cfg.dsh.baseUrl);
   v('f-dshModel', cfg.dsh && cfg.dsh.model);
+  v('f-dshProvider', cfg.dsh && cfg.dsh.provider);
+  v('f-dshEffort', cfg.dsh && cfg.dsh.reasoningEffort);
   const wake = (cfg.socialV2 && cfg.socialV2.wake) || {};
   const send = (cfg.socialV2 && cfg.socialV2.send) || {};
   v('f-wakeMin', wake.maxWakePerMinute); v('f-wakeHour', wake.maxWakePerHour);
@@ -344,6 +348,8 @@ async function save() {
   body.dsh = body.dsh || {};
   body.dsh.baseUrl = document.getElementById('f-dshBase').value.trim() || 'http://127.0.0.1:3080';
   body.dsh.model = document.getElementById('f-dshModel').value.trim();
+  body.dsh.provider = document.getElementById('f-dshProvider').value.trim();
+  body.dsh.reasoningEffort = document.getElementById('f-dshEffort').value.trim();
   body.allow = body.allow || {};
   body.allow.groups = chipLists.groups.map(Number);
   body.allow.private = chipLists.private.map(Number);
