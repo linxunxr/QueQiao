@@ -56,6 +56,7 @@ jobs:
           Copy-Item dsh/agent-presets/* "$Stage/dsh/agent-presets/" -Recurse
           Copy-Item LICENSE $Stage
           Copy-Item THIRD_PARTY_NOTICES.md $Stage
+          Copy-Item migrate-from-node.ps1 $Stage
           @'
           鹊桥（QueQiao）安装说明
           ========================

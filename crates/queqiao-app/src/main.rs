@@ -194,6 +194,7 @@ fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
     );
     let out = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW——GUI 进程 spawn 控制台程序不闪终端窗
         .output();
     let text = match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -285,6 +286,55 @@ fn open_snowluma_dir(state: tauri::State<'_, BridgeState>) -> Result<(), String>
         .map_err(|e| format!("打开目录失败：{e}"))
 }
 
+/// 从 Node 版桥（qq-bridge）迁移数据：调安装目录随包的 migrate-from-node.ps1
+/// （脚本非交互，参数直传；目标固定为本安装目录）。
+#[tauri::command]
+fn migrate_from_node(
+    state: tauri::State<'_, BridgeState>,
+    node_bridge: String,
+    force: bool,
+) -> Result<String, String> {
+    let src = node_bridge.trim().to_string();
+    if src.is_empty() {
+        return Err("请填写 Node 版桥（qq-bridge）路径".to_owned());
+    }
+    if !std::path::Path::new(&src).join("config.json").exists() {
+        return Err(format!(
+            "{src} 下没有 config.json——请确认是 Node 版桥根目录"
+        ));
+    }
+    let script = state.home.join("migrate-from-node.ps1");
+    if !script.exists() {
+        return Err(format!(
+            "未找到迁移脚本 {}（完整安装应随包携带）",
+            script.display()
+        ));
+    }
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .arg("-NodeBridge")
+        .arg(&src)
+        .arg("-InstallDir")
+        .arg(&state.home);
+    if force {
+        cmd.arg("-Force");
+    }
+    let out = cmd
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("启动迁移脚本失败：{e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !out.status.success() {
+        return Err(format!("{stderr}\n{stdout}"));
+    }
+    Ok(stdout)
+}
+
 #[tauri::command]
 fn bridge_start(app: tauri::AppHandle, state: tauri::State<'_, BridgeState>) -> Result<(), String> {
     state.spawn(&app)
@@ -308,7 +358,8 @@ fn main() {
             app_version,
             components_status,
             start_dsh,
-            open_snowluma_dir
+            open_snowluma_dir,
+            migrate_from_node
         ])
         .setup(|app| {
             let handle = app.handle().clone();

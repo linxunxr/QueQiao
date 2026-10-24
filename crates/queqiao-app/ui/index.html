@@ -84,6 +84,16 @@
   </section>
 
   <section>
+    <h2>数据迁移（从 Node 版 qq-bridge）</h2>
+    <div class="row">
+      <div class="field" style="flex:3 1 320px"><label>Node 版桥路径（含 config.json 与 state/）</label><input id="f-nodeBridge" placeholder="如 D:\100work\103Tools\qq-bridge"></div>
+      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="migrateNode()">迁移到本安装目录</button></div>
+    </div>
+    <div class="hint">带走 config、DSH 会话映射、唤醒状态、记忆、日记、表情包、黑话、人格卡等 15 项；目标同名文件默认跳过（不覆盖）。迁移后重启桥生效。</div>
+    <pre id="migrateOut" style="display:none; background:#0a0e12; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:11px/1.5 Consolas,monospace; color:#9fb0c0; white-space:pre-wrap; max-height:200px; overflow-y:auto; margin-top:8px"></pre>
+  </section>
+
+  <section>
     <h2>运行日志</h2>
     <div id="log"></div>
   </section>
@@ -224,6 +234,22 @@ async function startAll() {
 }
 
 async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { alert(e); } refreshComponents(); }
+
+async function migrateNode() {
+  const dir = document.getElementById('f-nodeBridge').value.trim();
+  if (!dir) { toast('请先填写 Node 版桥路径', false); return; }
+  const out = document.getElementById('migrateOut');
+  out.style.display = 'block'; out.textContent = '迁移中…';
+  try {
+    const r = await T.core.invoke('migrate_from_node', { nodeBridge: dir, force: false });
+    out.textContent = r || '（无输出——可能目标已全部存在，全部跳过）';
+    toast('迁移完成', true);
+    load();
+  } catch (e) {
+    out.textContent = String(e);
+    toast('迁移失败', false);
+  }
+}
 if (T) T.event.listen('bridge-log', e => {
   const l = $('log'); l.textContent += (l.textContent ? '\n' : '') + e.payload;
   l.scrollTop = l.scrollHeight;
