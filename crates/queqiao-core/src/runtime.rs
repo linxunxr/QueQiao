@@ -52,6 +52,8 @@ pub struct SessionRuntime {
     /// 最近一次真实唤醒的时刻（error 回合退配额的回滚锚点）。
     /// 历史超限上次退役时间戳（0=无；冷却防误判循环——Node historyTrimAt 内存语义一致）。
     pub history_trim_at: u64,
+    /// 瞬时错误已重投次数（成功回合清零；用尽后错误亮给群友）。
+    pub agent_retry_attempts: u32,
     pub last_wake_at: Option<u64>,
     /// 唤醒在途（SendPrompt 已发、回合未开始——Node pendingWakeKeys）。
     pub prompt_in_flight: bool,
@@ -74,6 +76,7 @@ impl SessionRuntime {
             pending_timer: None,
             turn: None,
             history_trim_at: 0,
+            agent_retry_attempts: 0,
             last_wake_at: None,
             prompt_in_flight: false,
         }
@@ -374,6 +377,7 @@ fn on_timer(
         TimerKind::SleepUntil => fire_wake(rt, "timeout", now_ms, rules),
         // 413 退役重投：绕频率判定（失败回合已退配额），直接重发唤醒。
         TimerKind::HistoryTrim => force_wake(rt, "history-trim", now_ms, rules),
+        TimerKind::AgentRetry => force_wake(rt, "agent-retry", now_ms, rules),
         TimerKind::DiaryTick => {
             // 日记三路径判定（定点 / 安静提前 / 冷却）。
             let input = DiaryTickInput {
@@ -528,9 +532,53 @@ fn on_turn_ended(
                 delay_ms: rules.history_trim_resend_ms,
             });
         }
+        // 瞬时错误（容量/限流/502/503）：退避后静默重投（8s/20s，最多 2 次）；
+        // 用尽或不可重试才把错误亮给群友（Node agent-retry 同源——重投也绕频率）。
+        if let Some(text) = error_text
+            && !crate::retry::is_history_limit_error(text)
+        {
+            let attempt = rt.agent_retry_attempts;
+            match crate::retry::retry_backoff(text, attempt) {
+                Some(backoff) => {
+                    rt.agent_retry_attempts = attempt + 1;
+                    let secs = backoff.as_millis() / 1000;
+                    actions.push(BridgeAction::Log {
+                        message: format!(
+                            "[{}] 回合瞬时错误，{}s 后重投（第 {}/{} 次）：{}",
+                            rt.key,
+                            secs,
+                            attempt + 1,
+                            crate::retry::AGENT_RETRY_MAX,
+                            text.chars().take(100).collect::<String>()
+                        ),
+                    });
+                    actions.push(BridgeAction::ScheduleTimer {
+                        key: rt.key.clone(),
+                        timer: TimerKind::AgentRetry,
+                        delay_ms: backoff.as_millis() as u64,
+                    });
+                }
+                None => {
+                    let note = if attempt > 0 {
+                        format!("（已自动重试 {attempt} 次）")
+                    } else {
+                        String::new()
+                    };
+                    let brief: String = text.chars().take(500).collect();
+                    actions.push(BridgeAction::SendMessage {
+                        key: rt.key.clone(),
+                        text: format!("⚠️ agent 处理出错{note}：{brief}"),
+                        reply_to: None,
+                    });
+                    rt.agent_retry_attempts = 0;
+                }
+            }
+        }
         rt.last_wake_at = None;
     } else {
         rt.last_wake_at = None;
+        // 成功回合清零瞬时重投计数。
+        rt.agent_retry_attempts = 0;
         // noAction 判定：回合期间既没发消息也没动作 → 累计；达限重置唤醒配置
         //（防 AI 卡死——连续无动作说明配置不再适配当前会话节奏）。
         // 孤儿 end 没有回合起点，跳过 noAction 统计（无从判定动作窗口）。
@@ -1069,5 +1117,114 @@ mod history_trim_tests {
                 .iter()
                 .any(|a| matches!(a, BridgeAction::RetireSession { .. }))
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_retry_tests {
+    use super::*;
+    use crate::action::{BridgeAction, TimerKind};
+
+    fn rt() -> SessionRuntime {
+        SessionRuntime::new("group:1", TriggerRules::default())
+    }
+    fn err_turn(text: &str) -> BridgeEvent {
+        BridgeEvent::TurnEnded {
+            key: "group:1".into(),
+            session_id: "s-1".into(),
+            ok: false,
+            error_text: Some(text.into()),
+        }
+    }
+    fn decide1(rt: &mut SessionRuntime, event: &BridgeEvent, now_ms: u64) -> Vec<BridgeAction> {
+        let rules = DecideRules::default();
+        let diary = DiaryRules::default();
+        let now_local = crate::diary::CivilTime {
+            date: crate::diary::CivilDate {
+                year: 2026,
+                month: 10,
+                day: 21,
+            },
+            hour: 12,
+            minute: 0,
+        };
+        let mut rng = || 0.99;
+        decide(rt, event, now_ms, now_local, &rules, &diary, &mut rng)
+    }
+
+    /// 503 → 8s 重投定时器；第二次 20s；用尽后错误亮群友并清零。
+    #[test]
+    fn transient_error_backoff_ladder() {
+        let mut r = rt();
+        r.last_wake_at = Some(10_000_000);
+        let a1 = decide1(&mut r, &err_turn("503 chat_admission_busy"), 10_001_000);
+        let d1 = a1.iter().find_map(|a| match a {
+            BridgeAction::ScheduleTimer {
+                timer: TimerKind::AgentRetry,
+                delay_ms,
+                ..
+            } => Some(*delay_ms),
+            _ => None,
+        });
+        assert_eq!(d1, Some(8_000), "第 1 次退避 8s");
+        assert_eq!(r.agent_retry_attempts, 1);
+
+        r.last_wake_at = Some(10_010_000);
+        let a2 = decide1(&mut r, &err_turn("503 service overloaded"), 10_020_000);
+        let d2 = a2.iter().find_map(|a| match a {
+            BridgeAction::ScheduleTimer {
+                timer: TimerKind::AgentRetry,
+                delay_ms,
+                ..
+            } => Some(*delay_ms),
+            _ => None,
+        });
+        assert_eq!(d2, Some(20_000), "第 2 次退避 20s");
+        assert_eq!(r.agent_retry_attempts, 2);
+
+        r.last_wake_at = Some(10_040_000);
+        let a3 = decide1(&mut r, &err_turn("503 again"), 10_050_000);
+        assert!(
+            !a3.iter()
+                .any(|a| matches!(a, BridgeAction::ScheduleTimer { .. })),
+            "用尽不再排重投"
+        );
+        let shout = a3.iter().find_map(|a| match a {
+            BridgeAction::SendMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let shout = shout.expect("用尽后错误亮给群友");
+        assert!(shout.contains("已自动重试 2 次"), "{shout}");
+        assert_eq!(r.agent_retry_attempts, 0, "亮错后清零");
+    }
+
+    /// 不可重试错误直接亮群友（无重试次数注记）；成功回合清零计数。
+    #[test]
+    fn non_retryable_shouts_and_success_resets() {
+        let mut r = rt();
+        r.last_wake_at = Some(10_000_000);
+        let a = decide1(&mut r, &err_turn("some fatal error"), 10_001_000);
+        let shout = a.iter().find_map(|x| match x {
+            BridgeAction::SendMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        assert!(
+            shout.unwrap().starts_with("⚠️ agent 处理出错"),
+            "首错即亮无重试注记"
+        );
+
+        r.last_wake_at = Some(10_002_000);
+        r.agent_retry_attempts = 1;
+        decide1(
+            &mut r,
+            &BridgeEvent::TurnEnded {
+                key: "group:1".into(),
+                session_id: "s".into(),
+                ok: true,
+                error_text: None,
+            },
+            10_003_000,
+        );
+        assert_eq!(r.agent_retry_attempts, 0, "成功回合清零");
     }
 }

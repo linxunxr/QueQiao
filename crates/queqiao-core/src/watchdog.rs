@@ -54,7 +54,10 @@ impl WatchdogState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchdogAction {
     /// 判挂（或长挂重复提醒）——驱动方直发 OneBot 告警。
-    Alert { target: &'static str, detail: String },
+    Alert {
+        target: &'static str,
+        detail: String,
+    },
     /// 从故障恢复。
     Recovered { target: &'static str },
     /// 自动重启（autoRestart 开启且未超每小时上限；bridge 不接管）。
@@ -99,7 +102,8 @@ pub fn evaluate(
             });
         }
         if auto_restart && *name != "bridge" {
-            t.restarts.retain(|ts| now_ms.saturating_sub(*ts) < 3_600_000);
+            t.restarts
+                .retain(|ts| now_ms.saturating_sub(*ts) < 3_600_000);
             if (t.restarts.len() as u32) < state.max_restarts_per_hour {
                 t.restarts.push(now_ms);
                 actions.push(WatchdogAction::Restart { target: name });
@@ -124,7 +128,9 @@ mod tests {
         // 持续失败不重复（去重）；30min 后重复提醒一次。
         assert!(evaluate(&mut st, [true, false, true], 3000, false).is_empty());
         let a = evaluate(&mut st, [true, false, true], 3_000 + 30 * 60_000, false);
-        assert!(matches!(a[0], WatchdogAction::Alert { target: "dsh", detail: ref d } if d.contains("重复")));
+        assert!(
+            matches!(a[0], WatchdogAction::Alert { target: "dsh", detail: ref d } if d.contains("重复"))
+        );
         // 恢复 → Recovered 一次。
         let a = evaluate(&mut st, [true, true, true], 999_999, false);
         assert!(matches!(a[0], WatchdogAction::Recovered { target: "dsh" }));
@@ -141,12 +147,17 @@ mod tests {
         // 第二轮不再重启（上限 2 已被两目标占满——每目标独立计数）。
         let a = evaluate(&mut st, [false, false, false], 11_000, true);
         assert_eq!(
-            a.iter().filter(|x| matches!(x, WatchdogAction::Restart { .. })).count(),
+            a.iter()
+                .filter(|x| matches!(x, WatchdogAction::Restart { .. }))
+                .count(),
             2,
             "每目标独立计数：dsh+snowluma 各一"
         );
         // bridge 永不 restart。
-        assert!(!a.iter().any(|x| matches!(x, WatchdogAction::Restart { target: "bridge" })));
+        assert!(
+            !a.iter()
+                .any(|x| matches!(x, WatchdogAction::Restart { target: "bridge" }))
+        );
     }
 
     #[test]
@@ -154,6 +165,12 @@ mod tests {
         let mut st = WatchdogState::default();
         evaluate(&mut st, [false, true, true], 100, false);
         let a = evaluate(&mut st, [false, true, true], 200, false);
-        assert!(matches!(a[0], WatchdogAction::Alert { target: "bridge", .. }));
+        assert!(matches!(
+            a[0],
+            WatchdogAction::Alert {
+                target: "bridge",
+                ..
+            }
+        ));
     }
 }

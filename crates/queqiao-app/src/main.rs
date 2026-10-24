@@ -57,14 +57,24 @@ fn start_watchdog(home: std::path::PathBuf) {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
             // config 读取（ownerQQ/snowluma httpUrl+token/consolePort）。
-            let (mut owner, mut http, mut token, mut port) = (None, String::new(), String::new(), 3100u16);
+            let (mut owner, mut http, mut token, mut port) =
+                (None, String::new(), String::new(), 3100u16);
             if let Ok(raw) = std::fs::read_to_string(home.join("config.json"))
-                && let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
+                && let Ok(v) =
+                    serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}'))
             {
                 owner = v.get("ownerQQ").and_then(|x| x.as_i64());
                 if let Some(sl) = v.get("snowluma").and_then(|x| x.as_object()) {
-                    http = sl.get("httpUrl").and_then(|x| x.as_str()).unwrap_or("").into();
-                    token = sl.get("accessToken").and_then(|x| x.as_str()).unwrap_or("").into();
+                    http = sl
+                        .get("httpUrl")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .into();
+                    token = sl
+                        .get("accessToken")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .into();
                 }
                 if let Some(p) = v.get("consolePort").and_then(|x| x.as_u64()) {
                     port = p as u16;
@@ -76,8 +86,12 @@ fn start_watchdog(home: std::path::PathBuf) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let actions =
-                queqiao_core::watchdog::evaluate(&mut state, [bridge_alive, dsh, snowluma], now, false);
+            let actions = queqiao_core::watchdog::evaluate(
+                &mut state,
+                [bridge_alive, dsh, snowluma],
+                now,
+                false,
+            );
             for a in actions {
                 let text = match &a {
                     queqiao_core::watchdog::WatchdogAction::Alert { target, detail } => {
@@ -95,7 +109,8 @@ fn start_watchdog(home: std::path::PathBuf) {
                     && !token.is_empty()
                 {
                     let client = queqiao_onebot::client::OneBotHttpClient::new(&http, &token, 5000);
-                    let msg = queqiao_onebot::segment::message(&[queqiao_onebot::segment::text(&text)]);
+                    let msg =
+                        queqiao_onebot::segment::message(&[queqiao_onebot::segment::text(&text)]);
                     if let Err(e) = client.send_private_msg(qq as u64, &msg) {
                         println!("[watchdog] 告警发送失败：{e}");
                     }
