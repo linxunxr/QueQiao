@@ -114,6 +114,12 @@ if ($shipped.Count -ge 2) {
         Deploy-Exe (Join-Path $RepoRoot "target\release\$exe") $Dist
     }
 }
+# 随包脚本补齐：客户端"从 Node 版迁移"按钮运行时硬依赖 migrate-from-node.ps1
+# （install.ps1 新装会复制，升级链此前只换 exe——存量升级目录一直缺，
+# 2026-10-24 真机：点迁移按钮即报"未找到迁移脚本"）。发布包/源码两种布局
+# 仓库根都带此文件，统一补齐；ps1 无运行锁，直拷即可。
+$migrateScript = Join-Path $RepoRoot 'migrate-from-node.ps1'
+if (Test-Path $migrateScript) { Copy-Item $migrateScript $Dist -Force }
 # 首次部署：从 Node 版桥带一份配置与状态（会话映射/唤醒配置沿用，无缝切换）。
 if ($NodeBridge -and (Test-Path $NodeBridge)) {
     if (-not (Test-Path (Join-Path $Dist 'config.json'))) {
