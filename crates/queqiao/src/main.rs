@@ -387,76 +387,104 @@ async fn run(setup: Setup) {
     queqiao::logging::log(&format!("OneBot WS 已连接 {ws_url}"));
     let social_for_stream = social_arc.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeEvent>(256);
+    let ws_url_rc = ws_url.clone();
+    let ws_token_rc = setup.ws_token.clone();
     tokio::spawn(async move {
         let mut stream = stream;
         let social = social_for_stream;
-        while let Some(event) = stream.recv_event().await {
-            let bridged = match event {
-                Ok(OneBotEvent::GroupMessage(m)) if !m.sent_by_self => {
-                    let key = format!("group:{}", m.group_id);
-                    let mut incoming = queqiao_core::action::IncomingMessage {
-                        key: key.clone(),
-                        seq: 0, // seq 由持久水位分配（见下方 append_message）
-                        message_id: m.message_id.to_string(),
-                        sender: m.sender.card.clone().unwrap_or(m.sender.nickname.clone()),
-                        user_id: m.user_id.to_string(),
-                        text: extract_plain_text(&m.message),
-                        is_self: m.sent_by_self,
-                        at_me: at_self(&m.message),
-                        reply_to_me: false,
-                        time_ms: now_ms(),
-                    };
-                    incoming.seq = social
-                        .lock()
-                        .map(|mut s| s.append_message(&key, &incoming, now_ms()))
-                        .unwrap_or(0);
-                    if !incoming.is_self {
-                        queqiao::logging::activity(&format!(
-                            "{key} 消息入库：{}（{}）",
-                            incoming.sender,
-                            incoming.text.chars().take(60).collect::<String>()
-                        ));
+        // 断连重连：recv_event 返回 None 即 WS 断开——曾就此静默退出任务，
+        // 桥变植物人（控制台活着、消息无人收；2026-10-24 真机 SnowLuma
+        // 抖动断链，此后所有消息石沉大海且无任何日志）。5s 起退避重连，
+        // 翻倍封顶 60s，恢复为止。
+        loop {
+            while let Some(event) = stream.recv_event().await {
+                let bridged = match event {
+                    Ok(OneBotEvent::GroupMessage(m)) if !m.sent_by_self => {
+                        let key = format!("group:{}", m.group_id);
+                        let mut incoming = queqiao_core::action::IncomingMessage {
+                            key: key.clone(),
+                            seq: 0, // seq 由持久水位分配（见下方 append_message）
+                            message_id: m.message_id.to_string(),
+                            sender: m.sender.card.clone().unwrap_or(m.sender.nickname.clone()),
+                            user_id: m.user_id.to_string(),
+                            text: extract_plain_text(&m.message),
+                            is_self: m.sent_by_self,
+                            at_me: at_self(&m.message),
+                            reply_to_me: false,
+                            time_ms: now_ms(),
+                        };
+                        incoming.seq = social
+                            .lock()
+                            .map(|mut s| s.append_message(&key, &incoming, now_ms()))
+                            .unwrap_or(0);
+                        if !incoming.is_self {
+                            queqiao::logging::activity(&format!(
+                                "{key} 消息入库：{}（{}）",
+                                incoming.sender,
+                                incoming.text.chars().take(60).collect::<String>()
+                            ));
+                        }
+                        Some(BridgeEvent::MessageArrived(Box::new(incoming)))
                     }
-                    Some(BridgeEvent::MessageArrived(Box::new(incoming)))
+                    Ok(OneBotEvent::PrivateMessage(m)) if !m.sent_by_self => {
+                        let key = format!("private:{}", m.user_id);
+                        let mut incoming = queqiao_core::action::IncomingMessage {
+                            key: key.clone(),
+                            seq: 0,
+                            message_id: m.message_id.to_string(),
+                            sender: m.sender.nickname.clone(),
+                            user_id: m.user_id.to_string(),
+                            text: extract_plain_text(&m.message),
+                            is_self: m.sent_by_self,
+                            at_me: false,
+                            reply_to_me: false,
+                            time_ms: now_ms(),
+                        };
+                        incoming.seq = social
+                            .lock()
+                            .map(|mut s| s.append_message(&key, &incoming, now_ms()))
+                            .unwrap_or(0);
+                        Some(BridgeEvent::MessageArrived(Box::new(incoming)))
+                    }
+                    Ok(OneBotEvent::GroupPoke {
+                        group_id, user_id, ..
+                    }) => {
+                        Some(BridgeEvent::PokeArrived {
+                            key: Some(format!("group:{group_id}")),
+                            user_id,
+                            target_is_self: true, // 简化：拍一拍触发不区分目标
+                        })
+                    }
+                    Ok(OneBotEvent::Heartbeat { good, .. }) => {
+                        Some(BridgeEvent::UpstreamHeartbeat { good })
+                    }
+                    _ => None,
+                };
+                if let Some(event) = bridged
+                    && tx.send(event).await.is_err()
+                {
+                    // 决策循环已退出（run 结束）——重连无意义，任务随之收尾。
+                    return;
                 }
-                Ok(OneBotEvent::PrivateMessage(m)) if !m.sent_by_self => {
-                    let key = format!("private:{}", m.user_id);
-                    let mut incoming = queqiao_core::action::IncomingMessage {
-                        key: key.clone(),
-                        seq: 0,
-                        message_id: m.message_id.to_string(),
-                        sender: m.sender.nickname.clone(),
-                        user_id: m.user_id.to_string(),
-                        text: extract_plain_text(&m.message),
-                        is_self: m.sent_by_self,
-                        at_me: false,
-                        reply_to_me: false,
-                        time_ms: now_ms(),
-                    };
-                    incoming.seq = social
-                        .lock()
-                        .map(|mut s| s.append_message(&key, &incoming, now_ms()))
-                        .unwrap_or(0);
-                    Some(BridgeEvent::MessageArrived(Box::new(incoming)))
+            }
+            queqiao::logging::log("OneBot WS 断开——退避重连中");
+            let mut backoff_secs = 5u64;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                match EventStream::connect(&ws_url_rc, &ws_token_rc).await {
+                    Ok(s) => {
+                        stream = s;
+                        queqiao::logging::log("OneBot WS 已重连");
+                        break;
+                    }
+                    Err(e) => {
+                        queqiao::logging::log(&format!(
+                            "OneBot WS 重连失败（{e}）——{}s 后再试",
+                            backoff_secs.min(60) * 2
+                        ));
+                        backoff_secs = (backoff_secs * 2).min(60);
+                    }
                 }
-                Ok(OneBotEvent::GroupPoke {
-                    group_id, user_id, ..
-                }) => {
-                    Some(BridgeEvent::PokeArrived {
-                        key: Some(format!("group:{group_id}")),
-                        user_id,
-                        target_is_self: true, // 简化：拍一拍触发不区分目标
-                    })
-                }
-                Ok(OneBotEvent::Heartbeat { good, .. }) => {
-                    Some(BridgeEvent::UpstreamHeartbeat { good })
-                }
-                _ => None,
-            };
-            if let Some(event) = bridged
-                && tx.send(event).await.is_err()
-            {
-                break;
             }
         }
     });
