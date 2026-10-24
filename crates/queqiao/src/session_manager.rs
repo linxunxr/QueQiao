@@ -34,6 +34,20 @@ pub struct SessionManager {
     model_applied: std::collections::HashMap<String, String>,
 }
 
+/// agent 目录绝对化：DSH 按自身 CWD（Electron 主进程，任意）解析相对路径，
+/// 相对 path 一律 realpath ENOENT——Node 版发绝对路径，Rust 版曾相对直传
+/// （2026-10-24 真机：目录存在仍 create 失败，example 绝对路径同刻成功，
+/// 两次"缺 workspaceId"表象相同真因不同：首犯目录缺失，次犯相对路径）。
+fn normalize_agent_dir(dir: &str) -> String {
+    let p = Path::new(dir);
+    if p.is_absolute() {
+        return dir.to_owned();
+    }
+    std::path::absolute(p)
+        .map(|a| a.display().to_string())
+        .unwrap_or_else(|_| dir.to_owned())
+}
+
 impl SessionManager {
     pub fn new(
         dsh: Arc<Mutex<DshClient<ReqwestTransport>>>,
@@ -56,7 +70,7 @@ impl SessionManager {
             path: state_path.to_owned(),
             preset: preset.to_owned(),
             workspace_title: workspace_title.to_owned(),
-            agent_dir: agent_dir.to_owned(),
+            agent_dir: normalize_agent_dir(agent_dir),
             preset_verified: false,
             dsh_model: Default::default(),
             model_applied: std::collections::HashMap::new(),
@@ -357,5 +371,19 @@ mod tests {
         let manager =
             SessionManager::new(arc.clone(), path, "qq-chat-v2", "QQ 聊天", "agents").unwrap();
         (arc, manager)
+    }
+
+    /// agent_dir 必须绝对化：DSH 按自身 CWD 解析相对路径，相对即 ENOENT
+    /// （2026-10-24 真机第二次 create 失败的真因——目录在，路径相对）。
+    #[test]
+    fn agent_dir_normalized_to_absolute() {
+        let (_, m) = manager_with(Path::new("nonexistent-agent-dir-test.json"));
+        assert!(
+            Path::new(&m.agent_dir).is_absolute(),
+            "相对 agent_dir 须被绝对化：{}",
+            m.agent_dir
+        );
+        let abs = r"D:\somewhere\state\agents";
+        assert_eq!(normalize_agent_dir(abs), abs);
     }
 }
