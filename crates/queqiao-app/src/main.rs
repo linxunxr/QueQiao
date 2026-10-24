@@ -255,6 +255,33 @@ fn snowluma_cfg(home: &std::path::Path) -> (String, String) {
     (dir, http)
 }
 
+/// httpUrl 未配置时的 OneBot 探测回落：与桥 discover 同源——SnowLuma
+/// per-account 配置（config/onebot_<uin>.json）里的 http 端点。安装脚本只写
+/// homeDir、桥也不回写 httpUrl，缺位时按显式键探测恒假阴（2026-10-24 真机：
+/// OneBot 明明监听 3000，卡片恒显"未就绪"、一键启动空等 5 分钟超时）。
+fn fallback_http_urls(snowluma_dir: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let Ok(entries) = std::fs::read_dir(std::path::Path::new(snowluma_dir).join("config")) else {
+        return urls;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(uin) = queqiao_onebot::conn::account_file_uin(&name) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Some(http) =
+            queqiao_onebot::conn::parse_account_config(uin, &text).and_then(|a| a.http)
+        {
+            urls.push(format!("http://{}:{}", http.host, http.port));
+        }
+    }
+    urls.sort();
+    urls
+}
+
 /// 一条 PowerShell 查三态：DSH 进程 / SnowLuma 进程 / queqiao.exe 进程。
 /// 输出 "dsh|snowluma|bridge"（True/False）。
 fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
@@ -281,20 +308,29 @@ fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
     (dsh, snowluma, it.next().unwrap_or(false))
 }
 
+/// httpUrl → 探测地址列表。IP 字面量直用；主机名（如 localhost）交给系统
+/// 解析——SocketAddr 只认 IP 字面量，`http://localhost:3000` 直接 parse 恒失败。
+fn probe_addrs(http_url: &str) -> Vec<std::net::SocketAddr> {
+    let url = http_url.trim_start_matches("http://").trim_end_matches('/');
+    let Some((host, port)) = url.rsplit_once(':') else {
+        return Vec::new();
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return Vec::new();
+    };
+    if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+        return vec![addr];
+    }
+    use std::net::ToSocketAddrs;
+    (host, port).to_socket_addrs().map(|it| it.collect()).unwrap_or_default()
+}
+
 /// SnowLuma 的 OneBot HTTP 口是否可达（桥 discover panic 的前置条件——
 /// 一键启动必须等它就绪才起桥）。
 fn http_url_alive(http_url: &str) -> bool {
-    let url = http_url
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
-    let Some((host, port)) = url.rsplit_once(':') else {
-        return false;
-    };
-    let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() else {
-        return false;
-    };
-    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(1200)).is_ok()
+    probe_addrs(http_url).iter().any(|addr| {
+        std::net::TcpStream::connect_timeout(addr, std::time::Duration::from_millis(1200)).is_ok()
+    })
 }
 
 /// 找 DSH 桌面版主程序（Electron 惯例装在 LOCALAPPDATA\Programs）。
@@ -329,10 +365,17 @@ async fn components_status(
     let st = tauri::async_runtime::spawn_blocking(move || {
         let (dir, http) = snowluma_cfg(&home);
         let (dsh, snowluma, bridge_proc) = probe_components(&dir);
+        // OneBot 探测目标：显式 httpUrl 优先（尊重用户选择）；未配置时回落
+        // per-account 端点（桥 discover 同源）——不依赖安装脚本从不写入的键。
+        let probe_urls: Vec<String> = if http.trim().is_empty() {
+            fallback_http_urls(&dir)
+        } else {
+            vec![http]
+        };
         serde_json::json!({
             "dsh": dsh,
             "snowluma": snowluma,
-            "snowlumaHttp": http_url_alive(&http),
+            "snowlumaHttp": probe_urls.iter().any(|u| http_url_alive(u)),
             "snowlumaDir": dir,
             "dshPath": find_dsh_exe().map(|p| p.display().to_string()),
             "bridgeProc": bridge_proc,
@@ -667,6 +710,41 @@ mod tests {
         // homeDir 未配置：-like '**' 修复回归——必须判未运行。
         let (_, s2, _) = probe_components("");
         assert!(!s2, "homeDir 为空时 snowluma 必须判未运行");
+    }
+
+    /// httpUrl 缺位回落（2026-10-24 真机：config 从未有 httpUrl，OneBot 探测
+    /// 恒假阴）——per-account 文件的 http 端点被拾取，坏 JSON 文件跳过。
+    #[test]
+    fn fallback_http_urls_reads_per_account_endpoints() {
+        let dir = std::env::temp_dir().join(format!("qq-fb-{}", std::process::id()));
+        let cfg = dir.join("config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(
+            cfg.join("onebot_123.json"),
+            r#"{"networks":{"httpServers":[{"accessToken":"t","host":"127.0.0.1","port":3456}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(cfg.join("onebot_456.json"), "{ not json").unwrap();
+        assert_eq!(
+            fallback_http_urls(&dir.display().to_string()),
+            vec!["http://127.0.0.1:3456".to_owned()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// URL → 探测地址解析：IP 直用；localhost 走系统解析（原实现直接 parse
+    /// SocketAddr 恒失败——主机名不是 IP 字面量）。
+    #[test]
+    fn probe_addrs_accepts_hostnames() {
+        assert_eq!(
+            probe_addrs("http://127.0.0.1:3000/"),
+            vec!["127.0.0.1:3000".parse().unwrap()]
+        );
+        assert!(
+            !probe_addrs("http://localhost:3000").is_empty(),
+            "localhost 须能解析出探测地址"
+        );
+        assert!(probe_addrs("").is_empty());
     }
 }
 
