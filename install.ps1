@@ -250,6 +250,11 @@ if ($NodeBridge -and (Test-Path $NodeBridge)) {
     Write-Info '未提供 -NodeBridge：全新安装走第 5 步交互式生成 config.json。'
 }
 Write-Ok "dist 布局就绪：$Dist"
+# 登记安装位置（HKCU 注册表）——upgrade.ps1 自动探测的第一优先级。
+try {
+    New-Item -Path 'HKCU:\Software\QueQiao' -Force | Out-Null
+    Set-ItemProperty -Path 'HKCU:\Software\QueQiao' -Name InstallDir -Value $Dist
+} catch { Write-Info '安装位置登记失败（不影响安装；升级脚本会走快捷方式/进程探测）' }
 
 # ── 5. 交互式生成最小 config.json ─────────────────────────────────────────────
 Write-Step 5 'config.json'

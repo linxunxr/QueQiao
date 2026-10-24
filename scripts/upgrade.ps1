@@ -27,6 +27,32 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
 
+# 已有安装探测：升级的本职是找到现役安装，不该让用户重输路径。四级链：
+# 注册表登记（新版 install.ps1 写入）→ 运行中进程路径 → 桌面快捷方式 →
+# 常见位置；候选须含 queqiao.exe 才认；都无才交互询问。
+function Find-QueqiaoInstall {
+    $candidates = @()
+    try {
+        $reg = Get-ItemProperty 'HKCU:\Software\QueQiao' -ErrorAction Stop
+        if ($reg.InstallDir) { $candidates += $reg.InstallDir }
+    } catch { }
+    $proc = Get-CimInstance Win32_Process -Filter "Name='queqiao.exe' OR Name='queqiao-app.exe'" -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty ExecutablePath -First 1
+    if ($proc) { $candidates += (Split-Path -Parent $proc) }
+    $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) '鹊桥 QueQiao.lnk'
+    if (Test-Path $lnk) {
+        try {
+            $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
+            if ($target) { $candidates += (Split-Path -Parent $target) }
+        } catch { }
+    }
+    $candidates += "$env:LOCALAPPDATA\QueQiao"
+    foreach ($dir in $candidates) {
+        if ($dir -and (Test-Path (Join-Path $dir 'queqiao.exe'))) { return $dir }
+    }
+    return $null
+}
+
 # 布局检测（与 install.ps1 同款）：发布包（zip 根自带构建好的 exe）直接
 # 复制、无需 Rust 工具链；源码布局（git clone）才本地构建。
 $shipped = @('queqiao.exe', 'queqiao-mcp.exe', 'queqiao-app.exe') |
@@ -44,10 +70,17 @@ if ($shipped.Count -ge 2) {
 Write-Host '== 2/4 dist 布局 ==' -ForegroundColor Cyan
 $defaultDir = "$env:LOCALAPPDATA\QueQiao"
 if (-not $InstallDir) {
-    $answer = Read-Host "  安装目录（回车 = [$defaultDir]，或输入已有安装路径）"
-    # PS5.1：Read-Host 在 stdin 关闭/非交互时返回 $null——防 .Trim() 崩溃。
-    $trimmed = if ($null -ne $answer) { "$answer".Trim() } else { '' }
-    $InstallDir = if ($trimmed) { $trimmed } else { $defaultDir }
+    $found = Find-QueqiaoInstall
+    if ($found) {
+        $InstallDir = $found
+        Write-Host "  已检测到现有安装：$InstallDir" -ForegroundColor Green
+        Write-Host '  （直接升级；如需换目录，重跑并指定 -InstallDir）' -ForegroundColor DarkGray
+    } else {
+        $answer = Read-Host "  安装目录（回车 = [$defaultDir]，或输入已有安装路径）"
+        # PS5.1：Read-Host 在 stdin 关闭/非交互时返回 $null——防 .Trim() 崩溃。
+        $trimmed = if ($null -ne $answer) { "$answer".Trim() } else { '' }
+        $InstallDir = if ($trimmed) { $trimmed } else { $defaultDir }
+    }
 }
 $Dist = $InstallDir
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
