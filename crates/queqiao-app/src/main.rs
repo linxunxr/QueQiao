@@ -262,7 +262,7 @@ fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
     let script = format!(
         "$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue; \
          $d = [bool]($procs | Where-Object {{ $_.Name -match '^DeepSeek' -or ($_.CommandLine -and $_.CommandLine -match 'dsh.*bin\\.js +web') }}); \
-         $s = [bool]($procs | Where-Object {{ $_.CommandLine -and $_.CommandLine -like '*{esc}*' }}); \
+         $s = [bool]($procs | Where-Object {{ $_.CommandLine -and $_.Name -ne 'powershell.exe' -and $_.CommandLine -like '*{esc}*' }}); \
          $b = [bool]($procs | Where-Object {{ $_.Name -eq 'queqiao.exe' }}); \
          \"$d|$s|$b\""
     );
@@ -636,5 +636,20 @@ mod tests {
         // homeDir 未配置：-like '**' 修复回归——必须判未运行。
         let (_, s2, _) = probe_components("");
         assert!(!s2, "homeDir 为空时 snowluma 必须判未运行");
+    }
+}
+
+#[cfg(test)]
+mod probe_fp_tests {
+    /// 探测脚本必须排除 powershell 自身：探测命令行含 homeDir 明文，
+    /// 双开客户端时 A 的探测命中 B 的探测 → SnowLuma 假阳"运行中"
+    ///（2026-10-24 用户真机抓到：UI 显示运行中而实际未开）。
+    #[test]
+    fn probe_script_excludes_powershell_self() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("$_.Name -ne 'powershell.exe' -and $_.CommandLine -like"),
+            "snowluma 进程匹配必须排除 powershell（防探测自匹配假阳）"
+        );
     }
 }
