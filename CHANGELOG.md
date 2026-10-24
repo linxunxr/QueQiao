@@ -14,6 +14,7 @@
 ### 修复
 
 - **发布包 upgrade.bat 报 `could not find Cargo.toml`**：`scripts/upgrade.ps1` 的发布包布局检测残缺——`$shipped` 消费端在、定义端缺失（v0.2.1 加布局检测时未完整同步到升级脚本），且第 1 步仍无条件 `cargo build`。现与 install.ps1 同款：zip 布局（脚本根 ≥2 个 exe）直接复制、零 Rust 依赖。连带修同文件两处：`Read-Host` 无 null 防护（PS5.1 非交互 `.Trim()` 崩溃，v0.2.1 同类坑未同步）；`Test-Path (PatchFile)` 缺 `$` 的命令调用错误（此前一直被构建失败掩盖、从未执行到）。模拟 zip 布局真机全链验证通过（跳过构建/复制/MCP 注册/启动指引）。
+- **升级须手输安装目录**：upgrade 自动探测已有安装——四级链（HKCU 注册表登记 → 运行中进程路径 → 桌面快捷方式 → 常见位置），候选须含 `queqiao.exe` 才认，都无才交互询问；install 收尾写 `HKCU\Software\QueQiao\InstallDir` 登记（存量安装无登记，靠进程/快捷方式覆盖）。真机验证命中运行中客户端所在真实目录。
 
 ## [0.3.2] - 2026-10-23
 
