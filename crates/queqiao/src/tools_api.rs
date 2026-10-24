@@ -165,6 +165,8 @@ pub async fn serve(
         .route("/api/roles", get(roles_list))
         .route("/api/role", post(role_switch))
         .route("/api/socialV2/sticker-sync", post(sticker_sync))
+        .route("/api/tokens/series", get(tokens_series))
+        .route("/api/tokens/turns", get(tokens_turns))
         .route("/api/socialV2/memory", get(memory_list))
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
@@ -527,6 +529,79 @@ async fn diagnostics(
         "config": cfg_json,
         "sessions": summary,
     }))
+}
+
+/// 花费时间序列（控制台趋势图用；仅控制台）。
+async fn tokens_series(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用");
+        }
+    }
+    let hours = q
+        .get("hours")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(24)
+        .clamp(1, 24 * 90);
+    let buckets = q
+        .get("buckets")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(48);
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("token-usage.jsonl");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    ok_json(
+        serde_json::to_value(queqiao_core::token_ledger::series(&text, hours, buckets))
+            .unwrap_or_default(),
+    )
+}
+
+/// 按会话回合明细（控制台；key 必填）。
+async fn tokens_turns(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用");
+        }
+    }
+    let key = q
+        .get("key")
+        .map(String::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if key.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "key 不能为空");
+    }
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(200);
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("token-usage.jsonl");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let turns = queqiao_core::token_ledger::conversation(&text, &key, limit);
+    if turns.is_empty() {
+        return denied(StatusCode::NOT_FOUND, "未找到该会话的用量记录");
+    }
+    ok_json(json!({ "key": key, "turns": turns }))
 }
 
 /// 人格卡列表（控制台切换用）：roles/*.md 名单 + 当前角色与 perConv 覆盖。

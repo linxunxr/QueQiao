@@ -445,6 +445,19 @@ loadRoles();
   }
   setTimeout(tick, 10000);
 })();
+let turnsKey = '';
+async function showTurns(key) {
+  turnsKey = key;
+  try {
+    const r = await fetch(BRIDGE + '/api/tokens/turns?key=' + encodeURIComponent(key) + '&limit=50');
+    const res = await r.json();
+    const v = res.value || {};
+    const rows = (v.turns || []).map(t => `<tr><td>${new Date(t.tMs).toLocaleString('zh-CN', { hour12: false })}</td><td>${t.model || '-'}</td><td>${t.cacheMiss + t.cacheWrite}</td><td>${t.output}</td><td>¥${t.cost.toFixed(4)}</td></tr>`).join('');
+    document.getElementById('costBody').innerHTML = `<div style="margin-bottom:6px"><a href="javascript:void 0" onclick="refreshCost()" style="color:var(--acc)">← 返回总览</a> <b>${key}</b> 近 ${v.turns.length} 回合</div>` +
+      (rows ? `<table><tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>花费</th></tr>${rows}</table>` : '<span class="hint">无记录</span>');
+  } catch (e) { toast('明细读取失败：' + e.message, false); }
+}
+
 async function refreshCost() {
   const body = $('costBody');
   if (!bridgeOnline) { body.textContent = '桥未运行——启动后显示累计花费。'; return; }
@@ -453,9 +466,18 @@ async function refreshCost() {
     const res = await r.json();
     const v = res.value || {};
     if (!v.rows) { body.textContent = '还没有用量记录。'; return; }
-    const byKey = (v.byKey || []).slice(0, 5).map(k => `<tr><td>${k.key}</td><td>${k.turns}</td><td>¥${k.cost.toFixed(3)}</td></tr>`).join('');
+    const byKey = (v.byKey || []).slice(0, 5).map(k => `<tr><td><a href="javascript:void 0" onclick="showTurns('${k.key}')" style="color:var(--acc)">${k.key}</a></td><td>${k.turns}</td><td>¥${k.cost.toFixed(3)}</td></tr>`).join('');
     const est = v.estimatedRows ? `（${v.estimatedRows} 行按兜底价估算）` : '';
-    body.innerHTML = `<div style="font-size:20px;margin-bottom:6px">累计 ¥${v.cost.toFixed(3)}${est}</div>` +
+    let day24 = '';
+    try {
+      const r2 = await fetch(BRIDGE + '/api/tokens/series?hours=24&buckets=24');
+      const res2 = await r2.json();
+      const b = (res2.value || []);
+      const c24 = b.reduce((s, x) => s + (x.cost || 0), 0);
+      const t24 = b.reduce((s, x) => s + (x.turns || 0), 0);
+      if (t24 > 0) day24 = `<div class="hint" style="margin-bottom:6px">近 24 小时：¥${c24.toFixed(3)} · ${t24} 回合</div>`;
+    } catch (e) { }
+    body.innerHTML = `<div style="font-size:20px;margin-bottom:6px">累计 ¥${v.cost.toFixed(3)}${est}</div>` + day24 +
       `<div class="hint" style="margin-bottom:8px">tokens：命中 ${v.cacheHit} / 未命中 ${v.cacheMiss} / 输出 ${v.output} · 回合 ${v.turns} · 记录 ${v.rows} 行</div>` +
       (byKey ? `<table><tr><th>会话</th><th>回合</th><th>花费</th></tr>${byKey}</table>` : '');
   } catch (e) { body.textContent = '（花费数据不可读）'; }
