@@ -382,8 +382,7 @@ async fn check_update_direct() -> Result<serde_json::Value, String> {
     let cur = current.clone();
     let checked = tauri::async_runtime::spawn_blocking(move || queqiao::update::check_latest(&cur))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e)?;
+        .map_err(|e| e.to_string())??;
     Ok(match checked {
         None => serde_json::json!({ "hasUpdate": false, "current": current }),
         Some(rel) => serde_json::json!({

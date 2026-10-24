@@ -362,9 +362,7 @@ fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
 
     // 账号开了 OneBot HTTP 但没开 WS（或配置缺 wsServers）：与 SnowLuma 未就绪
     // 同路等待重试——用户在 SnowLuma 里补开 WS 后自动继续，不 panic。
-    let Some(ws) = found.ws.as_ref() else {
-        return None;
-    };
+    let ws = found.ws.as_ref()?;
     Some(Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
         ws_token: ws.token.clone(),
