@@ -177,6 +177,13 @@
   </section>
 
   <section>
+    <details id="diaryBox">
+      <summary>AI 日记<span class="sum-note" id="diarySum">检测中…</span></summary>
+      <div id="diaryBody" class="hint" style="margin-top:14px">检测中…</div>
+    </details>
+  </section>
+
+  <section>
     <details id="migrateBox" open>
       <summary>数据迁移（从 Node 版 qq-bridge）<span class="sum-note" id="migrateNote"></span></summary>
       <div style="margin-top:14px">
@@ -749,7 +756,7 @@ loadCatalog();
     const st = await refreshComponents();
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); }
+    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); }
     bridgeOnline = st.bridge;
     refreshPaused();
     refreshSessions();
@@ -768,6 +775,25 @@ async function showTurns(key) {
     document.getElementById('costBody').innerHTML = `<div style="margin-bottom:6px"><a href="javascript:void 0" onclick="refreshCost()" style="color:var(--acc)">← 返回总览</a> <b>${key}</b> 近 ${v.turns.length} 回合</div>` +
       (rows ? `<table><tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>花费</th></tr>${rows}</table>` : '<span class="hint">无记录</span>');
   } catch (e) { toast('明细读取失败：' + e.message, false); }
+}
+
+// AI 日记（state/diary.jsonl，每晚一篇）：低频回顾面——初始化与桥上线翻转时拉
+// 一次，不进 tick 轮询（重渲染会打断阅读）。内容是 AI 自由文本，必须转义。
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function refreshDiary() {
+  const sum = $('diarySum'), body = $('diaryBody');
+  if (!bridgeOnline) { sum.textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示 AI 日记</div></div>'; return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/socialV2/diary-recent?days=90');
+    const res = await r.json();
+    const list = (res.value && res.value.diaries) || [];
+    if (!list.length) { sum.textContent = '暂无'; body.innerHTML = '<div class="empty"><div class="t">还没写过日记</div><div class="s">AI 每晚定点写一篇（设置页行为区可开关）</div></div>'; return; }
+    sum.textContent = `共 ${list.length} 篇 · 最新 ${String(list[0].date || '').slice(5)}`;
+    body.innerHTML = list.map(d =>
+      `<div style="margin-bottom:16px"><b style="color:var(--acc);font-size:12px">${esc(d.date || '（无日期）')}</b>` +
+      `<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;margin-top:4px">${esc(String(d.content || '').trim())}</div></div>`
+    ).join('');
+  } catch (e) { sum.textContent = ''; body.textContent = '（日记不可读）'; }
 }
 
 async function refreshCost() {
@@ -799,7 +825,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); } bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); } bridgeOnline = st.bridge; refreshSessions(); }); }
 });
 </script>
 </body>

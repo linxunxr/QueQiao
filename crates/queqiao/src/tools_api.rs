@@ -181,6 +181,7 @@ pub async fn serve(
         .route("/api/socialV2/paused", get(paused_state))
         .route("/api/socialV2/set-paused", post(set_paused))
         .route("/api/socialV2/conversations", get(conversations))
+        .route("/api/socialV2/diary-recent", get(diary_recent))
         .route("/api/socialV2/wait-messages", get(wait_messages))
         .route("/api/socialV2/social-state", get(social_state))
         .route("/api/socialV2/my-recent", get(my_recent))
@@ -1375,6 +1376,35 @@ async fn set_paused(
         "AI 已恢复"
     });
     ok_json(json!({ "paused": paused }))
+}
+
+/// 控制台日记查看（UI 总览折叠区）：最近 N 天倒序。与 AI 工具面 get-diary
+/// 同源（state/diary.jsonl）但不走 agent token——console 域（ct 中间件盖前缀）。
+async fn diary_recent(
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let days: usize = q
+        .get("days")
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(30)
+        .min(90);
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("diary.jsonl");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut out = Vec::new();
+    for line in text.lines().rev() {
+        if out.len() >= days {
+            break;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line.trim_start_matches('\u{feff}')) {
+            out.push(json!({
+                "date": v.get("date").cloned().unwrap_or(Value::Null),
+                "content": v.get("content").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    ok_json(json!({ "diaries": out, "count": out.len() }))
 }
 
 /// 控制台会话概要：全部会话的 key/未读/近期/唤醒模式（UI 总览表数据源）。
