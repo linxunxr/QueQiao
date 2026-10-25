@@ -170,6 +170,7 @@
       <div class="field"><label>合批窗口（毫秒）</label><input id="f-batch" type="number" min="1000"></div>
       <div class="field"><label>日记</label><select id="f-diary"><option value="true">开启（每晚定点写）</option><option value="false">关闭</option></select></div>
       <div class="field"><label>主动发言</label><select id="f-proactive"><option value="true">开启（安静时偶尔冒泡）</option><option value="false">关闭</option></select></div>
+      <div class="field"><label>自动更新</label><select id="f-autoUpdate"><option value="true">开启（桥定时检查，空闲自动升级）</option><option value="false">仅手动（总览页检查更新按钮）</option></select><div class="hint">关闭后桥不再自动检查与升级；客户端手动升级始终可用</div></div>
     </div>
   </section>
 
@@ -345,6 +346,7 @@ async function load() {
   v('f-maxChars', send.maxMessageChars); v('f-batch', wake.batchWindowMs);
   const di = document.getElementById('f-diary'); if (cfg.socialV2 && cfg.socialV2.diary) di.value = String(!!cfg.socialV2.diary.enabled);
   const pr = document.getElementById('f-proactive'); if (cfg.socialV2 && cfg.socialV2.proactive) pr.value = String(!!cfg.socialV2.proactive.enabled);
+  const au = document.getElementById('f-autoUpdate'); au.value = String(cfg.autoUpdate !== false);
   chipLists.groups = ((cfg.allow && cfg.allow.groups) || []).map(String);
   chipLists.private = ((cfg.allow && cfg.allow.private) || []).map(String);
   renderChips();
@@ -402,6 +404,7 @@ async function save() {
   if (num('f-maxChars') !== undefined) body.socialV2.send.maxMessageChars = num('f-maxChars');
   body.socialV2.diary = body.socialV2.diary || {}; body.socialV2.diary.enabled = document.getElementById('f-diary').value === 'true';
   body.socialV2.proactive = body.socialV2.proactive || {}; body.socialV2.proactive.enabled = document.getElementById('f-proactive').value === 'true';
+  body.autoUpdate = document.getElementById('f-autoUpdate').value === 'true';
   const r = await fetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const res = await r.json();
   if (res.ok) {
@@ -518,15 +521,24 @@ async function applyUpdate() {
     $('btnUpdate').textContent = '立即更新';
   }
 }
+// 实时速度：事件间隔的瞬时速度做 EMA 平滑（0.3 权重），卡住时下次事件自然归零。
+let dlLast = null, dlSpeedEma = 0;
 if (T && T.event) T.event.listen('update-progress', e => {
   const { received, total } = e.payload || {};
   const mb = n => (n / 1048576).toFixed(1);
+  const now = Date.now();
+  if (dlLast && now > dlLast.t) {
+    const inst = (received - dlLast.r) * 1000 / (now - dlLast.t); // B/s
+    dlSpeedEma = dlSpeedEma ? dlSpeedEma * 0.7 + inst * 0.3 : inst;
+  }
+  dlLast = { r: received, t: now };
+  const speed = dlSpeedEma > 1048576 ? (dlSpeedEma / 1048576).toFixed(1) + ' MB/s' : Math.max(0, dlSpeedEma / 1024).toFixed(0) + ' KB/s';
   if (total > 0) {
     const pct = Math.floor(received * 100 / total);
     $('updBar').style.width = pct + '%';
-    $('updPct').textContent = pct + '%（' + mb(received) + ' / ' + mb(total) + ' MB）';
+    $('updPct').textContent = speed + ' · ' + pct + '%（' + mb(received) + ' / ' + mb(total) + ' MB）';
   } else {
-    $('updPct').textContent = '已下载 ' + mb(received) + ' MB';
+    $('updPct').textContent = speed + ' · 已下载 ' + mb(received) + ' MB';
   }
 });
 

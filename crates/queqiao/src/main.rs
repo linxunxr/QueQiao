@@ -698,21 +698,40 @@ async fn run(setup: Setup) {
 
     // 启动查一次 + 之后每小时轮询（长跑不重启的桥也能发现新版）；失败静默；
     // 控制台手动检查经同一通道汇入。tag 去重防轮询重复触发下载。
+    // autoUpdate=false（热更即时生效——每轮重读）则只休眠不检查：升级
+    // 完全交给客户端「检查更新」手动路径。
     {
         tokio::spawn(async move {
             let mut sent_tag = String::new();
             loop {
-                let current = env!("CARGO_PKG_VERSION");
-                let checked = tokio::task::spawn_blocking(move || update::check_latest(current))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .flatten();
-                if let Some(rel) = checked
-                    && rel.tag != sent_tag
-                {
-                    sent_tag = rel.tag.clone();
-                    let _ = update_tx.send(rel).await;
+                let auto = tokio::task::spawn_blocking(|| {
+                    std::fs::read_to_string(queqiao::paths::config_path())
+                        .ok()
+                        .and_then(|t| {
+                            serde_json::from_str::<serde_json::Value>(
+                                t.trim_start_matches('\u{feff}'),
+                            )
+                            .ok()
+                        })
+                        .and_then(|v| v.get("autoUpdate").and_then(|b| b.as_bool()))
+                        .unwrap_or(true)
+                })
+                .await
+                .unwrap_or(true);
+                if auto {
+                    let current = env!("CARGO_PKG_VERSION");
+                    let checked =
+                        tokio::task::spawn_blocking(move || update::check_latest(current))
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                            .flatten();
+                    if let Some(rel) = checked
+                        && rel.tag != sent_tag
+                    {
+                        sent_tag = rel.tag.clone();
+                        let _ = update_tx.send(rel).await;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             }

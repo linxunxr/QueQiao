@@ -840,6 +840,10 @@ impl Default for WatchdogConfig {
 
 // ── 顶层 ─────────────────────────────────────────────────────────────────────
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -863,6 +867,10 @@ pub struct Config {
     pub question_timeout_ms: u64,
     pub console_port: u16,
     pub console_token: String,
+    /// 桥的定时自动检查更新（每小时轮询 + 空闲自动应用）；关闭后仅客户端
+    /// 「检查更新」手动升级。默认开。
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     pub pricing: PricingConfig,
     pub security: SecurityConfig,
     pub slang: SlangConfig,
@@ -893,6 +901,7 @@ impl Default for Config {
             question_timeout_ms: 5 * 60_000,
             console_port: 3100,
             console_token: String::new(),
+            auto_update: true,
             pricing: Default::default(),
             security: Default::default(),
             slang: Default::default(),
@@ -1063,5 +1072,21 @@ mod tests {
     fn tolerates_bom() {
         let cfg = Config::from_json_text("\u{FEFF}{\"consolePort\": 1}").unwrap();
         assert_eq!(cfg.console_port, 1);
+    }
+
+    /// autoUpdate 缺省开；显式关闭要能解析回读（轮询热更读的就是这个键）。
+    #[test]
+    fn auto_update_flag_roundtrip() {
+        let cfg = Config::from_json_text("{}").unwrap();
+        assert!(cfg.auto_update, "缺省必须为开（存量 config 无此键）");
+        let off = Config::from_json_text("{\"autoUpdate\": false}").unwrap();
+        assert!(!off.auto_update);
+        assert!(
+            serde_json::to_value(&off)
+                .unwrap()
+                .get("autoUpdate")
+                .and_then(|b| b.as_bool())
+                .is_some_and(|b| !b)
+        );
     }
 }
