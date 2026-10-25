@@ -153,6 +153,12 @@ pub async fn serve(
         .route("/api/socialV2/prompt", get(prompt))
         .route("/api/socialV2/unread", get(unread))
         .route("/api/socialV2/send-message", post(send_message))
+        .route("/api/socialV2/reply", post(reply_message))
+        .route("/api/socialV2/send-poke", post(send_poke))
+        .route("/api/socialV2/react-message", post(react_message))
+        .route("/api/socialV2/recall-message", post(recall_message))
+        .route("/api/images/message", get(message_images))
+        .route("/api/socialV2/forward-msg", get(forward_msg))
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
@@ -321,23 +327,52 @@ async fn send_message(
         Ok(k) => k,
         Err(e) => return e,
     };
-    let text = body
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    if text.trim().is_empty() {
-        return denied(StatusCode::BAD_REQUEST, "text 不能为空");
+    let text = body.get("text").and_then(Value::as_str).unwrap_or_default();
+    let reply_to = body.get("replyToMessageId").and_then(Value::as_i64);
+    match send_text_with_reply(&state, &key, text, reply_to) {
+        Ok(message_id) => {
+            mark_reply_action(&state, &key);
+            ok_json(json!({ "messageId": message_id }))
+        }
+        Err(e) => e,
     }
-    // 发送长度上限（防 AI 出 bug 刷长文）。
+}
+
+/// 发送/互动成功后的记账（lastActionAt 推进——noAction 判定的动作信号；
+/// 仅发言类同时推进 lastAiReplyAt）。
+fn mark_reply_action(state: &ToolApiState, key: &str) {
+    mark_action(state, key, true);
+}
+fn mark_action(state: &ToolApiState, key: &str, is_reply: bool) {
+    let mut store = state.social.lock().unwrap();
+    let now = crate::session_manager::SessionManager::now_ms();
+    let st = store.conversation_mut(key);
+    st.last_action_at = now;
+    if is_reply {
+        st.last_ai_reply_at = now;
+    }
+    store.save();
+}
+
+/// 发送链复用体（send-message 与 reply 端点共用）：空校验 → 长度上限 →
+/// 引用段 + 文本段 → 按会话类型走群/私聊。
+fn send_text_with_reply(
+    state: &ToolApiState,
+    key: &str,
+    text: &str,
+    reply_to: Option<i64>,
+) -> Result<i64, (StatusCode, axum::Json<Value>)> {
+    if text.trim().is_empty() {
+        return Err(denied(StatusCode::BAD_REQUEST, "text 不能为空"));
+    }
     let max = state.cfg.social_v2.send.max_message_chars;
     let text: String = if text.chars().count() > max {
         text.chars().take(max).collect()
     } else {
-        text
+        text.to_owned()
     };
     let mut segments = vec![queqiao_onebot::segment::text(&text)];
-    if let Some(reply_to) = body.get("replyToMessageId").and_then(Value::as_i64) {
+    if let Some(reply_to) = reply_to {
         segments.insert(0, queqiao_onebot::segment::reply(reply_to));
     }
     let message = queqiao_onebot::segment::message(&segments);
@@ -351,21 +386,318 @@ async fn send_message(
             .onebot
             .send_private_msg(user.parse().unwrap_or(0), &message)
     };
-    match result {
+    result.map_err(|e| denied(StatusCode::BAD_GATEWAY, &format!("OneBot 发送失败：{e}")))
+}
+
+/// qq_reply：群引用回复——参数名与 send-message 不同（groupId/message），
+/// 转换后同一发送链。
+async fn reply_message(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let group = body
+        .get("groupId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = format!("group:{group}");
+    let flag = state.cfg.social_v2.tools.send_message || state.cfg.social_v2.tools.send_group;
+    let key = match state.authorize(&headers, &key, flag) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let reply_to = body.get("replyToMessageId").and_then(Value::as_i64);
+    let text = body
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match send_text_with_reply(&state, &key, text, reply_to) {
         Ok(message_id) => {
-            // 记账：lastActionAt 推进（noAction 判定的动作信号）。
-            {
-                let mut store = state.social.lock().unwrap();
-                let now = crate::session_manager::SessionManager::now_ms();
-                let st = store.conversation_mut(&key);
-                st.last_action_at = now;
-                st.last_ai_reply_at = now;
-                store.save();
-            }
+            mark_reply_action(&state, &key);
             ok_json(json!({ "messageId": message_id }))
         }
-        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("OneBot 发送失败：{e}")),
+        Err(e) => e,
     }
+}
+
+/// qq_send_poke：拍一拍（群需 targetUserId；私聊默认拍对方）。
+async fn send_poke(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.send_poke) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let target = body
+        .get("targetUserId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let result = if let Some(group) = key.strip_prefix("group:") {
+        if target.is_empty() {
+            return denied(StatusCode::BAD_REQUEST, "群聊拍一拍必须传 targetUserId");
+        }
+        state.onebot.call(
+            "group_poke",
+            json!({ "group_id": group.parse::<u64>().unwrap_or(0), "user_id": target.parse::<u64>().unwrap_or(0) }),
+        )
+    } else {
+        let user = if target.is_empty() {
+            key.strip_prefix("private:").unwrap_or("0")
+        } else {
+            &target
+        };
+        state.onebot.call(
+            "friend_poke",
+            json!({ "user_id": user.parse::<u64>().unwrap_or(0) }),
+        )
+    };
+    match result {
+        Ok(_) => {
+            mark_action(&state, &key, false);
+            ok_json(json!({ "ok": true }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("拍一拍失败：{e}")),
+    }
+}
+
+/// qq_react_message：QQ 表情回应（set_msg_emoji_like）。只能给近期消息点，
+/// 平台与 NapCat 侧兜底校验。
+async fn react_message(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.react_message) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let message_id = body.get("messageId").and_then(Value::as_i64).unwrap_or(0);
+    let emoji = body
+        .get("emojiId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if message_id == 0 || emoji.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "messageId 与 emojiId 不能为空");
+    }
+    match state.onebot.call(
+        "set_msg_emoji_like",
+        json!({ "message_id": message_id, "emoji_id": emoji }),
+    ) {
+        Ok(_) => {
+            mark_action(&state, &key, false);
+            ok_json(json!({ "ok": true }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("表情回应失败：{e}")),
+    }
+}
+
+/// qq_recall_message：撤回自己刚发的消息（2 分钟窗口）。桥不存自发消息
+/// 映射，"只能撤自己的"由平台侧兜底校验。
+async fn recall_message(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.recall_message) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let message_id = body.get("messageId").and_then(Value::as_i64).unwrap_or(0);
+    if message_id == 0 {
+        return denied(StatusCode::BAD_REQUEST, "messageId 不能为空");
+    }
+    match state
+        .onebot
+        .call("delete_msg", json!({ "message_id": message_id }))
+    {
+        Ok(_) => {
+            mark_action(&state, &key, false);
+            ok_json(json!({ "ok": true }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("撤回失败：{e}")),
+    }
+}
+
+/// qq_get_message_images：取消息内图片/表情（get_msg 拿原始段 → 图片
+/// 下载转 base64；face 转文本；视频暂不支持抽帧）。图片下载在
+/// spawn_blocking（reqwest blocking）。
+async fn message_images(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身（会话键/白名单/令牌三查）；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.get_images) {
+        return e;
+    }
+    let message_id = q
+        .get("messageId")
+        .and_then(|m| m.parse::<i64>().ok())
+        .unwrap_or(0);
+    if message_id == 0 {
+        return denied(StatusCode::BAD_REQUEST, "messageId 不能为空");
+    }
+    let raw = match state
+        .onebot
+        .call("get_msg", json!({ "message_id": message_id }))
+    {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::BAD_GATEWAY, &format!("get_msg 失败：{e}")),
+    };
+    let segments = raw
+        .get("message")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // 先收集待下载图（url），下载转 base64 后组装。
+    let mut images = Vec::new();
+    let mut note = String::new();
+    let mut urls = Vec::new();
+    for seg in &segments {
+        match seg.get("type").and_then(Value::as_str) {
+            Some("image") | Some("mface") => {
+                let url = seg.get("url").and_then(Value::as_str).unwrap_or_default();
+                let text = seg
+                    .get("summary")
+                    .or_else(|| seg.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    images.push(json!({ "kind": "image", "text": text, "note": "无 url（可能是闪照/过期）" }));
+                } else {
+                    urls.push((url.to_owned(), text.to_owned()));
+                }
+            }
+            Some("face") => {
+                let id = seg.get("id").and_then(Value::as_i64).unwrap_or(0);
+                images.push(json!({ "kind": "face", "text": format!("[QQ 表情 #{id}]") }));
+            }
+            Some("video") | Some("record") => {
+                note.push_str("含视频/语音，暂不支持提取（如需可后续版本补抽帧）；");
+            }
+            _ => {}
+        }
+    }
+    let downloaded = tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+        urls.iter()
+            .filter_map(|(url, text)| {
+                let client = client.as_ref().ok()?;
+                let resp = client.get(url).send().ok()?;
+                let bytes = resp.bytes().ok()?;
+                let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+                    "image/png"
+                } else {
+                    "image/jpeg"
+                };
+                use base64::Engine;
+                Some(json!({
+                    "kind": "image", "mimeType": mime, "text": text,
+                    "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    images.extend(downloaded);
+    if images.is_empty() {
+        return ok_json(json!({ "images": [], "note": note + "未找到图片/表情" }));
+    }
+    ok_json(json!({ "images": images, "note": note }))
+}
+
+/// qq_get_forward_msg：合并转发内容展开为文本树（嵌套转发给出 resid 供再查）。
+async fn forward_msg(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // 同上：此处仅需完成鉴权三查。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.get_message_detail) {
+        return e;
+    }
+    let id = q.get("id").map(String::as_str).unwrap_or_default();
+    if id.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "id 不能为空");
+    }
+    let raw = match state.onebot.call("get_forward_msg", json!({ "id": id })) {
+        Ok(v) => v,
+        Err(e) => {
+            return denied(
+                StatusCode::BAD_GATEWAY,
+                &format!("get_forward_msg 失败：{e}"),
+            );
+        }
+    };
+    let messages = raw.as_array().cloned().unwrap_or_default();
+    let mut out = String::new();
+    for m in &messages {
+        let sender = m
+            .get("sender")
+            .and_then(|s| s.get("card").or_else(|| s.get("nickname")))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let mut parts = Vec::new();
+        for seg in m
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            match seg.get("type").and_then(Value::as_str) {
+                Some("text") => parts.push(
+                    seg.get("data")
+                        .and_then(|d| d.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+                Some("image") => parts.push("[图片]".to_owned()),
+                Some("face") => parts.push("[表情]".to_owned()),
+                Some("forward") => {
+                    let rid = seg
+                        .get("data")
+                        .and_then(|d| d.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    parts.push(format!("[嵌套转发 id={rid}，可再查]"));
+                }
+                Some(other) => parts.push(format!("[{other}]")),
+                None => {}
+            }
+        }
+        out.push_str(&format!("{sender}: {}\n", parts.join(" ")));
+    }
+    if out.is_empty() {
+        return ok_json(json!({ "messages": [], "note": "转发内容为空或已过期" }));
+    }
+    ok_json(json!({ "messages": out.trim_end() }))
 }
 
 /// qq_mark_read：确认读到 throughSeq（水位推进——新消息留待后续处理）。

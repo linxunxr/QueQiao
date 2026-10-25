@@ -286,6 +286,132 @@ const TOOLS: &[ToolDef] = &[
         flag: Some("getUnread"),
         params: &[],
     },
+    ToolDef {
+        name: "qq_reply",
+        description: "在群里引用/回复某条消息并发文本（回更早的消息/多句指向不同人时用；上下文唯一时不必引用）。replyToMessageId 从近期消息工具获取，可为负数。需带会话令牌。",
+        endpoint: "reply",
+        method: "POST",
+        flag: Some("reply"),
+        params: &[
+            ("groupId", "string", true, "群号（须在白名单）"),
+            (
+                "replyToMessageId",
+                "number",
+                true,
+                "被引用消息 id（非零整数，可为负）",
+            ),
+            (
+                "message",
+                "string",
+                true,
+                "文本（纯文本，勿 Markdown/CQ 码）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_send_burst",
+        description: "在群里分多条连发消息（真人化随机间隔，每条一个气泡）。数组每元素=一条消息；字符串内别用空格拆句。暂不支持引用（用 qq_reply）。需带会话令牌。",
+        endpoint: "send-message",
+        method: "POST",
+        flag: Some("sendBurst"),
+        params: &[
+            ("groupId", "string", true, "群号（须在白名单）"),
+            (
+                "messages",
+                "array",
+                true,
+                "消息数组（每条纯文本；兼容 JSON 数组字符串）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_send_poke",
+        description: "拍一拍（群聊须传 targetUserId；私聊默认拍对方）。代替废话式回应/提醒/回拍，别频繁。需带会话令牌。",
+        endpoint: "send-poke",
+        method: "POST",
+        flag: Some("sendPoke"),
+        params: &[
+            (
+                "conversationKey",
+                "string",
+                true,
+                "会话 key（group:群号 / private:QQ号）",
+            ),
+            (
+                "targetUserId",
+                "string",
+                false,
+                "要拍的群友 QQ 号（群聊必填）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_react_message",
+        description: "给近期消息点 QQ 表情回应（轻度围观：好笑/赞同点一个，别每条都点）。emojiId 常用：76 笑哭、4 得意、5 流泪、54 喝彩、66 爱心。messageId 用真实 QQ 消息 id。需带会话令牌。",
+        endpoint: "react-message",
+        method: "POST",
+        flag: Some("reactMessage"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            (
+                "messageId",
+                "number",
+                true,
+                "要点回应的消息 id（QQ messageId 非 seq）",
+            ),
+            ("emojiId", "string", true, "QQ 表情编号（数字字符串）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_recall_message",
+        description: "撤回自己刚发的消息（QQ 仅允许 2 分钟内撤自己的；发错/说漏嘴时用，撤后可补发或说「打错了」）。messageId 用发送返回/近期消息里的真实 id。需带会话令牌。",
+        endpoint: "recall-message",
+        method: "POST",
+        flag: Some("recallMessage"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("messageId", "number", true, "要撤回的消息 id"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_message_images",
+        description: "获取消息中的图片/表情并直接返回图像内容（看到 [图片]/[表情] 时调用，别假装看不到；视频暂不支持）。需带会话令牌。",
+        endpoint: "images/message",
+        method: "GET",
+        flag: Some("getImages"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            (
+                "messageId",
+                "string",
+                true,
+                "消息 id（QQ messageId 可为负）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_forward_msg",
+        description: "查看合并转发消息内容（文本树；嵌套转发给出 id 可再查）。文本含 [转发消息 id=...] 时调用。需带会话令牌。",
+        endpoint: "forward-msg",
+        method: "GET",
+        flag: Some("getForwardMsg"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            (
+                "id",
+                "string",
+                true,
+                "转发的 resid（消息里 [转发消息 id=...] 的 id）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
 ];
 
 fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
@@ -492,6 +618,88 @@ fn call_tool(def: &ToolDef, args: &Value, console_token: &str) -> Result<Value, 
         .map_err(|e| format!("桥响应解析失败：{e}"))
 }
 
+/// qq_send_burst 的连发实现：messages 归一（数组 / JSON 数组字符串 / 单条
+/// 字符串），逐条调桥 send-message，间隔 600-1500ms 随机（Node 版真人化
+/// 节奏）。上限 8 条防刷屏。
+fn send_burst(args: &Value, console_token: &str) -> Result<Value, String> {
+    let group = args
+        .get("groupId")
+        .map(|g| match g {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.clone(),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    let token = args
+        .get("agentToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let raw_messages = args.get("messages").cloned().unwrap_or(Value::Null);
+    let mut messages: Vec<String> = Vec::new();
+    match raw_messages {
+        Value::Array(arr) => {
+            for m in arr {
+                if let Some(s) = m.as_str() {
+                    messages.push(s.to_owned());
+                }
+            }
+        }
+        Value::String(s) => {
+            let t = s.trim();
+            if t.starts_with('[')
+                && let Ok(parsed) = serde_json::from_str::<Value>(t)
+                && let Some(arr) = parsed.as_array()
+            {
+                for m in arr {
+                    if let Some(s) = m.as_str() {
+                        messages.push(s.to_owned());
+                    }
+                }
+            }
+            if messages.is_empty() && !t.is_empty() {
+                messages.push(s.clone());
+            }
+        }
+        _ => {}
+    }
+    if messages.is_empty() {
+        return Err("messages 为空（数组或非空字符串）".to_owned());
+    }
+    if messages.len() > 8 {
+        messages.truncate(8);
+    }
+    let key = format!("group:{group}");
+    let send_def = TOOLS
+        .iter()
+        .find(|d| d.endpoint == "send-message")
+        .expect("send-message 定义存在");
+    let mut ids = Vec::new();
+    for (i, text) in messages.iter().enumerate() {
+        if i > 0 {
+            let gap = 600 + rand_delay_ms(900);
+            std::thread::sleep(std::time::Duration::from_millis(gap));
+        }
+        let one = json!({
+            "conversationKey": key,
+            "text": text,
+            "agentToken": token,
+        });
+        let out = call_tool(send_def, &one, console_token)?;
+        ids.push(out.get("messageId").cloned().unwrap_or(Value::Null));
+    }
+    Ok(json!({ "ok": true, "messageIds": ids, "count": ids.len() }))
+}
+
+/// 0..bound 毫秒的伪随机（mcp 无随机依赖——时间戳低位抖动够用）。
+fn rand_delay_ms(bound: u64) -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    (nanos.wrapping_mul(6364136223846793005).wrapping_add(1) >> 33) % bound.max(1)
+}
+
 fn handle_request(
     id: &Value,
     method: &str,
@@ -547,13 +755,68 @@ fn handle_request(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            // qq_send_burst：多条连发，每条间真人化随机间隔（600-1500ms），
+            // 逐条走 send-message 端点（白名单/频率/记账逐条生效）。
+            if name == "qq_send_burst" {
+                let result = send_burst(&args, console_token);
+                audit_tool_call(def, &args, &result, &key);
+                return match result {
+                    Ok(value) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [ { "type": "text", "text": value.to_string() } ] }
+                    }),
+                    Err(e) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [ { "type": "text", "text": e } ], "isError": true }
+                    }),
+                };
+            }
             let result = call_tool(def, &args, console_token);
             audit_tool_call(def, &args, &result, &key);
             match result {
-                Ok(value) => json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": { "content": [ { "type": "text", "text": value.to_string() } ] }
-                }),
+                Ok(value) => {
+                    // qq_get_message_images：images 数组里带 data 的项转 MCP
+                    // image 内容块（视觉模型可直接看图），其余以文本标注。
+                    if name == "qq_get_message_images" {
+                        let imgs = value.get("images").and_then(Value::as_array);
+                        if let Some(imgs) = imgs
+                            && !imgs.is_empty()
+                        {
+                            let mut content: Vec<Value> = Vec::new();
+                            let mut labels = Vec::new();
+                            for (i, img) in imgs.iter().enumerate() {
+                                let kind =
+                                    if img.get("kind").and_then(Value::as_str) == Some("face") {
+                                        "表情"
+                                    } else {
+                                        "图片"
+                                    };
+                                match (
+                                    img.get("data").and_then(Value::as_str),
+                                    img.get("mimeType").and_then(Value::as_str),
+                                ) {
+                                    (Some(data), Some(mime)) => {
+                                        labels.push(format!("[{}{}]", kind, i + 1));
+                                        content.push(json!({ "type": "image", "mimeType": mime, "data": data }));
+                                    }
+                                    _ => labels.push(format!("[{}{}（获取失败）]", kind, i + 1)),
+                                }
+                            }
+                            content.insert(
+                                    0,
+                                    json!({ "type": "text", "text": format!("消息媒体（{} 项）：\n{}", imgs.len(), labels.join("\n")) }),
+                                );
+                            return json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": { "content": content }
+                            });
+                        }
+                    }
+                    json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [ { "type": "text", "text": value.to_string() } ] }
+                    })
+                }
                 Err(e) => json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": { "content": [ { "type": "text", "text": e } ], "isError": true }

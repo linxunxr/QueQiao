@@ -2538,6 +2538,7 @@ name = "queqiao"
 version = "0.4.5"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "queqiao-core",
  "queqiao-dsh",
  "queqiao-media",
