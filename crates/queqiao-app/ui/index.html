@@ -82,6 +82,16 @@
   @keyframes dotpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   @media (prefers-reduced-motion: reduce) { .dotc.checking { animation:none; } #toast { transition:none; } }
 
+  details summary { font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:9px;
+    cursor:pointer; list-style:none; user-select:none; }
+  details summary::-webkit-details-marker { display:none; }
+  details summary::before { content:""; width:3px; height:14px; border-radius:2px; background:var(--acc); flex:none; }
+  details summary::after { content:""; width:7px; height:7px; border-right:1.5px solid var(--dim2);
+    border-bottom:1.5px solid var(--dim2); transform:rotate(-45deg); margin-left:auto; flex:none;
+    transition:transform .15s; margin-right:2px; }
+  details[open] summary::after { transform:rotate(45deg); }
+  .sum-note { color:var(--dim2); font-size:12px; font-weight:400; }
+  button.mini { padding:4px 14px; font-size:12px; font-weight:500; }
   #orch { display:flex; gap:12px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
   #orchMsg { flex:1; }
 
@@ -110,7 +120,7 @@
 </head>
 <body>
 <header>
-  <div class="titlerow"><h1>鹊桥</h1><span class="ver" id="ver"></span></div>
+  <div class="titlerow"><h1>鹊桥</h1><span class="ver" id="ver"></span><span style="flex:1"></span><button class="ghost mini" onclick="checkUpdate()">检查更新</button></div>
   <nav>
     <button id="tab-overview" class="active" onclick="showTab('overview')">总览</button>
     <button id="tab-settings" onclick="showTab('settings')">设置</button>
@@ -129,10 +139,9 @@
     <div id="orch">
       <button id="btnStartAll" onclick="startAll()">一键启动</button>
       <button class="ghost" onclick="stopBridge()">停止桥</button>
-      <button class="ghost" onclick="checkUpdate()">检查更新</button>
       <span class="hint" id="orchMsg"></span>
     </div>
-    <div class="hint" style="margin-top:6px">DSH 未跑自动拉起；SnowLuma 按 A 档授权（"安装、启动和运行"）代为拉起官方 launcher.bat——QQ 登录与 OneBot 开启仍需你在其窗口完成；桥等两者就绪后自动启动。</div>
+    <div class="hint" style="margin-top:6px">DSH 未跑自动拉起；SnowLuma 按授权代启（QQ 登录与 OneBot 仍需在其窗口完成）；桥等就绪后自动启动。</div>
   </section>
 
   <section id="updatePanel" style="display:none">
@@ -150,8 +159,10 @@
   </section>
 
   <section>
-    <h2>花费（token 记账）</h2>
-    <div id="costBody" class="hint">检测中…</div>
+    <details id="costBox">
+      <summary>花费（token 记账）<span class="sum-note" id="costSum">检测中…</span></summary>
+      <div id="costBody" class="hint" style="margin-top:14px">检测中…</div>
+    </details>
   </section>
 
   <section id="sessions">
@@ -160,14 +171,18 @@
   </section>
 
   <section>
-    <h2>数据迁移（从 Node 版 qq-bridge）</h2>
-    <div class="row">
-      <div class="field" style="flex:3 1 320px"><label>Node 版桥路径（含 config.json 与 state/）</label><input id="f-nodeBridge" placeholder="如 D:\100work\103Tools\qq-bridge"></div>
-      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="browseNodeBridge()">浏览…</button></div>
-      <div class="field" style="flex:0 0 auto; align-self:end"><button onclick="migrateNode()">迁移到本安装目录</button></div>
-    </div>
-    <div class="hint">带走 config、DSH 会话映射、唤醒状态、记忆、日记、表情包、黑话、人格卡等 15 项；目标同名文件默认跳过（不覆盖）。迁移后重启桥生效。</div>
-    <pre id="migrateOut" style="display:none; background:#0a0e12; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:11px/1.5 Consolas,monospace; color:#9fb0c0; white-space:pre-wrap; max-height:200px; overflow-y:auto; margin-top:8px"></pre>
+    <details id="migrateBox" open>
+      <summary>数据迁移（从 Node 版 qq-bridge）<span class="sum-note" id="migrateNote"></span></summary>
+      <div style="margin-top:14px">
+        <div class="row">
+          <div class="field" style="flex:3 1 320px"><label>Node 版桥路径（含 config.json 与 state/）</label><input id="f-nodeBridge" placeholder="如 D:@workCTools\qq-bridge"></div>
+          <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="browseNodeBridge()">浏览…</button></div>
+          <div class="field" style="flex:0 0 auto; align-self:end"><button onclick="migrateNode()">迁移到本安装目录</button></div>
+        </div>
+        <div class="hint">带走 config、DSH 会话映射、唤醒状态、记忆、日记、表情包、黑话、人格卡等 15 项；目标同名文件默认跳过（不覆盖）。迁移后重启桥生效。</div>
+        <pre id="migrateOut" style="display:none; background:#0a0e12; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:11.5px/1.6 Consolas,'Microsoft YaHei',monospace; color:#9fb0c0; white-space:pre-wrap; max-height:200px; overflow-y:auto; margin-top:8px"></pre>
+      </div>
+    </details>
   </section>
 
   <section>
@@ -347,11 +362,18 @@ async function migrateNode() {
     const r = await T.core.invoke('migrate_from_node', { nodeBridge: dir, force: false });
     out.textContent = r || '（无输出——可能目标已全部存在，全部跳过）';
     toast('迁移完成', true);
+    localStorage.setItem('qqMigrated', '1');
+    setMigrateState();
     load();
   } catch (e) {
     out.textContent = String(e);
     toast('迁移失败', false);
   }
+}
+function setMigrateState() {
+  const done = localStorage.getItem('qqMigrated') === '1';
+  document.getElementById('migrateNote').textContent = done ? '已完成' : '未迁移';
+  if (done) document.getElementById('migrateBox').removeAttribute('open');
 }
 if (T) T.event.listen('bridge-log', e => {
   const l = $('log'); l.textContent += (l.textContent ? '\n' : '') + e.payload;
@@ -605,6 +627,7 @@ if (T && T.event) T.event.listen('update-progress', e => {
 // 浏览器模式回落到桥在线后 load() 用 _version 填。
 (async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await T.core.invoke('app_version'); } catch (e) {} })();
 loadRoles();
+setMigrateState();
 loadCatalog();
 (async () => { await load(); fillModels(); })();
 (async function tick() {
@@ -637,7 +660,9 @@ async function refreshCost() {
     const r = await fetch(BRIDGE + '/api/tokens/summary');
     const res = await r.json();
     const v = res.value || {};
-    if (!v.rows) { body.innerHTML = '<div class="empty"><div class="t">还没有用量记录</div><div class="s">AI 开始工作后在这里汇总</div></div>'; return; }
+    const sumEl = document.getElementById('costSum');
+    if (!v.rows) { sumEl.textContent = '暂无记录'; body.innerHTML = '<div class="empty"><div class="t">还没有用量记录</div><div class="s">AI 开始工作后在这里汇总</div></div>'; return; }
+    if (!sumEl.textContent || sumEl.textContent === '检测中…') sumEl.textContent = `累计 ¥${v.cost.toFixed(2)}`;
     const byKey = (v.byKey || []).slice(0, 5).map(k => `<tr><td><a href="javascript:void 0" onclick="showTurns('${k.key}')" style="color:var(--acc)">${k.key}</a></td><td>${k.turns}</td><td>¥${k.cost.toFixed(3)}</td></tr>`).join('');
     const est = v.estimatedRows ? `（${v.estimatedRows} 行按兜底价估算）` : '';
     let day24 = '';
@@ -647,7 +672,8 @@ async function refreshCost() {
       const b = (res2.value || []);
       const c24 = b.reduce((s, x) => s + (x.cost || 0), 0);
       const t24 = b.reduce((s, x) => s + (x.turns || 0), 0);
-      if (t24 > 0) day24 = `<div class="hint" style="margin-bottom:6px">近 24 小时：¥${c24.toFixed(3)} · ${t24} 回合</div>`;
+      if (t24 > 0) { day24 = `<div class="hint" style="margin-bottom:6px">近 24 小时：¥${c24.toFixed(3)} · ${t24} 回合</div>`; sumEl.textContent = `近 24h ¥${c24.toFixed(2)} · 累计 ¥${v.cost.toFixed(2)}`; }
+      else sumEl.textContent = `累计 ¥${v.cost.toFixed(2)}`;
     } catch (e) { }
     body.innerHTML = `<div style="font-size:20px;margin-bottom:6px">累计 ¥${v.cost.toFixed(3)}${est}</div>` + day24 +
       `<div class="hint" style="margin-bottom:8px">tokens：命中 ${v.cacheHit} / 未命中 ${v.cacheMiss} / 输出 ${v.output} · 回合 ${v.turns} · 记录 ${v.rows} 行</div>` +
