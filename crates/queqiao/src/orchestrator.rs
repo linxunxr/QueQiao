@@ -124,10 +124,23 @@ impl Orchestrator {
         }
         let keys: Vec<String> = self.sessions.keys().cloned().collect();
         for key in keys {
-            let delay = proactive_check_delay(&self.rules.proactive, rng);
-            self.timers
-                .schedule(&key, TimerKind::ProactiveCheck, delay, now_ms);
+            self.schedule_proactive_check(&key, now_ms, rng);
         }
+    }
+
+    /// 单会话排一次主动检查（运行期动态注册的新会话用；覆盖重排同款）。
+    pub fn schedule_proactive_check(
+        &mut self,
+        key: &str,
+        now_ms: u64,
+        rng: &mut dyn FnMut() -> f64,
+    ) {
+        if !self.rules.proactive.enabled {
+            return;
+        }
+        let delay = proactive_check_delay(&self.rules.proactive, rng);
+        self.timers
+            .schedule(key, TimerKind::ProactiveCheck, delay, now_ms);
     }
 
     /// 喂一条事件，返回决策动作序列（并驱动内部定时器轮询）。
@@ -401,11 +414,7 @@ mod tests {
         // 到期：不唤醒（rng 0.99 ≥ 0.3）但重排，环仍在册。
         let actions = o.advance(90 * 60_000, now_local(12), &mut rng);
         assert!(actions.is_empty(), "未命中无真实动作");
-        assert_eq!(
-            o.timers().active(),
-            1,
-            "触发后自重排，检查环常驻"
-        );
+        assert_eq!(o.timers().active(), 1, "触发后自重排，检查环常驻");
     }
 
     /// proactive 关闭时不排程。

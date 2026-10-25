@@ -64,17 +64,8 @@ impl ToolApiState {
                 "conversationKey 应为 group:群号 或 private:QQ号",
             ));
         }
-        // ① 模式门禁：白名单（M4 范围声明 reserved2 准入 = allow 列表）。
-        let id: u64 = key
-            .split(':')
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let allowed = match key.split(':').next().unwrap_or_default() {
-            "group" => self.cfg.allow.groups.contains(&id),
-            _ => self.cfg.allow.private.contains(&id),
-        };
-        if !allowed {
+        // ① 模式门禁：白名单 + deny 黑名单/allowAllWhenEmpty（Node allowed() 语义）。
+        if !self.cfg.conversation_allowed(&key) {
             return Err(denied(
                 StatusCode::FORBIDDEN,
                 &format!("会话 {key} 不在白名单内（config.json allow.groups / allow.private）"),
@@ -506,11 +497,7 @@ fn redact_agent_tokens(state: &ToolApiState, text: &str) -> String {
         store
             .conversation_keys()
             .iter()
-            .filter_map(|k| {
-                store
-                    .conversation(k)
-                    .and_then(|st| st.agent_token.clone())
-            })
+            .filter_map(|k| store.conversation(k).and_then(|st| st.agent_token.clone()))
             .collect()
     };
     queqiao_core::sensitive::redact_known_tokens(text, tokens.iter().map(String::as_str))
@@ -2227,8 +2214,13 @@ async fn tokens_series(
         .join("token-usage.jsonl");
     let text = std::fs::read_to_string(&file).unwrap_or_default();
     ok_json(
-        serde_json::to_value(queqiao_core::token_ledger::series(&text, hours, buckets))
-            .unwrap_or_default(),
+        serde_json::to_value(queqiao_core::token_ledger::series(
+            &text,
+            hours,
+            buckets,
+            &state.cfg.price_table(),
+        ))
+        .unwrap_or_default(),
     )
 }
 
@@ -2264,7 +2256,8 @@ async fn tokens_turns(
         .join("state")
         .join("token-usage.jsonl");
     let text = std::fs::read_to_string(&file).unwrap_or_default();
-    let turns = queqiao_core::token_ledger::conversation(&text, &key, limit);
+    let turns =
+        queqiao_core::token_ledger::conversation(&text, &key, limit, &state.cfg.price_table());
     if turns.is_empty() {
         return denied(StatusCode::NOT_FOUND, "未找到该会话的用量记录");
     }
@@ -2577,7 +2570,7 @@ async fn tokens_summary(
         .join("state")
         .join("token-usage.jsonl");
     let text = std::fs::read_to_string(&file).unwrap_or_default();
-    let summary = queqiao_core::token_ledger::summarize(&text);
+    let summary = queqiao_core::token_ledger::summarize(&text, &state.cfg.price_table());
     ok_json(serde_json::to_value(&summary).unwrap_or_default())
 }
 
@@ -2823,10 +2816,7 @@ async fn sticker_image(
                 .unwrap_or(None)
             };
             let (image, note) = match img {
-                Some((mime, data)) => (
-                    json!({ "mimeType": mime, "data": data }),
-                    Value::Null,
-                ),
+                Some((mime, data)) => (json!({ "mimeType": mime, "data": data }), Value::Null),
                 None => (
                     Value::Null,
                     json!("图片下载失败或格式不受支持，仅返回元数据"),

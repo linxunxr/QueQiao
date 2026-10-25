@@ -607,7 +607,12 @@ const TOOLS: &[ToolDef] = &[
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("text", "string", true, "反馈原文"),
-            ("level", "string", false, "反馈级别 info/warning/error，默认 info"),
+            (
+                "level",
+                "string",
+                false,
+                "反馈级别 info/warning/error，默认 info",
+            ),
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
@@ -880,8 +885,9 @@ fn call_tool(def: &ToolDef, args: &Value, console_token: &str) -> Result<Value, 
 }
 
 /// qq_send_burst 的连发实现：messages 归一（数组 / JSON 数组字符串 / 单条
-/// 字符串），逐条调桥 send-message，间隔 600-1500ms 随机（Node 版真人化
-/// 节奏）。上限 8 条防刷屏。
+/// 字符串），逐条调桥 send-message。间隔走 config send 节（Node computeGapsV2
+/// auto 模式）：普通区间 burstIntervalMin/Max，longGapProbability 概率落
+/// longGapMin/Max 长间隔，上限 maxGapMs；上限条数 burstMaxMessages。
 fn send_burst(args: &Value, console_token: &str) -> Result<Value, String> {
     let group = args
         .get("groupId")
@@ -926,9 +932,25 @@ fn send_burst(args: &Value, console_token: &str) -> Result<Value, String> {
     if messages.is_empty() {
         return Err("messages 为空（数组或非空字符串）".to_owned());
     }
-    if messages.len() > 8 {
-        messages.truncate(8);
+    let send_cfg = load_section("socialV2")
+        .get("send")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let num = |k: &str, d: u64| send_cfg.get(k).and_then(Value::as_u64).unwrap_or(d);
+    let burst_max_messages = num("burstMaxMessages", 8).clamp(1, 8) as usize;
+    if messages.len() > burst_max_messages {
+        messages.truncate(burst_max_messages);
     }
+    let burst_min = num("burstIntervalMinMs", 1_000).max(100);
+    let burst_max = num("burstIntervalMaxMs", 3_000).max(burst_min);
+    let long_prob = send_cfg
+        .get("longGapProbability")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.2)
+        .clamp(0.0, 1.0);
+    let long_min = num("longGapMinMs", 5_000).max(100);
+    let long_max = num("longGapMaxMs", 10_000).max(long_min);
+    let gap_cap = num("maxGapMs", 10_000).max(100);
     let key = format!("group:{group}");
     let send_def = TOOLS
         .iter()
@@ -937,7 +959,14 @@ fn send_burst(args: &Value, console_token: &str) -> Result<Value, String> {
     let mut ids = Vec::new();
     for (i, text) in messages.iter().enumerate() {
         if i > 0 {
-            let gap = 600 + rand_delay_ms(900);
+            // 长间隔判定 + 区间随机，clamp 到 maxGapMs（Node auto 模式）。
+            let use_long = long_prob > 0.0 && (rand_delay_ms(1000) as f64) < long_prob * 1000.0;
+            let (min, max) = if use_long {
+                (long_min, long_max)
+            } else {
+                (burst_min, burst_max)
+            };
+            let gap = (min + rand_delay_ms(max - min)).min(gap_cap);
             std::thread::sleep(std::time::Duration::from_millis(gap));
         }
         let one = json!({
@@ -1094,7 +1123,8 @@ fn handle_request(
                         )
                     {
                         let label = if name == "qq_get_self_image" {
-                            let nickname = value.get("nickname").and_then(Value::as_str).unwrap_or("?");
+                            let nickname =
+                                value.get("nickname").and_then(Value::as_str).unwrap_or("?");
                             format!("当前形象（{nickname}）：")
                         } else {
                             let desc = value.get("desc").and_then(Value::as_str).unwrap_or("");

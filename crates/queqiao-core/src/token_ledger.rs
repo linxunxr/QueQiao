@@ -85,8 +85,15 @@ const HOLIDAYS_2027: &[&str] = &[
     "2027-10-07",
 ];
 
-/// 单价（空闲时段，元/百万 token；高峰 ×2）。
-fn off_price(model: &str) -> (f64, f64, f64) {
+/// 自定义价目表（model → (cacheHit, cacheMiss, output)，元/百万 token，空闲档；
+/// 高峰同样 ×2）。空表 = 全走内置档。来自 config `pricing.models` 运行时注入。
+pub type PriceTable = std::collections::BTreeMap<String, (f64, f64, f64)>;
+
+/// 单价（空闲时段，元/百万 token；高峰 ×2）。自定义表精确命中优先。
+fn off_price(model: &str, custom: &PriceTable) -> (f64, f64, f64) {
+    if let Some(p) = custom.get(model) {
+        return *p;
+    }
     // (cacheHit, cacheMiss|cacheWrite, output)
     if model.contains("pro") {
         (0.15, 4.5, 13.5)
@@ -184,8 +191,8 @@ pub struct LedgerRow {
 }
 
 /// 单行计费（元）：三桶分别计价；k=base 的行为 0 token（不计费）。
-pub fn row_cost(row: &LedgerRow) -> f64 {
-    let (hit, miss, out) = off_price(&row.model);
+pub fn row_cost(row: &LedgerRow, custom: &PriceTable) -> f64 {
+    let (hit, miss, out) = off_price(&row.model, custom);
     let peak = if is_peak_utc(row.t_ms) { 2.0 } else { 1.0 };
     let m = 1e6;
     (row.b.cache_hit as f64 * hit
@@ -232,7 +239,7 @@ pub struct Summary {
 }
 
 /// 解析 jsonl 全量并聚合。坏行跳过（流水允许尾行半写）。
-pub fn summarize(text: &str) -> Summary {
+pub fn summarize(text: &str, custom: &PriceTable) -> Summary {
     let mut s = Summary::default();
     let mut by_key: BTreeMap<String, KeyAgg> = BTreeMap::new();
     let mut by_model: BTreeMap<String, ModelAgg> = BTreeMap::new();
@@ -251,7 +258,7 @@ pub fn summarize(text: &str) -> Summary {
         if !row.model.contains("flash") && !row.model.contains("pro") && !row.model.is_empty() {
             s.estimated_rows += 1;
         }
-        let cost = row_cost(&row);
+        let cost = row_cost(&row, custom);
         s.cache_hit += row.b.cache_hit;
         s.cache_miss += row.b.cache_miss;
         s.cache_write += row.b.cache_write;
@@ -311,7 +318,12 @@ pub struct SeriesBucket {
 }
 
 /// 近 hours 小时按 max_buckets 桶聚合（Node tokenLedger.series）。
-pub fn series(text: &str, hours: u64, max_buckets: usize) -> Vec<SeriesBucket> {
+pub fn series(
+    text: &str,
+    hours: u64,
+    max_buckets: usize,
+    custom: &PriceTable,
+) -> Vec<SeriesBucket> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -344,7 +356,7 @@ pub fn series(text: &str, hours: u64, max_buckets: usize) -> Vec<SeriesBucket> {
         b.cache_miss += row.b.cache_miss;
         b.cache_write += row.b.cache_write;
         b.output += row.b.output;
-        b.cost += row_cost(&row);
+        b.cost += row_cost(&row, custom);
     }
     out
 }
@@ -361,7 +373,7 @@ pub struct TurnDetail {
 }
 
 /// 按会话的回合明细（倒序最新在前，Node tokenLedger.conversation）。
-pub fn conversation(text: &str, key: &str, limit: usize) -> Vec<TurnDetail> {
+pub fn conversation(text: &str, key: &str, limit: usize, custom: &PriceTable) -> Vec<TurnDetail> {
     let mut turns: Vec<TurnDetail> = text
         .lines()
         .filter_map(|l| serde_json::from_str::<LedgerRow>(l.trim()).ok())
@@ -372,7 +384,7 @@ pub fn conversation(text: &str, key: &str, limit: usize) -> Vec<TurnDetail> {
             cache_hit: r.b.cache_hit,
             cache_miss: r.b.cache_miss + r.b.cache_write,
             output: r.b.output,
-            cost: row_cost(&r),
+            cost: row_cost(&r, custom),
         })
         .collect();
     turns.reverse();
@@ -411,14 +423,14 @@ mod tests {
                 ..Default::default()
             },
         };
-        let c = row_cost(&row);
+        let c = row_cost(&row, &PriceTable::default());
         assert!((c - (0.02 + 1.0 + 2.0)).abs() < 1e-9, "三桶分别计价：{c}");
         // 高峰翻倍
         let peak_row = LedgerRow {
             t_ms: 1_792_634_400_000,
             ..row
         };
-        assert!((row_cost(&peak_row) - c * 2.0).abs() < 1e-9);
+        assert!((row_cost(&peak_row, &PriceTable::default()) - c * 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -442,15 +454,15 @@ mod tests {
         );
         // series：用「过去 2 小时 6 桶」的可控窗口难做（依赖 now）——改为直接
         // 校验结构与总量守恒（series 覆盖窗口内全部行）。
-        let s = series(&text, 24, 48);
+        let s = series(&text, 24, 48, &PriceTable::default());
         assert_eq!(s.len(), 48);
         let total_turns: u64 = s.iter().map(|b| b.turns).sum();
         assert!(total_turns >= 1, "近期行进桶（真实数据都在近期）");
-        let conv = conversation(&text, "group:1", 10);
+        let conv = conversation(&text, "group:1", 10, &PriceTable::default());
         assert_eq!(conv.len(), 1);
         assert_eq!(conv[0].cache_miss, 1000);
         assert!(conv[0].cost > 0.0);
-        assert!(conversation(&text, "group:none", 10).is_empty());
+        assert!(conversation(&text, "group:none", 10, &PriceTable::default()).is_empty());
     }
 
     #[test]
@@ -461,7 +473,7 @@ mod tests {
             r#"{"k":"turn","t":1791978537290,"sid":"s1","key":"private:1","seq":14,"turn":1,"step":1,"retry":0,"b":{"cacheMiss":17914,"cacheHit":0,"cacheWrite":0,"output":305,"reasoning":0}}"#,
             "\n{broken\n\n",
         );
-        let s = summarize(text);
+        let s = summarize(text, &PriceTable::default());
         assert_eq!(s.rows, 2, "坏行跳过");
         assert_eq!(s.turns, 1);
         assert_eq!(s.by_key.len(), 1);
@@ -485,7 +497,7 @@ mod real_tests {
             return;
         }
         let text = std::fs::read_to_string(file).unwrap();
-        let s = summarize(&text);
+        let s = summarize(&text, &PriceTable::default());
         eprintln!(
             "行 {} 回合 {} 花费 ¥{:.4} 会话 {} 模型 {}",
             s.rows,
@@ -499,5 +511,27 @@ mod real_tests {
         for k in &s.by_key {
             eprintln!("  {} turns={} ¥{:.4}", k.key, k.turns, k.cost);
         }
+    }
+}
+#[cfg(test)]
+mod custom_price_tests {
+    use super::*;
+
+    /// pricing.models 自定义价：精确命中优先于内置档（中转模型计费不走兜底）。
+    #[test]
+    fn custom_price_overrides_builtin() {
+        let row = serde_json::from_str::<LedgerRow>(
+            r#"{"k":"turn","t":1760172800000,"key":"group:1","model":"my-relay-model","b":{"cacheHit":1000,"cacheMiss":2000,"cacheWrite":0,"output":500}}"#,
+        )
+        .unwrap();
+        let mut table = PriceTable::new();
+        table.insert("my-relay-model".into(), (1.0, 2.0, 6.0));
+        // (1000*1.0 + 2000*2.0 + 500*6.0) / 1e6
+        let cost = row_cost(&row, &table);
+        assert!((cost - 8000.0 / 1e6).abs() < 1e-12);
+        // 空表回落内置 flash 档（0.02/1.0/4.0）。
+        let builtin = row_cost(&row, &PriceTable::default());
+        assert!((builtin - (1000.0 * 0.02 + 2000.0 * 1.0 + 500.0 * 4.0) / 1e6).abs() < 1e-12);
+        assert_ne!(cost, builtin);
     }
 }

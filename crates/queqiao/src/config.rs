@@ -172,6 +172,8 @@ impl Default for SnowLumaConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+/// 平板控制（tablet）：**未实现**——仅配置形状占位（规格列为可选项，实现前
+/// enabled 恒无效）。
 pub struct TabletConfig {
     pub enabled: bool,
     pub hdc_path: String,
@@ -194,6 +196,7 @@ impl Default for TabletConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+/// 电脑控制（pc）：**未实现**——仅配置形状占位（同 tablet）。
 pub struct PcConfig {
     pub enabled: bool,
     pub allow_conv_keys: Vec<String>,
@@ -260,6 +263,9 @@ impl Default for SecurityConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct SlangConfig {
     pub enabled: bool,
+    // 注意：以下学习管线参数（extractMinMessages/cooldown/inferenceThresholds/
+    // learnerPreset/workspaceTitle）在黑话学习会话迁移前**无消费方**——当前
+    // 仅 enabled 与 injectMax 生效（注入链）。
     pub extract_min_messages: usize,
     pub extract_cooldown_ms: u64,
     pub inference_thresholds: Vec<u32>,
@@ -695,9 +701,11 @@ impl Default for VoiceConfig {
             default_volume: 1.0,
             loudness: "normal".into(),
             ffmpeg_path: String::new(),
-            auto_readback: true,
+            // 收语音 ASR 转写与发送后自动回听未实现（queqiao-media 占位），
+            // 默认关防误导；实现后随功能放开。
+            auto_readback: false,
             tts: VoiceTtsConfig::default(),
-            asr_enabled: true,
+            asr_enabled: false,
         }
     }
 }
@@ -833,6 +841,8 @@ impl Default for SocialV2Config {
 pub struct WatchdogConfig {
     pub enabled: bool,
     pub interval_sec: u64,
+    // 自动重启未实现（当前看门狗仅探测+告警直发；重启不接管是授权边界内的
+    // 有意设计，放开前须重评）——字段保留兼容形状。
     pub auto_restart: bool,
 }
 
@@ -934,6 +944,46 @@ impl Config {
         let mut out = serde_json::to_string_pretty(self).expect("序列化必然成功");
         out.push('\n');
         out
+    }
+
+    /// 会话准入统一判定（Node allowed() 语义）：deny 命中一票否决；
+    /// allow 命中放行；两表皆空且 allowAllWhenEmpty=true 时放行全部
+    /// （配合运行时动态注册）。键形如 `group:123` / `private:456`。
+    pub fn conversation_allowed(&self, key: &str) -> bool {
+        let Some((kind, id)) = key.split_once(':') else {
+            return false;
+        };
+        let Ok(id) = id.parse::<u64>() else {
+            return false;
+        };
+        let (deny_hit, allow_hit) = match kind {
+            "group" => (
+                self.deny.groups.contains(&id),
+                self.allow.groups.contains(&id),
+            ),
+            "private" => (
+                self.deny.private.contains(&id),
+                self.allow.private.contains(&id),
+            ),
+            _ => return false,
+        };
+        if deny_hit {
+            return false;
+        }
+        if allow_hit {
+            return true;
+        }
+        self.allow.groups.is_empty() && self.allow.private.is_empty() && self.allow_all_when_empty
+    }
+
+    /// pricing.models → 花费记账自定义价目表（cacheMiss 档兼盖 cacheWrite，
+    /// 与内置档第二桶同义）。
+    pub fn price_table(&self) -> queqiao_core::token_ledger::PriceTable {
+        self.pricing
+            .models
+            .iter()
+            .map(|(k, v)| (k.clone(), (v.off.cache_hit, v.off.cache_miss, v.off.output)))
+            .collect()
     }
 }
 
@@ -1096,5 +1146,39 @@ mod tests {
                 .and_then(|b| b.as_bool())
                 .is_some_and(|b| !b)
         );
+    }
+}
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    fn cfg_with(allow_groups: &[u64], deny_groups: &[u64], allow_all: bool) -> Config {
+        let mut c = Config::default();
+        c.allow.groups = allow_groups.to_vec();
+        c.deny.groups = deny_groups.to_vec();
+        c.allow_all_when_empty = allow_all;
+        c
+    }
+
+    /// Node allowed() 语义：deny 一票否决 / allow 命中放行 / 空表+开关放行全部。
+    #[test]
+    fn conversation_allowed_node_semantics() {
+        let c = cfg_with(&[100], &[200], false);
+        assert!(c.conversation_allowed("group:100"));
+        assert!(!c.conversation_allowed("group:200"), "deny 命中拒绝");
+        assert!(!c.conversation_allowed("group:300"), "未列入拒绝");
+        // 同时出现在 allow 与 deny：deny 优先。
+        let conflict = cfg_with(&[200], &[200], false);
+        assert!(!conflict.conversation_allowed("group:200"));
+        // 两表皆空：默认拒绝，allowAllWhenEmpty=true 放行（deny 仍拒）。
+        let empty = cfg_with(&[], &[], false);
+        assert!(!empty.conversation_allowed("group:1"));
+        let open = cfg_with(&[], &[9], true);
+        assert!(open.conversation_allowed("group:1"));
+        assert!(open.conversation_allowed("private:2"));
+        assert!(!open.conversation_allowed("group:9"), "开放态 deny 仍拒");
+        // 键形非法。
+        assert!(!open.conversation_allowed("channel:1"));
+        assert!(!open.conversation_allowed("group:abc"));
     }
 }

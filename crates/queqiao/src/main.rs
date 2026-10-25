@@ -565,9 +565,13 @@ async fn run(setup: Setup) {
             retry_cooldown_ms: 3_600_000,
         },
     );
-    // 白名单里的会话预注册（生产形状：allow 列表）。
+    // 白名单里的会话预注册（生产形状：allow 列表）；deny 黑名单一票否决
+    // （同 allow+deny 冲突时 deny 生效——Node allowed() 语义）。
     for group in &cfg.allow.groups {
         let key = format!("group:{group}");
+        if !cfg.conversation_allowed(&key) {
+            continue;
+        }
         orchestrator.ensure_session(
             &key,
             TriggerRules {
@@ -578,6 +582,9 @@ async fn run(setup: Setup) {
     }
     for user in &cfg.allow.private {
         let key = format!("private:{user}");
+        if !cfg.conversation_allowed(&key) {
+            continue;
+        }
         orchestrator.ensure_session(
             &key,
             TriggerRules {
@@ -791,6 +798,30 @@ async fn run(setup: Setup) {
             maybe_event = rx.recv() => {
                 let Some(event) = maybe_event else { break };
                 let now = now_ms();
+                // 动态会话注册（allowAllWhenEmpty=true 且 allow 两表皆空时，
+                // 首条消息到达即注册——deny 命中仍拒；固定白名单模式下新键
+                // 不在册，on_event 自然忽略）。
+                {
+                    let ev_key = match &event {
+                        queqiao_core::action::BridgeEvent::MessageArrived(m) => Some(m.key.clone()),
+                        queqiao_core::action::BridgeEvent::PokeArrived { key, .. } => key.clone(),
+                        _ => None,
+                    };
+                    if let Some(k) = ev_key
+                        && orchestrator.session(&k).is_none()
+                        && cfg.conversation_allowed(&k)
+                    {
+                        orchestrator.ensure_session(
+                            &k,
+                            TriggerRules {
+                                keywords: cfg.social_v2.wake.recommended_keywords.clone(),
+                                ..Default::default()
+                            },
+                        );
+                        orchestrator.schedule_proactive_check(&k, now, &mut rng);
+                        queqiao::logging::log(&format!("动态注册会话 {k}（allowAllWhenEmpty）"));
+                    }
+                }
                 let actions = orchestrator.on_event(event, now, now_local(), &mut rng);
                 executor.execute(actions, now).await;
                 let tick_actions = orchestrator.advance(now_ms(), now_local(), &mut rng);
