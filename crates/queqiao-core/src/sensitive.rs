@@ -59,10 +59,7 @@ pub fn redact_sensitive(text: &str) -> String {
 
 /// 已知令牌原文逐个替换为 `***`（Node `redactKnownTokensOnly` 语义）。
 /// 空令牌跳过；调用方传当前全部会话的 agent token。
-pub fn redact_known_tokens<'a>(
-    text: &str,
-    tokens: impl IntoIterator<Item = &'a str>,
-) -> String {
+pub fn redact_known_tokens<'a>(text: &str, tokens: impl IntoIterator<Item = &'a str>) -> String {
     let mut s = text.to_owned();
     for token in tokens {
         if !token.is_empty() && s.contains(token) {

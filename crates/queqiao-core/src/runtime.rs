@@ -1316,9 +1316,15 @@ mod proactive_tests {
         )
     }
     fn has_reschedule(actions: &[BridgeAction]) -> bool {
-        actions.iter().any(
-            |a| matches!(a, BridgeAction::ScheduleTimer { timer: TimerKind::ProactiveCheck, .. }),
-        )
+        actions.iter().any(|a| {
+            matches!(
+                a,
+                BridgeAction::ScheduleTimer {
+                    timer: TimerKind::ProactiveCheck,
+                    ..
+                }
+            )
+        })
     }
 
     /// 空闲达阈值 + 随机命中 + 不繁忙 → 唤醒 + 自重排（检查环常驻）。
@@ -1383,8 +1389,16 @@ mod proactive_tests {
             check_max_ms: 5 * 60_000,
             ..Default::default()
         };
-        assert_eq!(proactive_check_delay(&p, &mut || 0.0), 60_000, "min 下限 60s");
-        assert_eq!(proactive_check_delay(&p, &mut || 1.0), 300_000, "max 不低于 min");
+        assert_eq!(
+            proactive_check_delay(&p, &mut || 0.0),
+            60_000,
+            "min 下限 60s"
+        );
+        assert_eq!(
+            proactive_check_delay(&p, &mut || 1.0),
+            300_000,
+            "max 不低于 min"
+        );
         assert_eq!(
             proactive_check_delay(&p, &mut || 0.5),
             60_000 + 120_000,
