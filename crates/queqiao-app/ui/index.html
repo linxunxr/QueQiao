@@ -262,7 +262,6 @@
 <div id="toast"></div>
 <script>
 const BRIDGE = localStorage.getItem('bridgeBase') || 'http://127.0.0.1:3100';
-  document.getElementById('f-sessionCwd').value = cfg.sessionCwd || '';
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 浏览器直开控制台页时无 Tauri 桥——判空防脚本中断（Tauri-only 调用全部经 T）。
@@ -421,6 +420,7 @@ async function load() {
   v('f-ownerQQ', cfg.ownerQQ);
   v('f-slHome', cfg.snowluma && cfg.snowluma.homeDir);
   v('f-dshBase', cfg.dsh && cfg.dsh.baseUrl);
+  v('f-sessionCwd', cfg.sessionCwd || '');
   v('f-dshModel', cfg.dsh && cfg.dsh.model);
   v('f-dshProvider', cfg.dsh && cfg.dsh.provider);
   v('f-dshEffort', cfg.dsh && cfg.dsh.reasoningEffort);
