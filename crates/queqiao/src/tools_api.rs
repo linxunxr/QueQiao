@@ -159,6 +159,15 @@ pub async fn serve(
         .route("/api/socialV2/recall-message", post(recall_message))
         .route("/api/images/message", get(message_images))
         .route("/api/socialV2/forward-msg", get(forward_msg))
+        .route("/api/socialV2/collect-sticker", post(collect_sticker))
+        .route("/api/socialV2/fetch-sticker", post(fetch_sticker))
+        .route("/api/socialV2/set-sticker-remark", post(set_sticker_remark))
+        .route("/api/socialV2/write-diary", post(write_diary))
+        .route("/api/socialV2/get-diary", get(get_diary))
+        .route("/api/socialV2/group-members", get(group_members))
+        .route("/api/socialV2/group-profile", get(group_profile))
+        .route("/api/socialV2/group-history", get(group_history))
+        .route("/api/socialV2/self-image", get(self_image))
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
@@ -354,7 +363,42 @@ fn mark_action(state: &ToolApiState, key: &str, is_reply: bool) {
     store.save();
 }
 
-/// 发送链复用体（send-message 与 reply 端点共用）：空校验 → 长度上限 →
+/// 发送/互动类动作的频率护栏（Node 版 sendTimes 记账语义）：窗口内计数
+/// 超上限即拒（429），通过则记一笔。上限 0 = 不限。发送、引用、连发逐条、
+/// 表情包、拍一拍、表情回应共用。
+fn check_send_rate(state: &ToolApiState, key: &str) -> Result<(), (StatusCode, axum::Json<Value>)> {
+    let (max_min, max_hour) = (
+        state.cfg.social_v2.send.max_send_per_minute as usize,
+        state.cfg.social_v2.send.max_send_per_hour as usize,
+    );
+    if max_min == 0 && max_hour == 0 {
+        return Ok(());
+    }
+    let mut store = state.social.lock().unwrap();
+    let now = crate::session_manager::SessionManager::now_ms();
+    let st = store.conversation_mut(key);
+    let recent_min = st.send_times.iter().filter(|t| now - **t < 60_000).count();
+    let recent_hour = st
+        .send_times
+        .iter()
+        .filter(|t| now - **t < 3_600_000)
+        .count();
+    if (max_min > 0 && recent_min + 1 > max_min) || (max_hour > 0 && recent_hour + 1 > max_hour) {
+        return Err(denied(
+            StatusCode::TOO_MANY_REQUESTS,
+            "操作频率超限，请稍后再试",
+        ));
+    }
+    st.send_times.push(now);
+    if st.send_times.len() > 500 {
+        let cut = st.send_times.len() - 500;
+        st.send_times.drain(0..cut);
+    }
+    store.save();
+    Ok(())
+}
+
+/// 发送链复用体（send-message 与 reply 端点共用）：频率护栏 → 空校验 → 长度上限 →
 /// 引用段 + 文本段 → 按会话类型走群/私聊。
 fn send_text_with_reply(
     state: &ToolApiState,
@@ -362,6 +406,7 @@ fn send_text_with_reply(
     text: &str,
     reply_to: Option<i64>,
 ) -> Result<i64, (StatusCode, axum::Json<Value>)> {
+    check_send_rate(state, key)?;
     if text.trim().is_empty() {
         return Err(denied(StatusCode::BAD_REQUEST, "text 不能为空"));
     }
@@ -439,6 +484,9 @@ async fn send_poke(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
+    if let Err(e) = check_send_rate(&state, &key) {
+        return e;
+    }
     let result = if let Some(group) = key.strip_prefix("group:") {
         if target.is_empty() {
             return denied(StatusCode::BAD_REQUEST, "群聊拍一拍必须传 targetUserId");
@@ -489,6 +537,9 @@ async fn react_message(
         .unwrap_or_default();
     if message_id == 0 || emoji.is_empty() {
         return denied(StatusCode::BAD_REQUEST, "messageId 与 emojiId 不能为空");
+    }
+    if let Err(e) = check_send_rate(&state, &key) {
+        return e;
     }
     match state.onebot.call(
         "set_msg_emoji_like",
@@ -698,6 +749,533 @@ async fn forward_msg(
         return ok_json(json!({ "messages": [], "note": "转发内容为空或已过期" }));
     }
     ok_json(json!({ "messages": out.trim_end() }))
+}
+
+/// 消息段数组 → 纯文本（图片/表情/转发等以占位标注；与 forward/history 共用）。
+fn segments_to_text(segments: &[Value]) -> String {
+    let mut parts = Vec::new();
+    for seg in segments {
+        match seg.get("type").and_then(Value::as_str) {
+            Some("text") => parts.push(
+                seg.get("data")
+                    .and_then(|d| d.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ),
+            Some("image") => parts.push("[图片]".to_owned()),
+            Some("face") => parts.push("[表情]".to_owned()),
+            Some("at") => parts.push(format!(
+                "@{}",
+                seg.get("data")
+                    .and_then(|d| d.get("qq"))
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            )),
+            Some("forward") => parts.push(format!(
+                "[转发消息 id={}]",
+                seg.get("data")
+                    .and_then(|d| d.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            )),
+            Some(other) => parts.push(format!("[{other}]")),
+            None => {}
+        }
+    }
+    parts.join(" ")
+}
+
+/// qq_collect_sticker：偷图收藏——取消息里的图片段（url/md5/summary）入库。
+/// 引用式入库（不落地文件，发送/查看走 url——与库内既有形态一致）。
+async fn collect_sticker(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.collect_sticker) {
+        return e;
+    }
+    let message_id = body.get("messageId").and_then(Value::as_i64).unwrap_or(0);
+    let note = body.get("note").and_then(Value::as_str).unwrap_or_default();
+    if message_id == 0 {
+        return denied(StatusCode::BAD_REQUEST, "messageId 不能为空");
+    }
+    let raw = match state
+        .onebot
+        .call("get_msg", json!({ "message_id": message_id }))
+    {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::BAD_GATEWAY, &format!("get_msg 失败：{e}")),
+    };
+    let Some(img) = raw
+        .get("message")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .find(|s| s.get("type").and_then(Value::as_str) == Some("image"))
+        })
+    else {
+        return denied(
+            StatusCode::NOT_FOUND,
+            "这条消息里没有图片（只能收藏带图消息）",
+        );
+    };
+    let url = img.get("url").and_then(Value::as_str).unwrap_or_default();
+    if url.is_empty() {
+        return denied(StatusCode::CONFLICT, "图片无 URL（闪照/过期），无法收藏");
+    }
+    let entry = queqiao_core::sticker::StickerEntry {
+        id: format!("c{}", crate::session_manager::SessionManager::now_ms()),
+        res_id: String::new(),
+        url: url.to_owned(),
+        md5: img
+            .get("md5")
+            .map(|m| m.to_string().trim_matches('"').to_owned())
+            .unwrap_or_default(),
+        desc: note.to_owned(),
+        local_note: note.to_owned(),
+        source: "ai".into(),
+        ..Default::default()
+    };
+    let home = crate::paths::queqiao_home();
+    let file = crate::sticker_store::sticker_file(&home);
+    let mut entries = match crate::sticker_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let id = entry.id.clone();
+    entries.push(entry);
+    if let Err(e) = crate::sticker_store::save(&file, &entries) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    ok_json(json!({ "ok": true, "stickerId": id, "count": entries.len() }))
+}
+
+/// qq_fetch_sticker：从 URL 入库（下载验证为图片字节后登记引用；不调用
+/// QQ 收藏 API——Node 版的 add_custom_face 降级为库内引用，发送形态一致）。
+async fn fetch_sticker(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.fetch_sticker) {
+        return e;
+    }
+    let url = body.get("url").and_then(Value::as_str).unwrap_or_default();
+    let desc = body.get("desc").and_then(Value::as_str).unwrap_or_default();
+    if url.is_empty() || !url.starts_with("http") {
+        return denied(StatusCode::BAD_REQUEST, "url 必须是 http(s) 图片直链");
+    }
+    // 下载验证（前 512 字节判图）。reqwest blocking 在 spawn_blocking。
+    let probe_url = url.to_owned();
+    let head = tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let resp = client
+            .get(&probe_url)
+            .send()
+            .map_err(|e| format!("下载失败：{e}"))?;
+        let bytes = resp.bytes().map_err(|e| format!("下载失败：{e}"))?;
+        let is_img = bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+            || bytes.starts_with(&[0xFF, 0xD8])
+            || bytes.starts_with(b"GIF8")
+            || bytes.starts_with(&[0x52, 0x49, 0x46, 0x46]);
+        Ok::<bool, String>(is_img)
+    })
+    .await
+    .unwrap_or(Ok(false));
+    match head {
+        Ok(true) => {}
+        Ok(false) => {
+            return denied(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "URL 不是图片（PNG/JPEG/GIF/WebP 之外的内容）",
+            );
+        }
+        Err(e) => return denied(StatusCode::BAD_GATEWAY, &e),
+    }
+    let entry = queqiao_core::sticker::StickerEntry {
+        id: format!("f{}", crate::session_manager::SessionManager::now_ms()),
+        url: url.to_owned(),
+        desc: desc.to_owned(),
+        local_note: desc.to_owned(),
+        source: "manual".into(),
+        ..Default::default()
+    };
+    let home = crate::paths::queqiao_home();
+    let file = crate::sticker_store::sticker_file(&home);
+    let mut entries = match crate::sticker_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let id = entry.id.clone();
+    entries.push(entry);
+    if let Err(e) = crate::sticker_store::save(&file, &entries) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    ok_json(json!({ "ok": true, "stickerId": id, "count": entries.len() }))
+}
+
+/// qq_set_sticker_remark：改库内备注（localNote；QQ 官方收藏备注的
+/// modify_custom_face 在 Node 版即默认禁用，此处仅本地）。
+async fn set_sticker_remark(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.set_sticker_remark) {
+        return e;
+    }
+    let id = body
+        .get("stickerId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let note = body
+        .get("localNote")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let home = crate::paths::queqiao_home();
+    let file = crate::sticker_store::sticker_file(&home);
+    let mut entries = match crate::sticker_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let Some(entry) = queqiao_core::sticker::find_sticker_mut(&mut entries, id) else {
+        return denied(
+            StatusCode::NOT_FOUND,
+            "表情未找到（先 qq_list_stickers 查）",
+        );
+    };
+    entry.local_note = note.to_owned();
+    if let Err(e) = crate::sticker_store::save(&file, &entries) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    ok_json(json!({ "ok": true, "stickerId": id }))
+}
+
+/// qq_write_diary：提交今日日记（每天一次；格式与 Node 版 diary.jsonl 一致：
+/// {date, content, key} 逐行）。
+async fn write_diary(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.write_diary) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let chars = content.chars().count();
+    if chars < 10 {
+        return denied(StatusCode::BAD_REQUEST, "日记太短（至少 10 字）");
+    }
+    let today = local_date_today();
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("diary.jsonl");
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        let today_line = format!("\"date\":\"{today}\"");
+        if text.contains(&today_line) {
+            return denied(
+                StatusCode::CONFLICT,
+                &format!("今天（{today}）的日记已提交过，每天只能写一篇"),
+            );
+        }
+    }
+    let line = json!({ "date": today, "content": content, "key": key });
+    use std::io::Write;
+    let mut f = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return denied(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("打开日记失败：{e}"),
+            );
+        }
+    };
+    if let Err(e) = writeln!(f, "{line}") {
+        return denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写日记失败：{e}"),
+        );
+    }
+    ok_json(json!({ "ok": true, "date": today, "chars": chars }))
+}
+
+/// 本地日期（YYYY-MM-DD；桥本地时区——与唤醒/日记窗口判定同基准）。
+fn local_date_today() -> String {
+    let secs = crate::session_manager::SessionManager::now_ms() / 1000;
+    let local = secs + 8 * 3600; // Asia/Shanghai 固定偏移（now_local 同款约定）
+    let days = local / 86400;
+    // 1970-01-01 起的 civil 日期换算（Howard Hinnant 算法简版）。
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// qq_get_diary：读最近 N 天日记（默认 7）。
+async fn get_diary(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.get_diary) {
+        return e;
+    }
+    let days: usize = q
+        .get("days")
+        .and_then(|d| d.parse().ok())
+        .unwrap_or(7)
+        .min(90);
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("diary.jsonl");
+    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut out = Vec::new();
+    for line in text.lines().rev() {
+        if out.len() >= days {
+            break;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line.trim_start_matches('\u{feff}')) {
+            out.push(json!({
+                "date": v.get("date").cloned().unwrap_or(Value::Null),
+                "content": v.get("content").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    ok_json(json!({ "diaries": out, "count": out.len() }))
+}
+
+/// qq_get_group_members：群成员列表（精简字段）。
+async fn group_members(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.group_members) {
+        return e;
+    }
+    let Some(group) = key.strip_prefix("group:") else {
+        return denied(StatusCode::BAD_REQUEST, "仅群会话支持（group:群号）");
+    };
+    match state.onebot.call(
+        "get_group_member_list",
+        json!({ "group_id": group.parse::<u64>().unwrap_or(0) }),
+    ) {
+        Ok(list) => {
+            let members: Vec<Value> = list
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let uid = m.get("user_id").and_then(Value::as_u64)?;
+                            Some(json!({
+                                "userId": uid,
+                                "nickname": m.get("nickname").and_then(Value::as_str).unwrap_or(""),
+                                "card": m.get("card").and_then(Value::as_str).unwrap_or(""),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ok_json(json!({ "members": members, "count": members.len() }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("获取群成员失败：{e}")),
+    }
+}
+
+/// qq_get_group_profile：群档案（名称/人数/公告——Node 版荣誉信息降级略去）。
+async fn group_profile(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.group_profile) {
+        return e;
+    }
+    let Some(group) = key.strip_prefix("group:") else {
+        return denied(StatusCode::BAD_REQUEST, "仅群会话支持（group:群号）");
+    };
+    let gid = group.parse::<u64>().unwrap_or(0);
+    let info = match state
+        .onebot
+        .call("get_group_info", json!({ "group_id": gid }))
+    {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::BAD_GATEWAY, &format!("获取群信息失败：{e}")),
+    };
+    let notice = state
+        .onebot
+        .call("_get_group_notice", json!({ "group_id": gid }))
+        .ok()
+        .and_then(|n| {
+            n.as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|f| f.get("text"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    ok_json(json!({
+        "groupId": gid,
+        "name": info.get("group_name").and_then(Value::as_str).unwrap_or(""),
+        "memberCount": info.get("member_count").and_then(Value::as_u64).unwrap_or(0),
+        "maxMemberCount": info.get("max_member_count").and_then(Value::as_u64).unwrap_or(0),
+        "notice": notice,
+    }))
+}
+
+/// qq_get_group_history：群最近消息（文本化，含占位标注）。
+async fn group_history(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.group_history) {
+        return e;
+    }
+    let Some(group) = key.strip_prefix("group:") else {
+        return denied(StatusCode::BAD_REQUEST, "仅群会话支持（group:群号）");
+    };
+    let raw = match state.onebot.call(
+        "get_group_msg_history",
+        json!({ "group_id": group.parse::<u64>().unwrap_or(0), "count": 20 }),
+    ) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::BAD_GATEWAY, &format!("获取群历史失败：{e}")),
+    };
+    let mut lines = Vec::new();
+    for m in raw
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let sender = m
+            .get("sender")
+            .and_then(|s| s.get("card").or_else(|| s.get("nickname")))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let text = m
+            .get("message")
+            .and_then(Value::as_array)
+            .map(|arr| segments_to_text(arr))
+            .unwrap_or_default();
+        if !text.trim().is_empty() {
+            lines.push(format!("{sender}: {text}"));
+        }
+    }
+    ok_json(json!({ "messages": lines, "count": lines.len() }))
+}
+
+/// qq_get_self_image：自己的 Q 版形象（登录号头像下载 base64 直供视觉模型）。
+async fn self_image(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    // authorize 即鉴权目的本身；返回键此处不再用。
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.get_self_image) {
+        return e;
+    }
+    let login = match state.onebot.get_login_info() {
+        Ok(v) => v,
+        Err(e) => {
+            return denied(
+                StatusCode::BAD_GATEWAY,
+                &format!("get_login_info 失败：{e}"),
+            );
+        }
+    };
+    let qq = login.get("user_id").and_then(Value::as_u64).unwrap_or(0);
+    let nickname = login
+        .get("nickname")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let url = format!("https://q1.qlogo.cn/g?b=qq&nk={qq}&s=640");
+    let img = tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .ok()?;
+        let bytes = client.get(&url).send().ok()?.bytes().ok()?;
+        use base64::Engine;
+        Some(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    })
+    .await
+    .unwrap_or(None);
+    match img {
+        Some(data) => ok_json(json!({
+            "qq": qq, "nickname": nickname,
+            "image": { "mimeType": "image/jpeg", "data": data }
+        })),
+        None => denied(
+            StatusCode::BAD_GATEWAY,
+            "头像下载失败（q1.qlogo.cn 不可达？稍后再试）",
+        ),
+    }
 }
 
 /// qq_mark_read：确认读到 throughSeq（水位推进——新消息留待后续处理）。
@@ -1628,6 +2206,9 @@ async fn send_sticker(
             StatusCode::CONFLICT,
             "该表情无 URL（QQ 端未提供），无法发送",
         );
+    }
+    if let Err(e) = check_send_rate(&state, &key) {
+        return e;
     }
     let mut segments = vec![queqiao_onebot::segment::image(&entry.url)];
     if let Some(reply_to) = body.get("replyToMessageId").and_then(Value::as_i64) {

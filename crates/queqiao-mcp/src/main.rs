@@ -412,6 +412,118 @@ const TOOLS: &[ToolDef] = &[
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
+    ToolDef {
+        name: "qq_collect_sticker",
+        description: "收藏别人消息里有趣的图片/表情入库（先看图确认，别频繁收）。messageId 用近期消息的真实 id。需带会话令牌。",
+        endpoint: "collect-sticker",
+        method: "POST",
+        flag: Some("collectSticker"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("messageId", "number", true, "带图消息的 id"),
+            ("note", "string", false, "简短备注（含义/标签/用法）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_fetch_sticker",
+        description: "从图片 URL 入库（兜底手段——优先用现有收藏和偷群友的图；先用搜索拿直链）。需带会话令牌。",
+        endpoint: "fetch-sticker",
+        method: "POST",
+        flag: Some("fetchSticker"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("url", "string", true, "图片直链（http/https）"),
+            ("desc", "string", false, "备注"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_set_sticker_remark",
+        description: "修改表情库内某表情的备注（localNote；QQ 官方收藏备注默认禁用）。需带会话令牌。",
+        endpoint: "set-sticker-remark",
+        method: "POST",
+        flag: Some("setStickerRemark"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            (
+                "stickerId",
+                "string",
+                true,
+                "表情 id（qq_list_stickers 的 id）",
+            ),
+            ("localNote", "string", true, "新备注"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_write_diary",
+        description: "提交今天的日记（第一人称私房话，200-500 字，每天仅一篇；写给自己的，不发给群友）。深夜【日记时间】唤醒时提交。需带会话令牌。",
+        endpoint: "write-diary",
+        method: "POST",
+        flag: Some("writeDiary"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("content", "string", true, "日记内容"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_diary",
+        description: "翻看最近几天的日记（默认 7 天；管理员问\"看看你的日记\"时也用）。需带会话令牌。",
+        endpoint: "get-diary",
+        method: "GET",
+        flag: Some("getDiary"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("days", "number", false, "天数（默认 7，上限 90）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_group_members",
+        description: "群成员列表（QQ 号/昵称/群名片）。需要 userId 时从这里或活跃成员工具获取，别凭记忆猜。需带会话令牌。",
+        endpoint: "group-members",
+        method: "GET",
+        flag: Some("groupMembers"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key（group:群号）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_group_profile",
+        description: "群档案（群名称/人数/公告）——记不清群是干嘛的、公告有没有更新时用。低频工具。需带会话令牌。",
+        endpoint: "group-profile",
+        method: "GET",
+        flag: Some("groupProfile"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key（group:群号）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_group_history",
+        description: "群最近 20 条消息（补历史上下文用；唤醒快照通常已够，别重复拉）。需带会话令牌。",
+        endpoint: "group-history",
+        method: "GET",
+        flag: Some("groupHistory"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key（group:群号）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_self_image",
+        description: "看自己的 Q 版形象（头像图直供视觉）。需带会话令牌。",
+        endpoint: "self-image",
+        method: "GET",
+        flag: Some("getSelfImage"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
 ];
 
 fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
@@ -775,6 +887,23 @@ fn handle_request(
             audit_tool_call(def, &args, &result, &key);
             match result {
                 Ok(value) => {
+                    // qq_get_self_image：单图（value.image）转 MCP image 块。
+                    if name == "qq_get_self_image"
+                        && let Some(img) = value.get("image")
+                        && let (Some(data), Some(mime)) = (
+                            img.get("data").and_then(Value::as_str),
+                            img.get("mimeType").and_then(Value::as_str),
+                        )
+                    {
+                        let nickname = value.get("nickname").and_then(Value::as_str).unwrap_or("?");
+                        return json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": { "content": [
+                                { "type": "text", "text": format!("当前形象（{nickname}）：") },
+                                { "type": "image", "mimeType": mime, "data": data }
+                            ] }
+                        });
+                    }
                     // qq_get_message_images：images 数组里带 data 的项转 MCP
                     // image 内容块（视觉模型可直接看图），其余以文本标注。
                     if name == "qq_get_message_images" {

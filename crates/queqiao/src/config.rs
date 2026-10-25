@@ -397,6 +397,10 @@ pub struct ToolsConfig {
     pub collect_sticker: bool,
     pub fetch_sticker: bool,
     pub get_self_image: bool,
+    pub write_diary: bool,
+    pub get_diary: bool,
+    pub group_members: bool,
+    pub group_history: bool,
     pub send_voice: bool,
 }
 
@@ -436,6 +440,10 @@ impl Default for ToolsConfig {
             collect_sticker: true,
             fetch_sticker: true,
             get_self_image: true,
+            write_diary: true,
+            get_diary: true,
+            group_members: true,
+            group_history: true,
             send_voice: false,
         }
     }

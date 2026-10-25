@@ -228,6 +228,34 @@ pub fn find_sticker<'a>(entries: &'a [StickerEntry], r#ref: &str) -> Option<&'a 
     entries.iter().find(|e| sticker_url_key(&e.url) == key)
 }
 
+/// 可变查找（备注修改等原地更新场景；判定与 find_sticker 同款）。
+pub fn find_sticker_mut<'a>(
+    entries: &'a mut [StickerEntry],
+    r#ref: &str,
+) -> Option<&'a mut StickerEntry> {
+    let raw = r#ref.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let md5 = raw.to_uppercase();
+    // 两步走（position + get_mut）：直接 iter_mut 条件返回会撞 borrow checker
+    // 的 Polonius 缺口（条件分支延长 'a 借用）。
+    if let Some(i) = entries
+        .iter()
+        .position(|e| e.id == raw || e.res_id == raw || (!e.md5.is_empty() && e.md5 == md5))
+    {
+        return entries.get_mut(i);
+    }
+    let key = sticker_url_key(raw);
+    if key.is_empty() {
+        return None;
+    }
+    match entries.iter().position(|e| sticker_url_key(&e.url) == key) {
+        Some(i) => entries.get_mut(i),
+        None => None,
+    }
+}
+
 /// QQ 收藏合并（Node mergeStickerLibrary）：QQ 侧字段（id/resId/url/md5/desc）
 /// 更新，AI 认知（localNote/tags/usage/useCount/lastUsedAt/lastContext）保留；
 /// `complete=true`（一次拉全）时清理 QQ 端已删的 qq 来源条目——count 截断的
