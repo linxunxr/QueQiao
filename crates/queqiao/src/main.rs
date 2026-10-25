@@ -165,6 +165,55 @@ fn scan_dsh_ports() -> Vec<u16> {
         .collect()
 }
 
+/// 运行中重探测 DSH 基址：DSH 重启端口常态漂移（3080→6411→11831→10690，
+/// 2026-10 真机连漂三次），mux 重连失败时调用——同启动期链（config 基址 →
+/// 扫进程端口逐个 verify）。阻塞（powershell 扫描秒级），须 spawn_blocking。
+fn rediscover_dsh_base(cfg_base: &str) -> Option<String> {
+    let yaml = std::env::var("USERPROFILE")
+        .ok()
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".dsh")
+                .join(".credentials.yaml")
+        })
+        .and_then(|p| std::fs::read_to_string(p).ok())?;
+    let secret = queqiao_dsh::auth::parse_browser_session_secret(&yaml)?;
+    let dsh_ok = |base: &str| {
+        let sources = AuthSources {
+            launch_token: String::new(),
+            token_explicit: false,
+            secret: Box::new(move || Some(secret)),
+            rediscover_token: None,
+        };
+        let mut client = DshClient::new(base, ReqwestTransport::new(5000), sources, false);
+        client
+            .call_unary("settings/describe", None, now_ms())
+            .is_ok()
+    };
+    let ports = scan_dsh_ports();
+    discover_dsh_base_url(&ports, cfg_base, dsh_ok)
+}
+
+/// mux 重连失败路径共用：探测 DSH 新基址，漂移则切换共享 client
+/// （后续 HTTP 投递/mux 连接自动跟随；未漂移或探测不到则不动）。
+async fn switch_if_drifted(
+    dsh: &std::sync::Arc<std::sync::Mutex<DshClient<ReqwestTransport>>>,
+    cfg_base: &str,
+) {
+    let cfg_base = cfg_base.to_owned();
+    let found = tokio::task::spawn_blocking(move || rediscover_dsh_base(&cfg_base))
+        .await
+        .ok()
+        .flatten();
+    if let Some(nb) = found
+        && let Ok(mut c) = dsh.lock()
+        && c.base_url() != nb
+    {
+        queqiao::logging::log(&format!("DSH 已漂移：{} -> {nb}", c.base_url()));
+        c.set_base_url(&nb);
+    }
+}
+
 fn main() {
     let cfg_path = queqiao::paths::config_path();
     let first_run = !cfg_path.exists();
@@ -543,6 +592,9 @@ async fn run(setup: Setup) {
         let sessions = sessions_arc.clone();
         let env_tx = mux_env_tx.clone();
         let reconnect = reconnect.clone();
+        // DSH 基址重探测的起点（config 值）；DSH 重启端口漂移时 mux 失败
+        // 路径触发 switch_if_drifted 切换共享 client——桥不再需要重启跟随。
+        let cfg_dsh_base = cfg.dsh.base_url.clone();
         tokio::spawn(async move {
             loop {
                 let dsh_clone = dsh.clone();
@@ -556,6 +608,11 @@ async fn run(setup: Setup) {
                 .ok()
                 .flatten();
                 let Some(cookie) = cookie else {
+                    // 静默循环是观测黑洞：mux 掉线后 UI 一切"正常"而事件永远
+                    // 不来（2026-10-25 真机排查靠 netstat 反推）。鉴权失败也
+                    // 可能是 DSH 漂移（旧地址连不上）——先重探测再退避。
+                    queqiao::logging::log("DSH mux 鉴权失败——重探测 DSH 基址");
+                    switch_if_drifted(&dsh, &cfg_dsh_base).await;
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                     continue;
                 };
@@ -567,7 +624,11 @@ async fn run(setup: Setup) {
                     .await
                 {
                     Ok(ws) => ws,
-                    Err(_) => {
+                    Err(e) => {
+                        queqiao::logging::log(&format!(
+                            "DSH mux WS 连接失败（{base}，{e}）——重探测 DSH 基址"
+                        ));
+                        switch_if_drifted(&dsh, &cfg_dsh_base).await;
                         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         continue;
                     }
@@ -586,6 +647,7 @@ async fn run(setup: Setup) {
                 tokio::select! {
                     _ = &mut handle => {
                         // 断连：退避后重连（鉴权由 outcome 无效时 ensure_auth 重铸）。
+                        queqiao::logging::log("DSH mux 断连——3s 后重连");
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
                     _ = reconnect.notified() => {
@@ -700,6 +762,18 @@ async fn run(setup: Setup) {
             }
             maybe_envelope = mux_env_rx.recv() => {
                 // mux 信封 → 回合生命周期事件（sessionId 反查会话键）。
+                // 诊断日志（2026-10-25 mux 零事件排查留）：零"事件到达"即
+                // mux.rs 帧解析层问题；有到达无后续即决策/回查映射问题。
+                if let Some(queqiao_dsh::mux::MuxEnvelope::SessionEvent {
+                    session_id, event,
+                }) = &maybe_envelope
+                {
+                    queqiao::logging::log(&format!(
+                        "mux 事件到达：{} @ {}",
+                        event.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
+                        session_id
+                    ));
+                }
                 if let Some(event) = maybe_envelope
                     .and_then(|envelope| bridge_mux_envelope(&executor.sessions, envelope))
                 {

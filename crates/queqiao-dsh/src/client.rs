@@ -227,6 +227,15 @@ impl<T: Transport> DshClient<T> {
         &self.base_url
     }
 
+    /// 重定向基址：DSH 重启后监听端口常态漂移，调用方探测到新地址后切换。
+    /// 鉴权状态一并失效（DSH 重启后旧 cookie/token 必然作废，ensure_auth 重铸）。
+    pub fn set_base_url(&mut self, base_url: &str) {
+        if self.base_url != base_url {
+            self.base_url = base_url.trim_end_matches('/').to_owned();
+            self.invalidate_auth();
+        }
+    }
+
     pub fn new(base_url: &str, transport: T, sources: AuthSources, allow_remote: bool) -> Self {
         Self {
             transport,
@@ -1094,5 +1103,25 @@ mod tests {
         let err = client.stop_session_work("session-a", 1000).unwrap_err();
         assert!(matches!(err, ClientError::Rpc { .. }));
         assert!(err.to_string().contains("gateway/boom"));
+    }
+
+    /// 基址重定向（DSH 重启端口漂移后 mux 重连路径调用）：
+    /// 尾斜杠归一；相同值幂等不触发失效。
+    #[test]
+    fn set_base_url_switches_and_normalizes() {
+        let (transport, _) = MockTransport::new(Box::new(|_| {
+            Ok(HttpResponse {
+                status: 404,
+                headers: vec![],
+                body: String::new(),
+            })
+        }));
+        let mut client = DshClient::new("http://127.0.0.1:9", transport, minted_sources(), false);
+        assert_eq!(client.base_url(), "http://127.0.0.1:9");
+        client.set_base_url("http://127.0.0.1:12345/");
+        assert_eq!(client.base_url(), "http://127.0.0.1:12345");
+        // 相同值（含尾斜杠差异）不重复失效鉴权。
+        client.set_base_url("http://127.0.0.1:12345/");
+        assert_eq!(client.base_url(), "http://127.0.0.1:12345");
     }
 }
