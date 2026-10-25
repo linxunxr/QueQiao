@@ -11,7 +11,9 @@ use std::collections::{BinaryHeap, HashMap};
 use crate::state::ConversationState;
 use queqiao_core::action::{BridgeAction, BridgeEvent, TimerKind};
 use queqiao_core::diary::CivilTime;
-use queqiao_core::runtime::{DecideRules, DiaryRules, SessionRuntime, decide};
+use queqiao_core::runtime::{
+    DecideRules, DiaryRules, SessionRuntime, decide, proactive_check_delay,
+};
 use queqiao_core::triggers::TriggerRules;
 
 /// 伪定时器轮：按到期时刻排序的最小堆 + 代际去废。
@@ -111,6 +113,21 @@ impl Orchestrator {
         self.sessions
             .entry(key.to_owned())
             .or_insert_with(|| SessionRuntime::new(key, wake));
+    }
+
+    /// 为全部在册会话排主动检查定时器（Node 模式进入时 scheduleProactiveCheckV2
+    /// 全量排程语义；启动后由 ProactiveCheck 触发自重排维持检查环，无需再调）。
+    /// enabled=false 不排；同 (key, ProactiveCheck) 覆盖重排。
+    pub fn schedule_proactive_checks(&mut self, now_ms: u64, rng: &mut dyn FnMut() -> f64) {
+        if !self.rules.proactive.enabled {
+            return;
+        }
+        let keys: Vec<String> = self.sessions.keys().cloned().collect();
+        for key in keys {
+            let delay = proactive_check_delay(&self.rules.proactive, rng);
+            self.timers
+                .schedule(&key, TimerKind::ProactiveCheck, delay, now_ms);
+        }
     }
 
     /// 喂一条事件，返回决策动作序列（并驱动内部定时器轮询）。
@@ -371,6 +388,41 @@ mod tests {
             &mut rng,
         );
         assert!(actions.is_empty());
+    }
+
+    /// 主动检查环：全量排程 → 到期触发（不命中也自重排）→ 环常驻。
+    #[test]
+    fn proactive_check_loop_sustains() {
+        let mut o = Orchestrator::new(DecideRules::default(), DiaryRules::default());
+        o.ensure_session("group:4242", TriggerRules::default());
+        let mut rng = || 0.99; // 概率永不命中，纯验环
+        o.schedule_proactive_checks(0, &mut rng);
+        assert_eq!(o.timers().active(), 1);
+        // 到期：不唤醒（rng 0.99 ≥ 0.3）但重排，环仍在册。
+        let actions = o.advance(90 * 60_000, now_local(12), &mut rng);
+        assert!(actions.is_empty(), "未命中无真实动作");
+        assert_eq!(
+            o.timers().active(),
+            1,
+            "触发后自重排，检查环常驻"
+        );
+    }
+
+    /// proactive 关闭时不排程。
+    #[test]
+    fn proactive_disabled_no_schedule() {
+        let rules = DecideRules {
+            proactive: queqiao_core::runtime::ProactiveRules {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut o = Orchestrator::new(rules, DiaryRules::default());
+        o.ensure_session("group:4242", TriggerRules::default());
+        let mut rng = || 0.99;
+        o.schedule_proactive_checks(0, &mut rng);
+        assert_eq!(o.timers().active(), 0);
     }
 
     /// 从持久状态恢复：wake_times/bootstrap 画像正确。

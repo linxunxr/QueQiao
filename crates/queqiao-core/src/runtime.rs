@@ -107,6 +107,39 @@ pub struct DecideRules {
     pub history_trim_cooldown_ms: u64,
     /// 历史超限退役后的重投延迟（默认 3s）。
     pub history_trim_resend_ms: u64,
+    /// 主动冒泡（Node `socialV2.proactive`——scheduleProactiveCheckV2 语义）。
+    pub proactive: ProactiveRules,
+}
+
+/// 主动冒泡参数：每会话一条常驻检查环（区间随机间隔，命中与否都自重排），
+/// 触发时按「群安静 ≥ 阈值 × 概率 × 不繁忙」判定是否唤醒（reason=
+/// `proactiveCheck`）。默认值对齐 Node v2 配置段。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProactiveRules {
+    pub enabled: bool,
+    pub check_min_ms: u64,
+    pub check_max_ms: u64,
+    pub idle_threshold_ms: u64,
+    pub probability: f64,
+}
+
+impl Default for ProactiveRules {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_min_ms: 30 * 60_000,
+            check_max_ms: 90 * 60_000,
+            idle_threshold_ms: 15 * 60_000,
+            probability: 0.3,
+        }
+    }
+}
+
+/// 下一次主动检查的随机间隔（Node 语义：min 下限 60s、max 不低于 min）。
+pub fn proactive_check_delay(p: &ProactiveRules, rng: &mut dyn FnMut() -> f64) -> u64 {
+    let min = p.check_min_ms.max(60_000);
+    let max = p.check_max_ms.max(min);
+    min + (rng() * (max - min) as f64) as u64
 }
 
 impl Default for DecideRules {
@@ -120,6 +153,7 @@ impl Default for DecideRules {
             pending_fallback_ms: 35 * 60_000,
             history_trim_cooldown_ms: 10 * 60_000,
             history_trim_resend_ms: 3_000,
+            proactive: ProactiveRules::default(),
         }
     }
 }
@@ -412,11 +446,23 @@ fn on_timer(
             }
         }
         TimerKind::ProactiveCheck => {
-            // 主动检查：安静时长达阈值且随机命中才唤醒（30~90min 随机间隔重排）。
+            // 主动检查（Node scheduleProactiveCheckV2 回调语义）：群安静达阈值、
+            // 随机命中且不繁忙才唤醒；无论命中与否都按区间随机重排下一次，
+            // 检查环常驻（enabled=false 时熄环——不再重排）。
             let mut actions = Vec::new();
-            let idle_ms = now_ms.saturating_sub(rt.last_activity_at);
-            if idle_ms >= 15 * 60_000 && rng() < 0.3 && !rt.is_busy() {
-                actions.extend(fire_wake(rt, "proactiveCheck", now_ms, rules));
+            if rules.proactive.enabled {
+                let idle_ms = now_ms.saturating_sub(rt.last_activity_at);
+                if idle_ms >= rules.proactive.idle_threshold_ms
+                    && rng() < rules.proactive.probability
+                    && !rt.is_busy()
+                {
+                    actions.extend(fire_wake(rt, "proactiveCheck", now_ms, rules));
+                }
+                actions.push(BridgeAction::ScheduleTimer {
+                    key: rt.key.clone(),
+                    timer: TimerKind::ProactiveCheck,
+                    delay_ms: proactive_check_delay(&rules.proactive, rng),
+                });
             }
             actions
         }
@@ -1226,5 +1272,123 @@ mod agent_retry_tests {
             10_003_000,
         );
         assert_eq!(r.agent_retry_attempts, 0, "成功回合清零");
+    }
+}
+
+#[cfg(test)]
+mod proactive_tests {
+    use super::*;
+    use crate::action::{BridgeAction, BridgeEvent, TimerKind};
+
+    fn fire(
+        rt: &mut SessionRuntime,
+        rules: &DecideRules,
+        now_ms: u64,
+        rng_val: f64,
+    ) -> Vec<BridgeAction> {
+        let now_local = crate::diary::CivilTime {
+            date: crate::diary::CivilDate {
+                year: 2026,
+                month: 10,
+                day: 21,
+            },
+            hour: 12,
+            minute: 0,
+        };
+        let mut rng = move || rng_val;
+        decide(
+            rt,
+            &BridgeEvent::TimerFired {
+                key: "group:1".into(),
+                timer: TimerKind::ProactiveCheck,
+            },
+            now_ms,
+            now_local,
+            rules,
+            &DiaryRules::default(),
+            &mut rng,
+        )
+    }
+
+    fn has_wake(actions: &[BridgeAction]) -> bool {
+        actions.iter().any(
+            |a| matches!(a, BridgeAction::SendPrompt { reason, .. } if reason == "proactiveCheck"),
+        )
+    }
+    fn has_reschedule(actions: &[BridgeAction]) -> bool {
+        actions.iter().any(
+            |a| matches!(a, BridgeAction::ScheduleTimer { timer: TimerKind::ProactiveCheck, .. }),
+        )
+    }
+
+    /// 空闲达阈值 + 随机命中 + 不繁忙 → 唤醒 + 自重排（检查环常驻）。
+    #[test]
+    fn fires_when_idle_and_lucky() {
+        let mut r = SessionRuntime::new("group:1", TriggerRules::default());
+        r.last_activity_at = 1_000_000;
+        let rules = DecideRules::default();
+        let actions = fire(&mut r, &rules, 1_000_000 + 20 * 60_000, 0.01);
+        assert!(has_wake(&actions));
+        assert!(has_reschedule(&actions));
+    }
+
+    /// 群活跃（空闲不足）/ 随机未命中 / 繁忙 → 不唤醒但照常重排。
+    #[test]
+    fn skips_but_reschedules() {
+        let rules = DecideRules::default();
+        // 空闲 5min < 阈值 15min。
+        let mut r = SessionRuntime::new("group:1", TriggerRules::default());
+        r.last_activity_at = 1_000_000;
+        let actions = fire(&mut r, &rules, 1_000_000 + 5 * 60_000, 0.01);
+        assert!(!has_wake(&actions));
+        assert!(has_reschedule(&actions));
+        // 随机未命中（rng 0.9 ≥ 0.3）。
+        let mut r2 = SessionRuntime::new("group:1", TriggerRules::default());
+        r2.last_activity_at = 1_000_000;
+        let actions = fire(&mut r2, &rules, 1_000_000 + 20 * 60_000, 0.9);
+        assert!(!has_wake(&actions));
+        assert!(has_reschedule(&actions));
+        // 繁忙（合批窗口在途）。
+        let mut r3 = SessionRuntime::new("group:1", TriggerRules::default());
+        r3.last_activity_at = 1_000_000;
+        r3.pending_timer = Some(PendingTimer {
+            reason: "keyword".into(),
+        });
+        let actions = fire(&mut r3, &rules, 1_000_000 + 20 * 60_000, 0.01);
+        assert!(!has_wake(&actions));
+        assert!(has_reschedule(&actions));
+    }
+
+    /// enabled=false → 熄环：不唤醒也不再重排（环自然终结）。
+    #[test]
+    fn disabled_stops_the_loop() {
+        let mut r = SessionRuntime::new("group:1", TriggerRules::default());
+        r.last_activity_at = 1_000_000;
+        let rules = DecideRules {
+            proactive: ProactiveRules {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let actions = fire(&mut r, &rules, 1_000_000 + 20 * 60_000, 0.01);
+        assert!(actions.is_empty());
+    }
+
+    /// 间隔区间：min 下限 60s、max 不低于 min、端点取值正确。
+    #[test]
+    fn delay_bounds_and_floors() {
+        let p = ProactiveRules {
+            check_min_ms: 10_000,
+            check_max_ms: 5 * 60_000,
+            ..Default::default()
+        };
+        assert_eq!(proactive_check_delay(&p, &mut || 0.0), 60_000, "min 下限 60s");
+        assert_eq!(proactive_check_delay(&p, &mut || 1.0), 300_000, "max 不低于 min");
+        assert_eq!(
+            proactive_check_delay(&p, &mut || 0.5),
+            60_000 + 120_000,
+            "区间中值"
+        );
     }
 }

@@ -549,6 +549,13 @@ async fn run(setup: Setup) {
             pending_fallback_ms: 35 * 60_000,
             history_trim_cooldown_ms: 10 * 60_000,
             history_trim_resend_ms: 3_000,
+            proactive: queqiao_core::runtime::ProactiveRules {
+                enabled: cfg.social_v2.proactive.enabled,
+                check_min_ms: cfg.social_v2.proactive.check_interval_min_ms,
+                check_max_ms: cfg.social_v2.proactive.check_interval_max_ms,
+                idle_threshold_ms: cfg.social_v2.proactive.idle_threshold_ms,
+                probability: cfg.social_v2.proactive.probability,
+            },
         },
         DiaryRules {
             enabled: cfg.social_v2.diary.enabled,
@@ -750,6 +757,16 @@ async fn run(setup: Setup) {
         rng_seed ^= rng_seed << 17;
         ((rng_seed.wrapping_mul(0x2545F4914F6CDD1Du64)) >> 11) as f64 / (1u64 << 53) as f64
     };
+    // 主动冒泡检查环：启动时全量排程一次，之后由 ProactiveCheck 触发自重排维持
+    // （Node 模式进入时 scheduleProactiveCheckV2 全量排程语义）。
+    orchestrator.schedule_proactive_checks(now_ms(), &mut rng);
+    queqiao::logging::log(&format!(
+        "主动检查环已排程（{} 个会话，间隔 {}~{}min，概率 {:.2}）",
+        orchestrator.session_keys().len(),
+        cfg.social_v2.proactive.check_interval_min_ms / 60_000,
+        cfg.social_v2.proactive.check_interval_max_ms / 60_000,
+        cfg.social_v2.proactive.probability
+    ));
     let mut pending_update: Option<std::path::PathBuf> = None;
     let mut config_file = ConfigFile::load(&queqiao::paths::config_path()).unwrap_or_else(|_| {
         ConfigFile::load(&queqiao::paths::config_path()).expect("config 重新加载失败")
@@ -945,6 +962,17 @@ impl Executor {
         for action in actions {
             match action {
                 BridgeAction::SendPrompt { key, reason } => {
+                    // 暂停期间不自主冒泡（Node scheduleProactiveCheckV2 的 paused
+                    // 门禁）；消息触发的唤醒照常投递——AI 借首次工具 403 安静收尾
+                    // 的既有设计不变。
+                    if reason == "proactiveCheck"
+                        && self.social.lock().map(|s| s.paused()).unwrap_or(false)
+                    {
+                        queqiao::logging::log(&format!(
+                            "SendPrompt {key}（{reason}）已跳过：二代 AI 处于暂停"
+                        ));
+                        continue;
+                    }
                     // 完整唤醒文本：从持久态组装上下文（agentToken/未读/最近消息/唤醒摘要）。
                     let ctx = {
                         let mut social = self.social.lock().unwrap();
