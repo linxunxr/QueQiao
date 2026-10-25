@@ -47,6 +47,14 @@ impl ToolApiState {
         query_key: &str,
         tool_flag: bool,
     ) -> Result<String, (StatusCode, Json<Value>)> {
+        // 管理员暂停（Node socialV2.paused 同款）：暂停期间拒绝一切工具调用，
+        // AI 在唤醒 prompt 后的第一次工具失败即会安静收尾。
+        if self.social.lock().map(|s| s.paused()).unwrap_or(false) {
+            return Err(denied(
+                StatusCode::FORBIDDEN,
+                "二代 AI 已被管理员暂停，所有操作不可用",
+            ));
+        }
         let key = query_key.trim().to_owned();
         if !key.starts_with("group:") && !key.starts_with("private:") {
             return Err(denied(
@@ -170,6 +178,8 @@ pub async fn serve(
         .route("/api/socialV2/group-profile", get(group_profile))
         .route("/api/socialV2/group-history", get(group_history))
         .route("/api/socialV2/self-image", get(self_image))
+        .route("/api/socialV2/paused", get(paused_state))
+        .route("/api/socialV2/set-paused", post(set_paused))
         .route("/api/socialV2/wait-messages", get(wait_messages))
         .route("/api/socialV2/social-state", get(social_state))
         .route("/api/socialV2/my-recent", get(my_recent))
@@ -1313,6 +1323,53 @@ async fn self_image(
             "头像下载失败（q1.qlogo.cn 不可达？稍后再试）",
         ),
     }
+}
+
+/// 管理端点：查询/设置 AI 暂停（管理员 UI 用，非 AI 工具——console token
+/// 鉴权而非 agent token；本地默认空 token 免鉴权与控制台同款）。
+async fn paused_state(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let got = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if got != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let paused = state.social.lock().unwrap().paused();
+    ok_json(json!({ "paused": paused }))
+}
+
+async fn set_paused(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let got = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if got != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let paused = body.get("paused").and_then(Value::as_bool).unwrap_or(true);
+    {
+        let mut store = state.social.lock().unwrap();
+        store.set_paused(paused);
+        store.save();
+    }
+    crate::logging::log(if paused {
+        "AI 已被管理员暂停"
+    } else {
+        "AI 已恢复"
+    });
+    ok_json(json!({ "paused": paused }))
 }
 
 /// qq_wait_for_messages：等待新消息（核心版语义——purpose=reply 按最后

@@ -139,6 +139,7 @@
     <div id="orch">
       <button id="btnStartAll" onclick="startAll()">一键启动</button>
       <button class="ghost" onclick="stopBridge()">停止桥</button>
+      <button class="ghost" id="btnPauseAi" onclick="togglePauseAi()" style="display:none">暂停 AI</button>
       <span class="hint" id="orchMsg"></span>
     </div>
     <div class="hint" style="margin-top:6px">DSH 未跑自动拉起；SnowLuma 按授权代启（QQ 登录与 OneBot 仍需在其窗口完成）；桥等就绪后自动启动。</div>
@@ -232,6 +233,28 @@
       <div class="field"><label>模型（model）</label><select id="f-dshModel"><option value="">（先选提供方）</option></select></div>
       <div class="field"><label>会话工作目录（sessionCwd）</label><input id="f-sessionCwd" placeholder="留空 = 安装目录\state\agents"><div class="hint">DSH 会话的 agent 工作目录；必须是绝对路径（DSH 不解析相对路径）</div></div>
       <div class="field"><label>思考强度（reasoningEffort）</label><select id="f-dshEffort"><option value="max">max</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="none">none（跟随默认，路由别名必须用这档）</option></select><div class="hint">改动保存后下一条消息自动重选模型（热生效）</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>二代仿真</h2>
+    <div class="row">
+      <div class="field"><label>默认潜水模式（wake.defaultMode）</label><select id="f-wakeMode"><option value="diving">diving（潜水：按触发器唤醒）</option><option value="active">active（活跃：任何消息都回）</option></select><div class="hint">新会话的初始模式；AI 可随时用工具调整自己的唤醒条件</div></div>
+      <div class="field"><label>普通消息响应概率（0~1）</label><input id="f-wakeProb" type="number" min="0" max="1" step="0.05"><div class="hint">潜水模式下未被点名时，普通闲聊按此概率回应</div></div>
+      <div class="field"><label>发送上限/分钟（send.maxSendPerMinute）</label><input id="f-sendMin" type="number" min="0"></div>
+      <div class="field"><label>发送上限/小时（send.maxSendPerHour）</label><input id="f-sendHour" type="number" min="0"></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div class="field" style="flex:0 0 auto"><label>推荐触发器（新会话默认）</label><div style="display:flex; gap:14px; flex-wrap:wrap; padding-top:6px">
+        <label style="font-size:13px; color:var(--fg)"><input type="checkbox" id="f-triAt"> 被 @</label>
+        <label style="font-size:13px; color:var(--fg)"><input type="checkbox" id="f-triName"> 被叫名字</label>
+        <label style="font-size:13px; color:var(--fg)"><input type="checkbox" id="f-triQ"> 被提问</label>
+        <label style="font-size:13px; color:var(--fg)"><input type="checkbox" id="f-triPoke"> 被拍一拍</label>
+      </div></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div class="field"><label>语音功能（tools.sendVoice）</label><select id="f-voice"><option value="false">关闭（默认，AI 发文字）</option><option value="true">开启（AI 可发语音/合成语音）</option></select></div>
+      <div class="field"><label>表情包（sticker.enabled）</label><select id="f-sticker"><option value="true">开启</option><option value="false">关闭</option></select></div>
     </div>
   </section>
 
@@ -350,6 +373,31 @@ async function startAll() {
 
 async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { alert(e); } refreshComponents(); }
 
+// AI 暂停/恢复（桥侧 socialV2.paused——暂停期间拒绝 AI 一切工具调用）。
+let aiPaused = false;
+async function refreshPaused() {
+  const btn = $('btnPauseAi');
+  if (!bridgeOnline) { btn.style.display = 'none'; return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/socialV2/paused');
+    const res = await r.json();
+    aiPaused = !!(res.value && res.value.paused);
+    btn.style.display = '';
+    btn.textContent = aiPaused ? '恢复 AI' : '暂停 AI';
+  } catch (e) { btn.style.display = 'none'; }
+}
+async function togglePauseAi() {
+  try {
+    const r = await fetch(BRIDGE + '/api/socialV2/set-paused', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: !aiPaused }),
+    });
+    const res = await r.json();
+    if (res.ok) { toast(res.value && res.value.paused ? 'AI 已暂停（所有操作被拒，直至恢复）' : 'AI 已恢复', true); refreshPaused(); }
+    else toast(res.error || '操作失败', false);
+  } catch (e) { toast('桥连接失败：' + e.message, false); }
+}
+
 async function browseNodeBridge() {
   try {
     const p = await T.core.invoke('pick_folder', { title: '选择 Node 版桥（qq-bridge）目录' });
@@ -421,6 +469,17 @@ async function load() {
   v('f-slHome', cfg.snowluma && cfg.snowluma.homeDir);
   v('f-dshBase', cfg.dsh && cfg.dsh.baseUrl);
   v('f-sessionCwd', cfg.sessionCwd || '');
+  const wk = cfg.socialV2 && cfg.socialV2.wake || {};
+  v('f-wakeMode', wk.defaultMode || 'diving');
+  v('f-wakeProb', wk.recommendedProbability != null ? wk.recommendedProbability : 0.05);
+  v('f-sendMin', (cfg.socialV2 && cfg.socialV2.send || {}).maxSendPerMinute);
+  v('f-sendHour', (cfg.socialV2 && cfg.socialV2.send || {}).maxSendPerHour);
+  $('f-triAt').checked = wk.recommendedAtMention !== false;
+  $('f-triName').checked = wk.recommendedNameMention !== false;
+  $('f-triQ').checked = wk.recommendedQuestion !== false;
+  $('f-triPoke').checked = wk.recommendedPoke !== false;
+  $('f-voice').value = (cfg.socialV2 && cfg.socialV2.tools && cfg.socialV2.tools.sendVoice === true) ? 'true' : 'false';
+  v('f-sticker', String((cfg.socialV2 && cfg.socialV2.sticker || {}).enabled !== false));
   v('f-dshModel', cfg.dsh && cfg.dsh.model);
   v('f-dshProvider', cfg.dsh && cfg.dsh.provider);
   v('f-dshEffort', cfg.dsh && cfg.dsh.reasoningEffort);
@@ -491,6 +550,21 @@ async function save() {
   body.socialV2.diary = body.socialV2.diary || {}; body.socialV2.diary.enabled = document.getElementById('f-diary').value === 'true';
   body.socialV2.proactive = body.socialV2.proactive || {}; body.socialV2.proactive.enabled = document.getElementById('f-proactive').value === 'true';
   body.autoUpdate = document.getElementById('f-autoUpdate').value === 'true';
+  body.socialV2 = body.socialV2 || {};
+  body.socialV2.wake = body.socialV2.wake || {};
+  body.socialV2.wake.defaultMode = document.getElementById('f-wakeMode').value;
+  if (num('f-wakeProb') !== undefined) body.socialV2.wake.recommendedProbability = Number(document.getElementById('f-wakeProb').value);
+  body.socialV2.wake.recommendedAtMention = $('f-triAt').checked;
+  body.socialV2.wake.recommendedNameMention = $('f-triName').checked;
+  body.socialV2.wake.recommendedQuestion = $('f-triQ').checked;
+  body.socialV2.wake.recommendedPoke = $('f-triPoke').checked;
+  body.socialV2.send = body.socialV2.send || {};
+  if (num('f-sendMin') !== undefined) body.socialV2.send.maxSendPerMinute = num('f-sendMin');
+  if (num('f-sendHour') !== undefined) body.socialV2.send.maxSendPerHour = num('f-sendHour');
+  body.socialV2.tools = body.socialV2.tools || {};
+  body.socialV2.tools.sendVoice = document.getElementById('f-voice').value === 'true';
+  body.socialV2.sticker = body.socialV2.sticker || {};
+  body.socialV2.sticker.enabled = document.getElementById('f-sticker').value === 'true';
   const r = await fetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const res = await r.json();
   if (res.ok) {
@@ -646,6 +720,7 @@ loadCatalog();
   if (!document.hidden) {
     const st = await refreshComponents();
     bridgeOnline = st.bridge;
+    refreshPaused();
     refreshSessions();
     refreshCost();
   }

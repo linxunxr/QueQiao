@@ -44,6 +44,11 @@ impl SocialStore {
         self.paused
     }
 
+    /// 管理员暂停/恢复（save 由调用方负责）。
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+    }
+
     /// 会话键清单（诊断与控制台概要用）。
     pub fn conversation_keys(&self) -> Vec<String> {
         self.conversations.keys().cloned().collect()
