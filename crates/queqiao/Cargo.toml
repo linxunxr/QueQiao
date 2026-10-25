@@ -21,3 +21,7 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 regex = { workspace = true }
+
+[dev-dependencies]
+# 集成测试用 oneshot 直打路由（进程内验证工具面端点，不占端口）。
+tower = { version = "0.5", features = ["util"] }

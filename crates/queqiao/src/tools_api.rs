@@ -142,13 +142,12 @@ fn ok_json(value: Value) -> ApiResult {
     (StatusCode::OK, Json(json!({ "ok": true, "value": value })))
 }
 
-/// 启动工具 API（控制台端口共用；本批仅工具端点）。
-pub async fn serve(
+/// 组装工具面路由（serve 与进程内集成测试共用；console merge + 统一 CORS）。
+pub fn build_router(
     state: Arc<ToolApiState>,
-    port: u16,
     console_token: &str,
     console: Option<Arc<crate::console::ConsoleState>>,
-) -> Result<(), String> {
+) -> Router {
     let ct = console_token.to_owned();
     let app = Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -182,6 +181,13 @@ pub async fn serve(
         .route("/api/socialV2/report-feedback", post(report_feedback))
         .route("/api/socialV2/feedback", get(feedback_list))
         .route("/api/socialV2/feedback/clear", post(feedback_clear))
+        .route("/api/slang", get(slang_admin_list).post(slang_admin_create))
+        .route("/api/slang/clear", post(slang_admin_clear))
+        .route("/api/slang/batch-delete", post(slang_admin_batch_delete))
+        .route("/api/slang/batch-confirm", post(slang_admin_batch_confirm))
+        .route("/api/slang/batch-reject", post(slang_admin_batch_reject))
+        .route("/api/slang/{id}", axum::routing::patch(slang_admin_patch))
+        .route("/api/slang/{id}/{action}", post(slang_admin_single))
         .route("/api/socialV2/speak-voice", post(speak_voice))
         .route("/api/socialV2/send-voice", post(send_voice))
         .route("/api/socialV2/list-voices", get(list_voices))
@@ -248,7 +254,17 @@ pub async fn serve(
     // console 路由（/api/config 等）也要跨域：桌面客户端 webview 的 origin 是
     // http://tauri.localhost，fetch 本桥即跨域——merge 后统一再盖一层 CORS，
     // 否则设置页 load()/save() 被 CORS 拦，f-json 留空、保存必报 JSON 解析失败。
-    let app = app.layer(axum::middleware::from_fn(cors_mw));
+    app.layer(axum::middleware::from_fn(cors_mw))
+}
+
+/// 启动工具 API（控制台端口共用；本批仅工具端点）。
+pub async fn serve(
+    state: Arc<ToolApiState>,
+    port: u16,
+    console_token: &str,
+    console: Option<Arc<crate::console::ConsoleState>>,
+) -> Result<(), String> {
+    let app = build_router(state, console_token, console);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| format!("绑定 127.0.0.1:{port} 失败：{e}"))?;
@@ -2549,6 +2565,410 @@ async fn slang_submit(
             ok_json(json!({ "updated": false, "entry": v }))
         }
     }
+}
+
+// ── 黑话词库管理面（控制台专用，Node /api/slang* 同语义）────────────────────
+// AI 侧只有 query/submit 两个工具端点；确认/拒绝/编辑/删除全部收口在这里，
+// agent token 一律 403（console_only）——candidate 转正的唯一途径。
+
+fn now_iso() -> String {
+    crate::logging::local_timestamp().unwrap_or_default()
+}
+
+/// GET /api/slang：全量词条（含 evidence——仅控制台，防跨会话原话外泄）+ 生效配置。
+async fn slang_admin_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let status = q.get("status").map(String::as_str).unwrap_or_default();
+    let entries: Vec<&queqiao_core::slang::SlangEntry> = if status.is_empty() {
+        entries.iter().collect()
+    } else {
+        entries.iter().filter(|e| e.status == status).collect()
+    };
+    ok_json(json!({
+        "ok": true,
+        "entries": entries,
+        "config": { "enabled": state.cfg.slang.enabled, "injectMax": state.cfg.slang.inject_max }
+    }))
+}
+
+/// POST /api/slang：手动添加（Node：默认 confirmed，可显式 candidate；content 去重）。
+async fn slang_admin_create(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if content.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "黑话内容不能为空");
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let mut entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    if entries.iter().any(|e| e.content == content) {
+        return denied(StatusCode::BAD_REQUEST, &format!("黑话「{content}」已存在"));
+    }
+    let s = |k: &str| {
+        body.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let now = now_iso();
+    let entry = queqiao_core::slang::normalize_entry(&queqiao_core::slang::SlangEntry {
+        content,
+        meaning: s("meaning"),
+        usage: s("usage"),
+        example: s("example"),
+        risk: s("risk"),
+        status: if body.get("status").and_then(Value::as_str) == Some("candidate") {
+            "candidate".into()
+        } else {
+            "confirmed".into()
+        },
+        source: "manual".into(),
+        count: 1,
+        created_at: now.clone(),
+        updated_at: now,
+        ..Default::default()
+    });
+    let v = serde_json::to_value(&entry).unwrap_or_default();
+    entries.push(entry);
+    if let Err(e) = crate::slang_store::save(&file, entries) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&format!(
+        "控制台：新增黑话「{}」",
+        v.get("content").and_then(Value::as_str).unwrap_or("")
+    ));
+    ok_json(json!({ "ok": true, "entry": v }))
+}
+
+/// POST /api/slang/clear：按 status 清空或全清（返回移除数）。
+async fn slang_admin_clear(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if !status.is_empty() && !matches!(status.as_str(), "candidate" | "confirmed" | "rejected") {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            "无效的 status：仅支持 candidate/confirmed/rejected 或留空全部删除",
+        );
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let removed = if status.is_empty() {
+        entries.len()
+    } else {
+        entries.iter().filter(|e| e.status == status).count()
+    };
+    let kept: Vec<_> = entries
+        .into_iter()
+        .filter(|e| !status.is_empty() && e.status != status)
+        .collect();
+    if let Err(e) = crate::slang_store::save(&file, kept) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&format!(
+        "控制台：清空黑话 {removed} 条{}",
+        if status.is_empty() {
+            String::new()
+        } else {
+            format!("（{status}）")
+        }
+    ));
+    ok_json(json!({ "ok": true, "removedCount": removed }))
+}
+
+/// POST /api/slang/batch-delete：按 ids 或 status 删除。
+async fn slang_admin_batch_delete(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let ids: Vec<String> = body
+        .get("ids")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if ids.is_empty() && status.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "请提供 ids 或 status");
+    }
+    if !status.is_empty() && !matches!(status.as_str(), "candidate" | "confirmed" | "rejected") {
+        return denied(StatusCode::BAD_REQUEST, "无效的 status");
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let before = entries.len();
+    let kept: Vec<_> = entries
+        .into_iter()
+        .filter(|e| {
+            if !ids.is_empty() {
+                return !ids.contains(&e.id);
+            }
+            e.status != status
+        })
+        .collect();
+    let removed = before - kept.len();
+    if removed == 0 {
+        return denied(StatusCode::NOT_FOUND, "没有匹配到要删除的黑话");
+    }
+    if let Err(e) = crate::slang_store::save(&file, kept) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&format!("控制台：批量删除黑话 {removed} 条"));
+    ok_json(json!({ "ok": true, "removedCount": removed }))
+}
+
+/// POST /api/slang/batch-confirm：candidate 且有含义才转正（跳过项带原因）。
+async fn slang_admin_batch_confirm(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let ids = slang_ids_from(&body);
+    if ids.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "请选择要确认的黑话");
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let mut entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let out = queqiao_core::slang::batch_confirm(&mut entries, &ids, &now_iso());
+    if out.confirmed > 0
+        && let Err(e) = crate::slang_store::save(&file, entries)
+    {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&format!(
+        "控制台：批量确认黑话 {} 条，跳过 {} 条",
+        out.confirmed,
+        out.skipped.len()
+    ));
+    let skipped: Vec<Value> = out
+        .skipped
+        .iter()
+        .take(20)
+        .map(|(id, reason)| json!({ "id": id, "reason": reason }))
+        .collect();
+    ok_json(json!({
+        "ok": true, "confirmedCount": out.confirmed,
+        "skippedCount": out.skipped.len(), "skipped": skipped
+    }))
+}
+
+/// POST /api/slang/batch-reject：任意非 rejected 可拒（confirmed 事后下架同路径）。
+async fn slang_admin_batch_reject(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let ids = slang_ids_from(&body);
+    if ids.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "请选择要拒绝的黑话");
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let mut entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let rejected = queqiao_core::slang::batch_reject(&mut entries, &ids, &now_iso());
+    if rejected > 0
+        && let Err(e) = crate::slang_store::save(&file, entries)
+    {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&format!("控制台：批量拒绝黑话 {rejected} 条"));
+    ok_json(json!({ "ok": true, "rejectedCount": rejected }))
+}
+
+fn slang_ids_from(body: &Value) -> Vec<String> {
+    body.get("ids")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// PATCH /api/slang/{id}：编辑字段与状态（含 rejected 恢复 candidate）；content 与他人去重。
+async fn slang_admin_patch(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let mut entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let Some(idx) = entries.iter().position(|e| e.id == id) else {
+        return denied(StatusCode::NOT_FOUND, "黑话不存在");
+    };
+    let str_field = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
+    // content 去重先于可变借用：算出目标词条再查他处是否已存在。
+    let new_content = match str_field("content") {
+        Some(c) => {
+            let c = c.trim().to_owned();
+            if c.is_empty() {
+                return denied(StatusCode::BAD_REQUEST, "黑话内容不能为空");
+            }
+            c
+        }
+        None => entries[idx].content.clone(),
+    };
+    if entries
+        .iter()
+        .enumerate()
+        .any(|(i, e)| i != idx && e.content == new_content)
+    {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            &format!("黑话「{new_content}」已存在"),
+        );
+    }
+    let entry = &mut entries[idx];
+    entry.content = new_content;
+    if let Some(v) = str_field("meaning") {
+        entry.meaning = v.trim().to_owned();
+    }
+    if let Some(v) = str_field("usage") {
+        entry.usage = v.trim().to_owned();
+    }
+    if let Some(v) = str_field("example") {
+        entry.example = v.trim().to_owned();
+    }
+    if let Some(v) = str_field("risk") {
+        entry.risk = v.trim().to_owned();
+    }
+    if let Some(v) = str_field("status")
+        && matches!(v.as_str(), "candidate" | "confirmed" | "rejected")
+    {
+        entry.status = v;
+    }
+    entry.updated_at = now_iso();
+    let normalized = queqiao_core::slang::normalize_entry(entry);
+    let v = serde_json::to_value(&normalized).unwrap_or_default();
+    *entry = normalized;
+    if let Err(e) = crate::slang_store::save(&file, entries) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&format!(
+        "控制台：更新黑话「{}」",
+        v.get("content").and_then(Value::as_str).unwrap_or("")
+    ));
+    ok_json(json!({ "ok": true, "entry": v }))
+}
+
+/// POST /api/slang/{id}/confirm 与 /{id}/reject：单条捷径（复用批量语义）。
+async fn slang_admin_single(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Path((id, action)): axum::extract::Path<(String, String)>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let file = crate::slang_store::slang_file(&crate::paths::queqiao_home());
+    let mut entries = match crate::slang_store::load(&file) {
+        Ok(v) => v,
+        Err(e) => return denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    if !entries.iter().any(|e| e.id == id) {
+        return denied(StatusCode::NOT_FOUND, "黑话不存在");
+    }
+    let ids = vec![id.clone()];
+    let (changed, log_msg) = match action.as_str() {
+        "confirm" => {
+            let out = queqiao_core::slang::batch_confirm(&mut entries, &ids, &now_iso());
+            if out.confirmed == 0 {
+                let reason = out
+                    .skipped
+                    .first()
+                    .map(|(_, r)| r.clone())
+                    .unwrap_or_default();
+                return denied(StatusCode::BAD_REQUEST, &format!("无法确认：{reason}"));
+            }
+            (out.confirmed, format!("控制台：确认黑话 {id}"))
+        }
+        "reject" => {
+            let n = queqiao_core::slang::batch_reject(&mut entries, &ids, &now_iso());
+            if n == 0 {
+                return denied(StatusCode::BAD_REQUEST, "已是拒绝状态");
+            }
+            (n, format!("控制台：拒绝黑话 {id}"))
+        }
+        _ => return denied(StatusCode::NOT_FOUND, "未知操作（confirm/reject）"),
+    };
+    let _ = changed;
+    if let Err(e) = crate::slang_store::save(&file, entries) {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    crate::logging::log(&log_msg);
+    ok_json(json!({ "ok": true }))
 }
 
 /// 花费汇总（Node /api/tokens/summary 子集）：仅控制台可用——记账是给操作者

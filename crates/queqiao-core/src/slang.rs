@@ -155,6 +155,55 @@ pub fn cap_entries(entries: Vec<SlangEntry>, max: usize) -> (Vec<SlangEntry>, us
     (sorted, dropped)
 }
 
+/// 批量确认结果（Node /api/slang/batch-confirm 响应形状；skipped 含原因）。
+#[derive(Debug, Default, PartialEq)]
+pub struct ConfirmOutcome {
+    pub confirmed: usize,
+    /// (id, 原因)——不存在 / 不是候选 / 缺少含义。
+    pub skipped: Vec<(String, String)>,
+}
+
+/// 批量确认（Node 语义）：仅 candidate 且含义非空可转正；其余跳过并给原因。
+pub fn batch_confirm(entries: &mut [SlangEntry], ids: &[String], now_iso: &str) -> ConfirmOutcome {
+    let mut out = ConfirmOutcome::default();
+    for id in ids {
+        let Some(e) = entries.iter_mut().find(|e| &e.id == id) else {
+            out.skipped.push((id.clone(), "不存在".into()));
+            continue;
+        };
+        if e.status != "candidate" {
+            out.skipped.push((id.clone(), "不是候选".into()));
+            continue;
+        }
+        if e.meaning.trim().is_empty() {
+            out.skipped.push((id.clone(), "缺少含义".into()));
+            continue;
+        }
+        e.status = "confirmed".into();
+        e.updated_at = now_iso.to_owned();
+        out.confirmed += 1;
+    }
+    out
+}
+
+/// 批量拒绝（Node 语义）：任意非 rejected 状态可拒绝（含 confirmed——管理员
+/// 事后下架）；已拒绝的幂等跳过。
+pub fn batch_reject(entries: &mut [SlangEntry], ids: &[String], now_iso: &str) -> usize {
+    let mut rejected = 0;
+    for id in ids {
+        let Some(e) = entries.iter_mut().find(|e| &e.id == id) else {
+            continue;
+        };
+        if e.status == "rejected" {
+            continue;
+        }
+        e.status = "rejected".into();
+        e.updated_at = now_iso.to_owned();
+        rejected += 1;
+    }
+    rejected
+}
+
 fn rank(e: &SlangEntry) -> u8 {
     match e.status.as_str() {
         "confirmed" => 2,
@@ -252,5 +301,71 @@ mod tests {
             kept.iter().all(|e| e.status == "confirmed"),
             "rejected 先被淘汰"
         );
+    }
+}
+#[cfg(test)]
+mod console_ops_tests {
+    use super::*;
+
+    fn e(content: &str, meaning: &str, status: &str) -> SlangEntry {
+        SlangEntry {
+            id: format!("id-{content}"),
+            content: content.into(),
+            meaning: meaning.into(),
+            status: status.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 批量确认：candidate+有含义才转正；缺含义/非候选/不存在各有跳过原因。
+    #[test]
+    fn batch_confirm_semantics() {
+        let mut v = vec![
+            e("甲", "含义甲", "candidate"),
+            e("乙", "", "candidate"),
+            e("丙", "含义丙", "confirmed"),
+            e("丁", "含义丁", "rejected"),
+        ];
+        let out = batch_confirm(
+            &mut v,
+            &[
+                "id-甲".into(),
+                "id-乙".into(),
+                "id-丙".into(),
+                "id-不存在".into(),
+            ],
+            "t1",
+        );
+        assert_eq!(out.confirmed, 1);
+        assert_eq!(out.skipped.len(), 3);
+        assert_eq!(out.skipped[0], ("id-乙".into(), "缺少含义".into()));
+        assert_eq!(out.skipped[1], ("id-丙".into(), "不是候选".into()));
+        assert_eq!(out.skipped[2], ("id-不存在".into(), "不存在".into()));
+        assert_eq!(v[0].status, "confirmed");
+        assert_eq!(v[0].updated_at, "t1");
+        assert_eq!(v[1].status, "candidate", "缺含义不转正");
+    }
+
+    /// 批量拒绝：confirmed 也可下架；已拒绝幂等；不存在静默。
+    #[test]
+    fn batch_reject_semantics() {
+        let mut v = vec![
+            e("甲", "m", "candidate"),
+            e("乙", "m", "confirmed"),
+            e("丙", "m", "rejected"),
+        ];
+        let n = batch_reject(
+            &mut v,
+            &[
+                "id-甲".into(),
+                "id-乙".into(),
+                "id-丙".into(),
+                "id-x".into(),
+            ],
+            "t2",
+        );
+        assert_eq!(n, 2);
+        assert!(v.iter().all(|x| x.status == "rejected"));
+        assert_eq!(v[2].updated_at, "", "已拒绝不重复触碰");
     }
 }

@@ -124,6 +124,7 @@
   <nav>
     <button id="tab-overview" class="active" onclick="showTab('overview')">总览</button>
     <button id="tab-settings" onclick="showTab('settings')">设置</button>
+    <button id="tab-slang" onclick="showTab('slang')">黑话</button>
   </nav>
 </header>
 
@@ -296,6 +297,42 @@
   </section>
 </main>
 
+<!-- ── 黑话词库：审核与手动管理（candidate 转正的唯一途径）────────────────── -->
+<main id="page-slang" style="display:none">
+  <section>
+    <h2>黑话词库</h2>
+    <div class="hint" style="margin-bottom:10px">群聊黑话/网络用语库：AI 可用 qq_slang_submit 提交候选，也可在此手动添加；确认/拒绝/编辑后，<b>已确认且有含义</b>的词条注入 AI 聊天上下文（按出现次数排序，上限见参数）。自动提取与联网研究管线未迁移，候选暂无自动来源。</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+      <label class="hint" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="slangEnabled"> 启用注入</label>
+      <label class="hint" style="display:flex;gap:6px;align-items:center;margin:0">注入上限 <input type="number" id="slangInjectMax" min="1" max="30" style="width:60px"></label>
+      <button class="ghost mini" onclick="saveSlangConfig()">保存参数</button>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+      <input type="text" id="slangNewContent" placeholder="词条，如：绝绝子" style="flex:1;min-width:120px">
+      <input type="text" id="slangNewMeaning" placeholder="含义（确认前必填）" style="flex:1.5;min-width:160px">
+      <input type="text" id="slangNewUsage" placeholder="用法（可选）" style="flex:1;min-width:120px">
+      <input type="text" id="slangNewExample" placeholder="示例（可选）" style="flex:1;min-width:120px">
+      <button class="ghost mini" onclick="addSlang()">添加入库（确认）</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:10px">
+      <button id="stab-candidate" class="ghost mini" onclick="slangTab('candidate')">候选词（0）</button>
+      <button id="stab-confirmed" class="ghost mini" onclick="slangTab('confirmed')">已确认（0）</button>
+      <button id="stab-rejected" class="ghost mini" onclick="slangTab('rejected')">已拒绝（0）</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px" id="slangToolbar"></div>
+    <div id="slangList" class="hint">检测中…</div>
+  </section>
+  <section id="slangEditBox" style="display:none">
+    <h2>编辑词条 <span class="hint" id="slangEditId"></span></h2>
+    <div class="field"><label>词条</label><input type="text" id="se-content"></div>
+    <div class="field"><label>含义</label><input type="text" id="se-meaning"></div>
+    <div class="field"><label>用法</label><input type="text" id="se-usage"></div>
+    <div class="field"><label>示例</label><input type="text" id="se-example"></div>
+    <div class="field"><label>状态</label><select id="se-status"><option value="candidate">候选</option><option value="confirmed">已确认</option><option value="rejected">已拒绝</option></select></div>
+    <div style="display:flex;gap:8px"><button onclick="saveSlangEdit()">保存</button><button class="ghost" onclick="hideSlangEdit()">取消</button></div>
+  </section>
+</main>
+
 <div class="bar" id="settingsBar">
   <button onclick="save()">保存并生效</button>
   <button class="ghost" onclick="exportDiag()">导出诊断包</button>
@@ -311,10 +348,13 @@ const T = window.__TAURI__ || null;
 
 // ── 页签 ────────────────────────────────────────────────────────────────────
 function showTab(name) {
-  for (const n of ['overview', 'settings']) {
+  for (const n of ['overview', 'settings', 'slang']) {
     $('page-' + n).style.display = n === name ? 'block' : 'none';
     $('tab-' + n).classList.toggle('active', n === name);
   }
+  // 延迟一拍：初始化期 showTab 先于 bridgeOnline 的 let 声明执行（TDZ），
+  // 且此刻桥态未探测；refreshSlang 自身会按 bridgeOnline 给出占位。
+  if (name === 'slang') setTimeout(() => refreshSlang(), 0);
   // 保存/导出是设置页动作，总览不显示（main 的 padding-bottom 也随之收紧）。
   $('settingsBar').style.display = name === 'settings' ? 'flex' : 'none';
   document.querySelectorAll('main').forEach(m => m.style.paddingBottom = name === 'settings' ? '96px' : '28px');
@@ -768,7 +808,7 @@ loadCatalog();
     const st = await refreshComponents();
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); }
+    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); }
     bridgeOnline = st.bridge;
     refreshPaused();
     refreshSessions();
@@ -837,6 +877,168 @@ async function clearFeedback() {
   } catch (e) { toast('清空失败：' + e.message, false); }
 }
 
+
+// ── 黑话词库（/api/slang* 控制台管理面）：candidate 转正的唯一途径 ──────────
+let slangAll = [], slangCur = 'candidate', slangQuery = '';
+const SLANG_STATUS_LABEL = { candidate: '候选', confirmed: '已确认', rejected: '已拒绝' };
+
+async function refreshSlang() {
+  const list = $('slangList');
+  if (!bridgeOnline) { list.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后可管理黑话词库</div></div>'; return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/slang');
+    const res = await r.json();
+    slangAll = (res.value && res.value.entries) || [];
+    const cfg = (res.value && res.value.config) || {};
+    $('slangEnabled').checked = cfg.enabled !== false;
+    if (document.activeElement !== $('slangInjectMax')) $('slangInjectMax').value = cfg.injectMax || 8;
+    renderSlangTabs(); renderSlangToolbar(); renderSlangList();
+  } catch (e) { list.textContent = '（词库不可读：' + e.message + '）'; }
+}
+
+function slangTab(t) { slangCur = t; renderSlangTabs(); renderSlangToolbar(); renderSlangList(); }
+
+function renderSlangTabs() {
+  const counts = { candidate: 0, confirmed: 0, rejected: 0 };
+  slangAll.forEach(e => { if (counts[e.status] !== undefined) counts[e.status]++; });
+  for (const t of ['candidate', 'confirmed', 'rejected']) {
+    const b = $('stab-' + t);
+    b.textContent = SLANG_STATUS_LABEL[t] + '（' + counts[t] + '）';
+    b.style.color = t === slangCur ? 'var(--acc)' : '';
+    b.style.borderColor = t === slangCur ? 'var(--acc)' : '';
+  }
+}
+
+function slangFiltered() {
+  const q = slangQuery.trim().toLowerCase();
+  return slangAll.filter(e => e.status === slangCur && (!q ||
+    (e.content + ' ' + e.meaning + ' ' + e.usage + ' ' + e.example).toLowerCase().includes(q)));
+}
+
+function slangSelectedIds() {
+  return [...document.querySelectorAll('#slangList input[data-sid]:checked')].map(i => i.dataset.sid);
+}
+
+function renderSlangToolbar() {
+  const tb = $('slangToolbar');
+  const common = '<label class="hint" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" onchange="document.querySelectorAll(\'#slangList input[data-sid]\').forEach(i=>i.checked=this.checked)"> 全选</label>' +
+    '<input type="text" value="' + esc(slangQuery) + '" placeholder="搜索词条/含义/用法/示例" style="flex:1;min-width:160px" oninput="slangQuery=this.value;renderSlangList()">';
+  let btns = '';
+  if (slangCur === 'candidate') btns = '<button class="ghost mini" onclick="slangBatch(\'batch-confirm\')">批量确认（有含义）</button><button class="ghost mini" onclick="slangBatch(\'batch-reject\')">批量拒绝</button>';
+  if (slangCur === 'confirmed') btns = '<button class="ghost mini" onclick="slangBatch(\'batch-reject\')">批量下架（拒绝）</button>';
+  if (slangCur === 'rejected') btns = '<button class="ghost mini" onclick="slangRestore()">恢复为候选</button>';
+  btns += '<button class="ghost mini" onclick="slangBatch(\'batch-delete\')">删除选中</button>';
+  tb.innerHTML = common + btns;
+}
+
+function renderSlangList() {
+  const box = $('slangList');
+  const list = slangFiltered();
+  if (!list.length) {
+    box.innerHTML = '<div class="empty"><div class="t">没有' + SLANG_STATUS_LABEL[slangCur] + '词条</div><div class="s">' +
+      (slangCur === 'candidate' ? 'AI 提交的陌生词会出现在这里，确认后注入提示词' : '切到其他标签查看') + '</div></div>';
+    return;
+  }
+  const rows = list.slice().reverse().map(e => {
+    let quick = '';
+    if (slangCur === 'candidate') quick = '<a href="javascript:void 0" onclick="slangSingle(\'' + esc(e.id) + '\',\'confirm\')" style="color:var(--acc)">确认</a>·<a href="javascript:void 0" onclick="slangSingle(\'' + esc(e.id) + '\',\'reject\')" style="color:#e5484d">拒绝</a>';
+    else if (slangCur === 'confirmed') quick = '<a href="javascript:void 0" onclick="slangSingle(\'' + esc(e.id) + '\',\'reject\')" style="color:#e5484d">下架</a>';
+    else quick = '<a href="javascript:void 0" onclick="slangRestoreOne(\'' + esc(e.id) + '\')" style="color:var(--acc)">恢复候选</a>';
+    const src = e.source === 'ai' ? 'AI' : '手动';
+    const detail = esc(String(e.meaning || '')) + (e.usage ? '\n用法：' + esc(e.usage) : '');
+    return '<tr><td style="width:24px"><input type="checkbox" data-sid="' + esc(e.id) + '"></td>' +
+      '<td><b>' + esc(e.content) + '</b>' + (e.meaning ? '' : '<span class="hint">（缺含义）</span>') +
+      '<div class="hint" style="white-space:pre-wrap">' + detail + '</div></td>' +
+      '<td class="hint">' + src + '·' + (e.count || 1) + '次</td><td class="hint">' + esc(String(e.updatedAt || '').slice(5, 16).replace('T', ' ')) + '</td>' +
+      '<td style="white-space:nowrap">' + quick + '·<a href="javascript:void 0" onclick="editSlang(\'' + esc(e.id) + '\')" style="color:var(--acc)">编辑</a></td></tr>';
+  }).join('');
+  box.innerHTML = '<table><tr><th></th><th>词条 / 含义</th><th>来源</th><th>更新</th><th>操作</th></tr>' + rows + '</table>';
+}
+
+async function slangCall(path, method, body) {
+  const r = await fetch(BRIDGE + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const res = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(res.error || ('HTTP ' + r.status));
+  return res.value || {};
+}
+
+async function slangBatch(action) {
+  const ids = slangSelectedIds();
+  if (!ids.length) { toast('先勾选要操作的词条', false); return; }
+  try {
+    const v = await slangCall('/api/slang/' + action, 'POST', { ids });
+    let msg = '';
+    if (action === 'batch-confirm') msg = '确认 ' + v.confirmedCount + ' 条，跳过 ' + v.skippedCount + ' 条';
+    else if (action === 'batch-reject') msg = '拒绝 ' + v.rejectedCount + ' 条';
+    else msg = '删除 ' + v.removedCount + ' 条';
+    toast(msg, true); refreshSlang();
+  } catch (e) { toast('操作失败：' + e.message, false); }
+}
+
+async function slangSingle(id, action) {
+  try { await slangCall('/api/slang/' + id + '/' + action, 'POST'); toast(action === 'confirm' ? '已确认' : '已拒绝', true); refreshSlang(); }
+  catch (e) { toast('操作失败：' + e.message, false); }
+}
+
+async function slangRestoreOne(id) {
+  try { await slangCall('/api/slang/' + id, 'PATCH', { status: 'candidate' }); toast('已恢复为候选', true); refreshSlang(); }
+  catch (e) { toast('操作失败：' + e.message, false); }
+}
+
+async function slangRestore() {
+  const ids = slangSelectedIds();
+  if (!ids.length) { toast('先勾选要恢复的词条', false); return; }
+  let ok = 0;
+  for (const id of ids) { try { await slangCall('/api/slang/' + id, 'PATCH', { status: 'candidate' }); ok++; } catch (e) { } }
+  toast('恢复 ' + ok + '/' + ids.length + ' 条为候选', true); refreshSlang();
+}
+
+async function addSlang() {
+  const content = $('slangNewContent').value.trim(), meaning = $('slangNewMeaning').value.trim();
+  if (!content) { toast('词条不能为空', false); return; }
+  if (!meaning) { toast('含义必填（无含义不会注入，也无法走批量确认）', false); return; }
+  try {
+    await slangCall('/api/slang', 'POST', { content, meaning, usage: $('slangNewUsage').value.trim(), example: $('slangNewExample').value.trim() });
+    toast('已添加并确认', true);
+    ['slangNewContent', 'slangNewMeaning', 'slangNewUsage', 'slangNewExample'].forEach(id => $(id).value = '');
+    slangTab('confirmed'); refreshSlang();
+  } catch (e) { toast('添加失败：' + e.message, false); }
+}
+
+function editSlang(id) {
+  const e = slangAll.find(x => x.id === id); if (!e) return;
+  $('slangEditId').textContent = '（' + e.content + '）';
+  $('se-content').value = e.content || ''; $('se-meaning').value = e.meaning || '';
+  $('se-usage').value = e.usage || ''; $('se-example').value = e.example || '';
+  $('se-status').value = e.status || 'candidate';
+  $('slangEditBox').style.display = 'block';
+  $('slangEditBox').dataset.sid = id;
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+function hideSlangEdit() { $('slangEditBox').style.display = 'none'; }
+
+async function saveSlangEdit() {
+  const id = $('slangEditBox').dataset.sid;
+  if (!id) return;
+  const content = $('se-content').value.trim();
+  if (!content) { toast('词条不能为空', false); return; }
+  try {
+    await slangCall('/api/slang/' + id, 'PATCH', {
+      content, meaning: $('se-meaning').value.trim(), usage: $('se-usage').value.trim(),
+      example: $('se-example').value.trim(), status: $('se-status').value
+    });
+    toast('已保存', true); hideSlangEdit(); refreshSlang();
+  } catch (e) { toast('保存失败：' + e.message, false); }
+}
+
+async function saveSlangConfig() {
+  try {
+    const r = await fetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ slang: { enabled: $('slangEnabled').checked, injectMax: Number($('slangInjectMax').value) || 8 } }) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    toast('黑话参数已保存', true);
+  } catch (e) { toast('保存失败：' + e.message, false); }
+}
+
 async function refreshCost() {
   const body = $('costBody');
   if (!bridgeOnline) { document.getElementById('costSum').textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示累计花费</div></div>'; return; }
@@ -866,7 +1068,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); } bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); } bridgeOnline = st.bridge; refreshSessions(); }); }
 });
 </script>
 </body>
