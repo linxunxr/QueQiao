@@ -524,6 +524,154 @@ const TOOLS: &[ToolDef] = &[
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
+    ToolDef {
+        name: "qq_wait_for_messages",
+        description: "等待新消息/静默。purpose=reply：回复前短静默（对方安静够即返）；默认 messages：等新消息或超时（沉睡前观察用 timeoutMs=300000）。返回 newMessages 直接用，无需再查。需带会话令牌。",
+        endpoint: "wait-messages",
+        method: "GET",
+        flag: Some("waitMessages"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            (
+                "purpose",
+                "string",
+                false,
+                "messages（默认，等消息/观察）或 reply（回复前短静默）",
+            ),
+            (
+                "timeoutMs",
+                "number",
+                false,
+                "等待预算毫秒（默认 30000，上限 600000）",
+            ),
+            (
+                "quietMs",
+                "number",
+                false,
+                "静默门槛毫秒（默认 10000，仅 reply 用）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_social_state",
+        description: "查看会话的二代仿真状态：唤醒配置、未读数、上次唤醒/发言时间、频率用量、记忆条数（只读）。需带会话令牌。",
+        endpoint: "social-state",
+        method: "GET",
+        flag: Some("socialState"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_memory_clear",
+        description: "清空本会话的全部轻量记忆（话题/想说未说/成员印象）。时过境迁或记忆过时时用。需带会话令牌。",
+        endpoint: "memory-clear",
+        method: "POST",
+        flag: Some("memory"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_get_my_recent_messages",
+        description: "看自己最近发过的消息（回顾自己说过什么/纠正重复）。需带会话令牌。",
+        endpoint: "my-recent",
+        method: "GET",
+        flag: Some("getMyRecent"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("limit", "number", false, "条数（默认 10，上限 50）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_list_groups",
+        description: "列出我所在的群（群号/名称/人数）。需带会话令牌。",
+        endpoint: "list-groups",
+        method: "GET",
+        flag: Some("socialState"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key（鉴权用）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_report_feedback",
+        description: "把用户的反馈/抱怨/建议原样上报管理员（别自行总结转述）。需带会话令牌。",
+        endpoint: "report-feedback",
+        method: "POST",
+        flag: Some("feedback"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("text", "string", true, "反馈原文"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_speak",
+        description: "把一段文字直接合成语音（系统 TTS）作为 QQ 语音发出——不依赖语音库。短句更像真人（1~2 句），标点影响停顿，rate 微调语速（-10~10）。语音默认关闭：报「语音功能已关闭」是正常状态，不要重试、不要假装发了。返回 verified=true 才代表落地。需带会话令牌。",
+        endpoint: "speak-voice",
+        method: "POST",
+        flag: Some("sendVoice"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("text", "string", true, "要合成的文本"),
+            ("rate", "number", false, "语速（-10~10，默认 0）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_send_voice",
+        description: "发语音库（qq_list_voices）里准备好的音频。语音默认关闭：报「语音功能已关闭」是正常状态。返回 verified=true 才代表落地。需带会话令牌。",
+        endpoint: "send-voice",
+        method: "POST",
+        flag: Some("sendVoice"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("voiceName", "string", true, "语音名（qq_list_voices 返回）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_list_voices",
+        description: "语音库清单（可用的音频名）。需带会话令牌。",
+        endpoint: "list-voices",
+        method: "GET",
+        flag: Some("sendVoice"),
+        params: &[
+            ("conversationKey", "string", true, "会话 key（鉴权用）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_send_group_message",
+        description: "向指定群发一条文本（与 qq_send_message 同链；带 replyToMessageId 可引用）。优先用 qq_send_message。需带会话令牌。",
+        endpoint: "send-message",
+        method: "POST",
+        flag: Some("sendGroup"),
+        params: &[
+            ("groupId", "string", true, "群号（须在白名单）"),
+            ("message", "string", true, "文本（纯文本）"),
+            ("replyToMessageId", "number", false, "引用消息 id（可选）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "qq_send_private_message",
+        description: "向指定好友发一条私聊文本（与 qq_send_message 同链；带 replyToMessageId 可引用）。优先用 qq_send_message。需带会话令牌。",
+        endpoint: "send-message",
+        method: "POST",
+        flag: Some("sendPrivate"),
+        params: &[
+            ("userId", "string", true, "好友 QQ 号（须在白名单）"),
+            ("message", "string", true, "文本（纯文本）"),
+            ("replyToMessageId", "number", false, "引用消息 id（可选）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
 ];
 
 fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
@@ -867,6 +1015,54 @@ fn handle_request(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            // qq_send_group/private_message：参数名变体（groupId/userId + message）
+            // → conversationKey + text 统一走 send-message 端点。
+            if name == "qq_send_group_message" || name == "qq_send_private_message" {
+                let prefix = if name == "qq_send_group_message" {
+                    "group:"
+                } else {
+                    "private:"
+                };
+                let raw_id = args
+                    .get(if prefix == "group:" {
+                        "groupId"
+                    } else {
+                        "userId"
+                    })
+                    .map(|v| match v {
+                        Value::Number(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                let mut one = json!({
+                    "conversationKey": format!("{prefix}{raw_id}"),
+                    "text": args.get("message").and_then(Value::as_str).unwrap_or_default(),
+                    "agentToken": args.get("agentToken").and_then(Value::as_str).unwrap_or_default(),
+                });
+                if let Some(r) = args.get("replyToMessageId") {
+                    one["replyToMessageId"] = r.clone();
+                }
+                let result = call_tool(def, &one, console_token);
+                audit_tool_call(
+                    def,
+                    &args,
+                    &result,
+                    one.get("conversationKey")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                );
+                return match result {
+                    Ok(value) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [ { "type": "text", "text": value.to_string() } ] }
+                    }),
+                    Err(e) => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [ { "type": "text", "text": e } ], "isError": true }
+                    }),
+                };
+            }
             // qq_send_burst：多条连发，每条间真人化随机间隔（600-1500ms），
             // 逐条走 send-message 端点（白名单/频率/记账逐条生效）。
             if name == "qq_send_burst" {

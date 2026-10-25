@@ -14,6 +14,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use queqiao_onebot::client::OneBotHttpClient;
 use serde_json::{Value, json};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use crate::config::Config;
 use crate::social_store::SocialStore;
@@ -168,6 +170,14 @@ pub async fn serve(
         .route("/api/socialV2/group-profile", get(group_profile))
         .route("/api/socialV2/group-history", get(group_history))
         .route("/api/socialV2/self-image", get(self_image))
+        .route("/api/socialV2/wait-messages", get(wait_messages))
+        .route("/api/socialV2/social-state", get(social_state))
+        .route("/api/socialV2/my-recent", get(my_recent))
+        .route("/api/socialV2/list-groups", get(list_groups))
+        .route("/api/socialV2/report-feedback", post(report_feedback))
+        .route("/api/socialV2/speak-voice", post(speak_voice))
+        .route("/api/socialV2/send-voice", post(send_voice))
+        .route("/api/socialV2/list-voices", get(list_voices))
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
@@ -305,8 +315,8 @@ async fn unread(
     };
     let after_seq: u64 = q.get("afterSeq").and_then(|s| s.parse().ok()).unwrap_or(0);
     let store = state.social.lock().unwrap();
-    let st = store.conversation(&key);
-    let messages: Vec<Value> = st
+    let messages: Vec<Value> = store
+        .conversation(&key)
         .map(|s| {
             s.unread
                 .iter()
@@ -431,7 +441,34 @@ fn send_text_with_reply(
             .onebot
             .send_private_msg(user.parse().unwrap_or(0), &message)
     };
-    result.map_err(|e| denied(StatusCode::BAD_GATEWAY, &format!("OneBot 发送失败：{e}")))
+    let message_id =
+        result.map_err(|e| denied(StatusCode::BAD_GATEWAY, &format!("OneBot 发送失败：{e}")))?;
+    record_self_send(state, key, text.as_str(), message_id);
+    Ok(message_id)
+}
+
+/// 发送成功后把"我"的消息记入 recent（is_self，不进未读/水位）——
+/// qq_get_my_recent_messages 的数据源（Node record-sent 同款语义）。
+fn record_self_send(state: &ToolApiState, key: &str, text: &str, message_id: i64) {
+    let mut store = state.social.lock().unwrap();
+    let now = crate::session_manager::SessionManager::now_ms();
+    store.append_message(
+        key,
+        &queqiao_core::action::IncomingMessage {
+            key: key.to_owned(),
+            seq: 0,
+            message_id: message_id.to_string(),
+            sender: "我".into(),
+            user_id: String::new(),
+            text: text.to_owned(),
+            is_self: true,
+            at_me: false,
+            reply_to_me: false,
+            time_ms: now,
+        },
+        now,
+    );
+    store.save();
 }
 
 /// qq_reply：群引用回复——参数名与 send-message 不同（groupId/message），
@@ -1276,6 +1313,412 @@ async fn self_image(
             "头像下载失败（q1.qlogo.cn 不可达？稍后再试）",
         ),
     }
+}
+
+/// qq_wait_for_messages：等待新消息（核心版语义——purpose=reply 按最后
+/// 来信补足静默即返；messages 等新消息或超时）。preSleepWait 记账等沉睡
+/// 观察状态机为简化点（字段保留未消费，后续批次对齐）。
+async fn wait_messages(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.wait_messages) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let purpose_reply = q.get("purpose").map(String::as_str) == Some("reply");
+    let timeout_ms: u64 = q
+        .get("timeoutMs")
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(30_000)
+        .min(600_000);
+    let quiet_ms: u64 = q
+        .get("quietMs")
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(10_000);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        let now = crate::session_manager::SessionManager::now_ms();
+        let (unread, last_incoming, my_last, snapshot) = {
+            let mut store = state.social.lock().unwrap();
+            let st = store.conversation_mut(&key);
+            let my_last = st
+                .recent_messages
+                .iter()
+                .rev()
+                .find(|m| m.is_self)
+                .map(|m| m.time)
+                .unwrap_or(0);
+            let msgs: Vec<Value> = st
+                .unread
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                .collect();
+            (
+                st.unread.len(),
+                st.last_incoming_at,
+                my_last,
+                (st.last_unread_seq, msgs),
+            )
+        };
+        if purpose_reply {
+            // 回复前短静默：对方最后来信后已安静足够（或自己刚说过话）即返。
+            let anchor_time = my_last.max(last_incoming);
+            if now.saturating_sub(anchor_time) >= quiet_ms {
+                return ok_json(json!({ "quiet": true, "unreadCount": unread }));
+            }
+        } else if unread > 0 {
+            let (read_through, msgs) = snapshot;
+            return ok_json(json!({
+                "newMessages": msgs, "unreadCount": unread,
+                "readThroughSeq": read_through,
+            }));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return ok_json(
+                json!({ "timeout": true, "unreadCount": unread, "quiet": purpose_reply }),
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// qq_social_state：会话二代仿真状态摘要（只读）。
+async fn social_state(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.social_state) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let now = crate::session_manager::SessionManager::now_ms();
+    let mut store = state.social.lock().unwrap();
+    let st = store.conversation_mut(&key);
+    ok_json(json!({
+        "wakeConfig": serde_json::to_value(&st.wake_config).unwrap_or(Value::Null),
+        "unreadCount": st.unread.len(),
+        "lastIncomingAt": st.last_incoming_at,
+        "lastAiReplyAt": st.last_ai_reply_at,
+        "lastActionAt": st.last_action_at,
+        "wakeTimesCount": st.wake_times.len(),
+        "sendTimesRecentHour": st.send_times.iter().filter(|t| now.saturating_sub(**t) < 3_600_000).count(),
+        "activeTopics": st.active_topics.len(),
+        "pendingThoughts": st.pending_thoughts.len(),
+        "impressions": st.member_impressions.len(),
+    }))
+}
+
+/// qq_get_my_recent_messages：自己最近发的消息（is_self 记录）。
+async fn my_recent(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.get_my_recent) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let limit: usize = q
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(10)
+        .min(50);
+    let mut store = state.social.lock().unwrap();
+    let st = store.conversation_mut(&key);
+    let mine: Vec<Value> = st
+        .recent_messages
+        .iter()
+        .filter(|m| m.is_self)
+        .rev()
+        .take(limit)
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .collect();
+    ok_json(json!({ "messages": mine, "readThroughSeq": st.last_read_through_seq }))
+}
+
+/// qq_list_groups：机器人所在群列表（任意白名单会话令牌可用）。
+async fn list_groups(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.social_state) {
+        return e;
+    }
+    match state.onebot.call("get_group_list", json!({})) {
+        Ok(list) => {
+            let groups: Vec<Value> = list
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|g| {
+                            let gid = g.get("group_id").and_then(Value::as_u64)?;
+                            Some(json!({
+                                "groupId": gid,
+                                "name": g.get("group_name").and_then(Value::as_str).unwrap_or(""),
+                                "memberCount": g.get("member_count").and_then(Value::as_u64).unwrap_or(0),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            ok_json(json!({ "groups": groups, "count": groups.len() }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("获取群列表失败：{e}")),
+    }
+}
+
+/// qq_report_feedback：AI 上报用户反馈/异常（追加 feedback.jsonl + 活动日志）。
+async fn report_feedback(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.feedback) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let text = body.get("text").and_then(Value::as_str).unwrap_or_default();
+    if text.trim().is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "text 不能为空");
+    }
+    let line = json!({
+        "time": crate::session_manager::SessionManager::now_ms(),
+        "key": key, "text": text,
+    });
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("feedback.jsonl");
+    use std::io::Write;
+    let mut f = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return denied(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("写反馈失败：{e}"),
+            );
+        }
+    };
+    if let Err(e) = writeln!(f, "{line}") {
+        return denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写反馈失败：{e}"),
+        );
+    }
+    crate::logging::activity(&format!(
+        "{key} 反馈上报：{}",
+        text.chars().take(60).collect::<String>()
+    ));
+    ok_json(json!({ "ok": true }))
+}
+
+/// qq_speak：文字转语音直发（SAPI 合成 → record 段）。语音默认关（与 Node
+/// 一致）；与 send_voice 共享 sendVoice 开关与发送频率额度。
+async fn speak_voice(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.send_voice) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let text = body.get("text").and_then(Value::as_str).unwrap_or_default();
+    let rate: i32 = body
+        .get("rate")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .clamp(-10, 10) as i32;
+    if text.trim().is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "text 不能为空");
+    }
+    if let Err(e) = check_send_rate(&state, &key) {
+        return e;
+    }
+    let wav = crate::paths::queqiao_home().join("state").join(format!(
+        "tts-{}.wav",
+        crate::session_manager::SessionManager::now_ms()
+    ));
+    std::fs::create_dir_all(wav.parent().unwrap()).ok();
+    use base64::Engine;
+    let script = format!(
+        "Add-Type -AssemblyName System.Speech;          $s = New-Object System.Speech.Synthesis.SpeechSynthesizer;          $s.Rate = {rate};          $s.SetOutputToWaveFile('{}');          $s.Speak([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{}')));          $s.Dispose()",
+        wav.display(),
+        base64::engine::general_purpose::STANDARD.encode(text),
+    );
+    let wav_path = wav.clone();
+    let synth = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .creation_flags(0x0800_0000)
+            .output()
+            .map(|o| o.status.success() && wav_path.exists())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !synth {
+        let _ = std::fs::remove_file(&wav);
+        return denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TTS 合成失败（System.Speech 不可用？）",
+        );
+    }
+    let file_ref = format!(
+        "file:///{}",
+        wav.display().to_string().trim_start_matches('/')
+    );
+    let segments = vec![queqiao_onebot::segment::record(&file_ref)];
+    let message = queqiao_onebot::segment::message(&segments);
+    let result = if let Some(group) = key.strip_prefix("group:") {
+        state
+            .onebot
+            .send_group_msg(group.parse().unwrap_or(0), &message)
+    } else {
+        let user = key.strip_prefix("private:").unwrap_or("0");
+        state
+            .onebot
+            .send_private_msg(user.parse().unwrap_or(0), &message)
+    };
+    match result {
+        Ok(message_id) => {
+            // NapCat 发送时已读入文件；即时清理临时 wav。
+            let _ = std::fs::remove_file(&wav);
+            mark_reply_action(&state, &key);
+            ok_json(json!({ "verified": true, "messageId": message_id }))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&wav);
+            denied(StatusCode::BAD_GATEWAY, &format!("语音发送失败：{e}"))
+        }
+    }
+}
+
+/// qq_send_voice：发语音库（state/voices/*.wav）里的音频。
+async fn send_voice(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let key = match state.authorize(&headers, key, state.cfg.social_v2.tools.send_voice) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let name = body
+        .get("voiceName")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if name.trim().is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "voiceName 不能为空");
+    }
+    // 防路径穿越：名字仅字母数字/下划线/连字符，实际文件固定 .wav 后缀。
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            "voiceName 仅允许字母数字/下划线/连字符",
+        );
+    }
+    let wav = crate::paths::queqiao_home()
+        .join("state")
+        .join("voices")
+        .join(format!("{name}.wav"));
+    if !wav.exists() {
+        return denied(
+            StatusCode::NOT_FOUND,
+            &format!("语音 {name} 不存在（qq_list_voices 查库）"),
+        );
+    }
+    if let Err(e) = check_send_rate(&state, &key) {
+        return e;
+    }
+    let file_ref = format!(
+        "file:///{}",
+        wav.display().to_string().trim_start_matches('/')
+    );
+    let segments = vec![queqiao_onebot::segment::record(&file_ref)];
+    let message = queqiao_onebot::segment::message(&segments);
+    let result = if let Some(group) = key.strip_prefix("group:") {
+        state
+            .onebot
+            .send_group_msg(group.parse().unwrap_or(0), &message)
+    } else {
+        let user = key.strip_prefix("private:").unwrap_or("0");
+        state
+            .onebot
+            .send_private_msg(user.parse().unwrap_or(0), &message)
+    };
+    match result {
+        Ok(message_id) => {
+            mark_reply_action(&state, &key);
+            ok_json(json!({ "verified": true, "messageId": message_id }))
+        }
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("语音发送失败：{e}")),
+    }
+}
+
+/// qq_list_voices：语音库清单。
+async fn list_voices(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q
+        .get("conversationKey")
+        .map(String::as_str)
+        .unwrap_or_default();
+    if let Err(e) = state.authorize(&headers, key, state.cfg.social_v2.tools.send_voice) {
+        return e;
+    }
+    let dir = crate::paths::queqiao_home().join("state").join("voices");
+    let mut names = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if let Some(stem) = n.strip_suffix(".wav") {
+                names.push(stem.to_owned());
+            }
+        }
+    }
+    names.sort();
+    ok_json(json!({ "voices": names, "count": names.len() }))
 }
 
 /// qq_mark_read：确认读到 throughSeq（水位推进——新消息留待后续处理）。
