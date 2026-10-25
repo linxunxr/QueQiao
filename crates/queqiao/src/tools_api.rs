@@ -425,7 +425,7 @@ fn check_send_rate(state: &ToolApiState, key: &str) -> Result<(), (StatusCode, a
 }
 
 /// 发送链复用体（send-message 与 reply 端点共用）：频率护栏 → 空校验 → 长度上限 →
-/// 引用段 + 文本段 → 按会话类型走群/私聊。
+/// 敏感审计（命中整条拦截）→ 令牌打码 → 引用段 + 文本段 → 按会话类型走群/私聊。
 fn send_text_with_reply(
     state: &ToolApiState,
     key: &str,
@@ -442,6 +442,12 @@ fn send_text_with_reply(
     } else {
         text.to_owned()
     };
+    // 出站内容审计（Node v2 发送端点 SENSITIVE_RE 同款）：命中即整条拦截。
+    if queqiao_core::sensitive::is_sensitive(&text) {
+        crate::logging::log(&format!("[security] 出站消息含敏感特征已拦截（{key}）"));
+        return Err(denied(StatusCode::FORBIDDEN, "消息含敏感信息，已阻止发送"));
+    }
+    let text = redact_agent_tokens(state, &text);
     let mut segments = vec![queqiao_onebot::segment::text(&text)];
     if let Some(reply_to) = reply_to {
         segments.insert(0, queqiao_onebot::segment::reply(reply_to));
@@ -485,6 +491,25 @@ fn record_self_send(state: &ToolApiState, key: &str, text: &str, message_id: i64
         now,
     );
     store.save();
+}
+
+/// 出站前把全部会话的 agent token 原文替换为 `***`（Node `KNOWN_AGENT_TOKENS`
+/// 精确名单语义）。裸 32-hex 令牌既非路径也无赋值形态，启发式正则刻意不抓
+/// （防误伤同为 32-hex 的表情 md5 / 图片 URL），只靠这道精确名单兜住。
+fn redact_agent_tokens(state: &ToolApiState, text: &str) -> String {
+    let tokens: Vec<String> = {
+        let store = state.social.lock().unwrap();
+        store
+            .conversation_keys()
+            .iter()
+            .filter_map(|k| {
+                store
+                    .conversation(k)
+                    .and_then(|st| st.agent_token.clone())
+            })
+            .collect()
+    };
+    queqiao_core::sensitive::redact_known_tokens(text, tokens.iter().map(String::as_str))
 }
 
 /// qq_reply：群引用回复——参数名与 send-message 不同（groupId/message），

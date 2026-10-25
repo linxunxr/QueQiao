@@ -32,6 +32,7 @@ pub mod role_card;
 pub mod runtime;
 pub mod schedule;
 pub mod search;
+pub mod sensitive;
 pub mod session_router;
 pub mod slang;
 pub mod sticker;
