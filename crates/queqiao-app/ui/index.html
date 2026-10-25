@@ -474,11 +474,12 @@ async function load() {
   v('f-wakeProb', wk.recommendedProbability != null ? wk.recommendedProbability : 0.05);
   v('f-sendMin', (cfg.socialV2 && cfg.socialV2.send || {}).maxSendPerMinute);
   v('f-sendHour', (cfg.socialV2 && cfg.socialV2.send || {}).maxSendPerHour);
-  $('f-triAt').checked = wk.recommendedAtMention !== false;
-  $('f-triName').checked = wk.recommendedNameMention !== false;
-  $('f-triQ').checked = wk.recommendedQuestion !== false;
-  $('f-triPoke').checked = wk.recommendedPoke !== false;
-  $('f-voice').value = (cfg.socialV2 && cfg.socialV2.tools && cfg.socialV2.tools.sendVoice === true) ? 'true' : 'false';
+  const chk = (id, val) => { const el = $(id); if (el) el.checked = val; };
+  chk('f-triAt', wk.recommendedAtMention !== false);
+  chk('f-triName', wk.recommendedNameMention !== false);
+  chk('f-triQ', wk.recommendedQuestion !== false);
+  chk('f-triPoke', wk.recommendedPoke !== false);
+  v('f-voice', String((cfg.socialV2 && cfg.socialV2.tools && cfg.socialV2.tools.sendVoice) === true));
   v('f-sticker', String((cfg.socialV2 && cfg.socialV2.sticker || {}).enabled !== false));
   v('f-dshModel', cfg.dsh && cfg.dsh.model);
   v('f-dshProvider', cfg.dsh && cfg.dsh.provider);
@@ -526,7 +527,19 @@ async function save() {
   status.textContent = '校验中…';
   let body;
   try { body = JSON.parse(document.getElementById('f-json').value); }
-  catch (e) { toast('JSON 解析失败：' + e.message, false); status.textContent = ''; return; }
+  catch (e) {
+    // f-json 为空/坏通常是初始化时桥未在线（load 没拉到配置基底）——现拉一次重建基底；
+    // 不回填表单（用户已填的值随后逐字段覆盖上来，不丢），拉不到才真正失败。
+    try {
+      const r0 = await fetch(BRIDGE + '/api/config'); const raw0 = await r0.json();
+      cfg = raw0;
+      document.getElementById('f-json').value = JSON.stringify(stripUi(raw0), null, 2);
+      body = JSON.parse(document.getElementById('f-json').value);
+    } catch (e2) {
+      toast('桥未连接——配置尚未加载，请先启动桥（总览页一键启动）再保存', false);
+      status.textContent = ''; return;
+    }
+  }
   const num = id => { const v = document.getElementById(id).value; return v === '' ? undefined : Number(v); };
   body.ownerQQ = document.getElementById('f-ownerQQ').value.trim() === '' ? null : Number(document.getElementById('f-ownerQQ').value.trim()) || null;
   body.snowluma = body.snowluma || {};
@@ -719,6 +732,9 @@ loadCatalog();
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
   if (!document.hidden) {
     const st = await refreshComponents();
+    // 桥从离线转在线：初始化时 load() 可能因桥未就绪而失败（设置页配置基底空，
+    // 保存会缺 JSON 基底）——这里补调一次。
+    if (st.bridge && !bridgeOnline) load().then(fillModels);
     bridgeOnline = st.bridge;
     refreshPaused();
     refreshSessions();
@@ -768,7 +784,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) load().then(fillModels); bridgeOnline = st.bridge; refreshSessions(); }); }
 });
 </script>
 </body>
