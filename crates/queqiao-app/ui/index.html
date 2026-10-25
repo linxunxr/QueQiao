@@ -432,14 +432,29 @@ if (T) T.event.listen('bridge-log', e => {
   l.scrollTop = l.scrollHeight;
 });
 if (T) T.event.listen('bridge-state', () => refreshComponents());
+// 日志回放：bridge-log 事件是增量流，桥先于 UI 启动、启动期日志必错过——
+// 初始化与桥上线翻转时从桥拉尾部一次补齐（tail 是权威近期视图，直接替换；
+// 之后事件继续增量追加，与文件双写内容重叠无碍）。
+async function replayLog() {
+  try {
+    const r = await fetch(BRIDGE + '/api/logs/tail?n=150');
+    const res = await r.json();
+    const lines = (res.value && res.value.lines) || [];
+    if (!lines.length) return;
+    const l = $('log');
+    l.textContent = lines.join('\n');
+    l.scrollTop = l.scrollHeight;
+  } catch (e) { }
+}
+replayLog();
 
-// ── 会话概要（桥在线时读控制台 status）──────────────────────────────────────
+// ── 会话概要（桥在线时读会话列表端点）───────────────────────────────────────
 let bridgeOnline = false;
 async function refreshSessions() {
   const body = $('sessionsBody');
   if (!bridgeOnline) { body.innerHTML = '<span class="hint">桥未运行——一键启动后这里显示各会话未读。</span>'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/status');
+    const r = await fetch(BRIDGE + '/api/socialV2/conversations');
     const res = await r.json();
     const ss = (res.value && res.value.sessions) || [];
     if (!ss.length) { body.innerHTML = '<div class="empty"><div class="t">暂无会话</div><div class="s">AI 收到白名单内的消息后会自动建立会话</div></div>'; return; }
@@ -733,8 +748,8 @@ loadCatalog();
   if (!document.hidden) {
     const st = await refreshComponents();
     // 桥从离线转在线：初始化时 load() 可能因桥未就绪而失败（设置页配置基底空，
-    // 保存会缺 JSON 基底）——这里补调一次。
-    if (st.bridge && !bridgeOnline) load().then(fillModels);
+    // 保存会缺 JSON 基底）——这里补调一次；日志区也重放（桥重启后的新日志）。
+    if (st.bridge && !bridgeOnline) { load().then(fillModels); replayLog(); }
     bridgeOnline = st.bridge;
     refreshPaused();
     refreshSessions();
@@ -784,7 +799,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) load().then(fillModels); bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); replayLog(); } bridgeOnline = st.bridge; refreshSessions(); }); }
 });
 </script>
 </body>

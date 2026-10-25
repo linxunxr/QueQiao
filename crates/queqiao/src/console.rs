@@ -58,6 +58,32 @@ async fn page() -> Html<&'static str> {
     Html(CONSOLE_HTML)
 }
 
+/// 桥日志尾部回放：UI 的 bridge-log 事件是增量流，桥先于 UI 启动，
+/// 启动期日志（探活/OneBot/WS 连接）必错过——总览日志区需要历史回放。
+async fn logs_tail(
+    State(state): State<Arc<ConsoleState>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::BTreeMap<String, String>>,
+) -> Json<Value> {
+    let n: usize = q
+        .get("n")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+        .min(1000);
+    let lines: Vec<String> = state
+        .config_path
+        .parent()
+        .map(|home| home.join("state/bridge.log"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| {
+            let mut tail: Vec<&str> = t.lines().filter(|l| !l.is_empty()).collect();
+            let take = tail.len().saturating_sub(n);
+            tail.drain(..take);
+            tail.into_iter().map(str::to_owned).collect()
+        })
+        .unwrap_or_default();
+    Json(serde_json::json!({ "ok": true, "value": { "lines": lines } }))
+}
+
 async fn get_config(State(state): State<Arc<ConsoleState>>) -> Json<Value> {
     let cur = state.current.lock().unwrap().clone();
     let mut v = serde_json::to_value(&cur).unwrap_or(Value::Null);
@@ -111,6 +137,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
     Router::new()
         .route("/", get(page))
         .route("/api/config", get(get_config).put(put_config))
+        .route("/api/logs/tail", get(logs_tail))
         .with_state(state)
 }
 

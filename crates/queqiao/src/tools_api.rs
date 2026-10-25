@@ -180,6 +180,7 @@ pub async fn serve(
         .route("/api/socialV2/self-image", get(self_image))
         .route("/api/socialV2/paused", get(paused_state))
         .route("/api/socialV2/set-paused", post(set_paused))
+        .route("/api/socialV2/conversations", get(conversations))
         .route("/api/socialV2/wait-messages", get(wait_messages))
         .route("/api/socialV2/social-state", get(social_state))
         .route("/api/socialV2/my-recent", get(my_recent))
@@ -1374,6 +1375,29 @@ async fn set_paused(
         "AI 已恢复"
     });
     ok_json(json!({ "paused": paused }))
+}
+
+/// 控制台会话概要：全部会话的 key/未读/近期/唤醒模式（UI 总览表数据源）。
+/// 单会话 status 需 conversationKey 参数，不适用列表场景——v0.3.1 起 UI 曾
+/// 错调 status 拿 sessions 数组，端点契约不匹配致概要恒空。
+async fn conversations(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+) -> ApiResult {
+    let store = state.social.lock().unwrap();
+    let sessions: Vec<Value> = store
+        .conversation_keys()
+        .iter()
+        .filter_map(|k| {
+            let s = store.conversation(k)?;
+            Some(json!({
+                "key": k,
+                "unread": s.unread.len(),
+                "recent": s.recent_messages.len(),
+                "wakeMode": s.wake_config.mode,
+            }))
+        })
+        .collect();
+    ok_json(json!({ "sessions": sessions }))
 }
 
 /// qq_wait_for_messages：等待新消息（核心版语义——purpose=reply 按最后
