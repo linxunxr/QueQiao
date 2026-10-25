@@ -233,7 +233,12 @@ impl SessionManager {
             }
             Err(e) => {
                 let msg = e.to_string();
-                if with_effort && msg.contains("does not support reasoning effort") {
+                if with_effort
+                    && (msg.contains("does not support reasoning effort")
+                        // 1210 = 网关"Invalid API parameter"：路由/模型不认所带档位
+                        // 参数时的另一形态（2026-10-25 真机 omniroute 双提供方同拒）。
+                        || msg.contains("Invalid API parameter"))
+                {
                     // 降级：去档位重试——思考强度交给 DSH/路由默认。
                     let r = dsh.call_unary("session/selectModel", Some(build(false)), now);
                     drop(dsh);

@@ -684,11 +684,11 @@ async fn run(setup: Setup) {
         });
         let console = console_state.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                queqiao::tools_api::serve(state, port, &console_token, Some(console)).await
-            {
-                eprintln!("工具 API 异常退出：{e}");
-            }
+            // serve 永不返回才是常态；退出（Err/panic 恢复）必须落文件日志——
+            // 只 eprintln 的话客户端崩溃路径读不到，3100 静默消失无从排查
+            // （2026-10-25 真机：serve 死后 TCP 连接还挂着，日志零痕迹）。
+            let r = queqiao::tools_api::serve(state, port, &console_token, Some(console)).await;
+            queqiao::logging::log(&format!("工具 API 已退出（{r:?}）——控制台端口将不再响应"));
         });
     }
     println!(
@@ -803,12 +803,12 @@ async fn run(setup: Setup) {
             }
             update = update_rx.recv() => {
                 // 检测到新版本：显示更新内容 → 下载 staging → 全体空闲时应用并重启。
+                // （循环内的输出一律走 logging::log——裸 println 在客户端管道断裂时
+                // 写失败即 panic，曾致桥无痕死亡。）
                 if let Some(rel) = update {
-                    println!("╔══════════════════════════════════════════════════════╗");
-                    println!("║ 发现新版本 {}（当前 {}）", rel.tag, env!("CARGO_PKG_VERSION"));
-                    println!("╚══════════════════════════════════════════════════════╝");
+                    queqiao::logging::log(&format!("发现新版本 {}（当前 {}）", rel.tag, env!("CARGO_PKG_VERSION")));
                     for line in rel.notes.lines().take(30) {
-                        println!("│ {line}");
+                        queqiao::logging::log(&format!("│ {line}"));
                     }
                     let home = queqiao::paths::queqiao_home();
                     match tokio::task::spawn_blocking({
@@ -823,10 +823,10 @@ async fn run(setup: Setup) {
                     .and_then(|r| r)
                     {
                         Ok(bat) => {
-                            println!("[update] 新版已就绪，等待会话空闲后自动应用并重启…");
+                            queqiao::logging::log("[update] 新版已就绪，等待会话空闲后自动应用并重启…");
                             pending_update = Some(bat);
                         }
-                        Err(e) => println!("[update] 下载/准备失败（本次跳过，下次启动重试）：{e}"),
+                        Err(e) => queqiao::logging::log(&format!("[update] 下载/准备失败（本次跳过，下次启动重试）：{e}")),
                     }
                 }
             }

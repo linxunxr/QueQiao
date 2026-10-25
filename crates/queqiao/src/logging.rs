@@ -190,9 +190,12 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// 写一条桥日志：stdout + 文件双写；时间戳、脱敏、截断、轮转都在这里。
+/// 写一条桥日志：文件 + stdout 双写；时间戳、脱敏、截断、轮转都在这里。
+///
+/// 文件先行、stdout 容错：桥的 stdout 管道连着客户端，客户端退出/被杀后
+/// 管道断裂，`println!` 写失败默认 panic，而 panic hook 自身也要打印（二次
+/// panic）——真机曾致桥在客户端重启后无痕死亡（文件日志零痕迹，2026-10-25）。
 pub fn log(message: &str) {
-    println!("[{}] [bridge] {}", local_clock(), message);
     let mut guard = LOGGER.lock().unwrap();
     let Some(logger) = guard.as_mut() else { return };
     let mut line = redact(&message.replace(['\r', '\n'], " "));
@@ -217,6 +220,9 @@ pub fn log(message: &str) {
             logger.lines = 0;
         }
     }
+    drop(guard);
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout(), "{}", line.trim_end());
 }
 
 #[cfg(test)]

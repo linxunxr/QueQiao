@@ -645,10 +645,10 @@ function fillModels() {
   const sel = models.find(x => x.id === m.value);
   const efforts = (sel && (sel.efforts || (sel.reasoning && sel.reasoning.efforts))) || [];
   const curE = (cfg && cfg.dsh && cfg.dsh.reasoningEffort) || 'max';
-  const full = ['max', 'high', 'medium', 'low', 'none'];
+  const full = ['max', 'high', 'medium', 'low', 'none', 'off'];
   const list = efforts.length ? efforts.map(x => typeof x === 'string' ? x : x.id).filter(id => full.includes(id)) : ['none'];
   if (!list.includes('none')) list.push('none');
-  e.innerHTML = list.map(id => `<option value="${id}">${id === 'none' ? 'none（跟随默认，路由别名必须用这档）' : id}</option>`).join('');
+  e.innerHTML = list.map(id => `<option value="${id}">${id === 'none' ? 'none（跟随默认，路由别名必须用这档）' : id === 'off' ? 'off（DSH 语义：明确关闭思考）' : id}</option>`).join('');
   e.value = list.includes(curE) ? curE : list[0];
 }
 async function loadRoles() {
