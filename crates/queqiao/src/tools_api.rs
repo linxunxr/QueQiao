@@ -248,6 +248,10 @@ pub async fn serve(
         Some(c) => app.merge(crate::console::router(c)),
         None => app,
     };
+    // console 路由（/api/config 等）也要跨域：桌面客户端 webview 的 origin 是
+    // http://tauri.localhost，fetch 本桥即跨域——merge 后统一再盖一层 CORS，
+    // 否则设置页 load()/save() 被 CORS 拦，f-json 留空、保存必报 JSON 解析失败。
+    let app = app.layer(axum::middleware::from_fn(cors_mw));
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| format!("绑定 127.0.0.1:{port} 失败：{e}"))?;
