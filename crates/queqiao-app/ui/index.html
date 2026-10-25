@@ -165,7 +165,7 @@
   </section>
 
   <section>
-    <h2>运行日志</h2>
+    <h2>运行日志<span style="flex:1"></span><button class="ghost mini" onclick="$('log').textContent='';toast('日志已清屏（仅显示，文件不受影响）', true)">清屏</button></h2>
     <div id="log"></div>
   </section>
   <section>
@@ -197,6 +197,7 @@
     <h2>基础</h2>
     <div class="row">
       <div class="field"><label>管理员 QQ（ownerQQ）</label><input id="f-ownerQQ" placeholder="如 3388404701"><div class="hint">AI 只回应这个人的管理指令</div></div>
+      <div class="field"><label>自动更新</label><select id="f-autoUpdate"><option value="true">开启（桥定时检查，空闲自动升级）</option><option value="false">仅手动（标题栏检查更新按钮）</option></select><div class="hint">关闭后桥不再自动检查与升级；手动升级始终可用</div></div>
     </div>
     <div class="field"><label>允许的群（allow.groups）— AI 只参与列出的群</label>
       <div class="chips"><input id="add-group" placeholder="输入群号后回车添加"><button class="ghost" onclick="addChip('groups')">添加</button></div>
@@ -229,6 +230,7 @@
       <div class="field"><label>基址（baseUrl）</label><input id="f-dshBase" placeholder="http://127.0.0.1:3080"><div class="hint">探活失败会自动扫描端口</div></div>
       <div class="field"><label>提供方（provider）</label><select id="f-dshProvider"><option value="">（桥在线时自动列出）</option></select></div>
       <div class="field"><label>模型（model）</label><select id="f-dshModel"><option value="">（先选提供方）</option></select></div>
+      <div class="field"><label>会话工作目录（sessionCwd）</label><input id="f-sessionCwd" placeholder="留空 = 安装目录\state\agents"><div class="hint">DSH 会话的 agent 工作目录；必须是绝对路径（DSH 不解析相对路径）</div></div>
       <div class="field"><label>思考强度（reasoningEffort）</label><select id="f-dshEffort"><option value="max">max</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option><option value="none">none（跟随默认，路由别名必须用这档）</option></select><div class="hint">改动保存后下一条消息自动重选模型（热生效）</div></div>
     </div>
   </section>
@@ -242,7 +244,6 @@
       <div class="field"><label>合批窗口（毫秒）</label><input id="f-batch" type="number" min="1000"></div>
       <div class="field"><label>日记</label><select id="f-diary"><option value="true">开启（每晚定点写）</option><option value="false">关闭</option></select></div>
       <div class="field"><label>主动发言</label><select id="f-proactive"><option value="true">开启（安静时偶尔冒泡）</option><option value="false">关闭</option></select></div>
-      <div class="field"><label>自动更新</label><select id="f-autoUpdate"><option value="true">开启（桥定时检查，空闲自动升级）</option><option value="false">仅手动（总览页检查更新按钮）</option></select><div class="hint">关闭后桥不再自动检查与升级；客户端手动升级始终可用</div></div>
     </div>
   </section>
 
@@ -261,6 +262,7 @@
 <div id="toast"></div>
 <script>
 const BRIDGE = localStorage.getItem('bridgeBase') || 'http://127.0.0.1:3100';
+  document.getElementById('f-sessionCwd').value = cfg.sessionCwd || '';
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 浏览器直开控制台页时无 Tauri 桥——判空防脚本中断（Tauri-only 调用全部经 T）。
@@ -272,6 +274,9 @@ function showTab(name) {
     $('page-' + n).style.display = n === name ? 'block' : 'none';
     $('tab-' + n).classList.toggle('active', n === name);
   }
+  // 保存/导出是设置页动作，总览不显示（main 的 padding-bottom 也随之收紧）。
+  $('settingsBar').style.display = name === 'settings' ? 'flex' : 'none';
+  document.querySelectorAll('main').forEach(m => m.style.paddingBottom = name === 'settings' ? '96px' : '28px');
   localStorage.setItem('qqTab', name);
 }
 showTab(localStorage.getItem('qqTab') || 'overview');
@@ -469,6 +474,7 @@ async function save() {
   body.snowluma.homeDir = document.getElementById('f-slHome').value.trim();
   body.dsh = body.dsh || {};
   body.dsh.baseUrl = document.getElementById('f-dshBase').value.trim() || 'http://127.0.0.1:3080';
+  body.sessionCwd = document.getElementById('f-sessionCwd').value.trim();
   body.dsh.model = document.getElementById('f-dshModel').value.trim();
   body.dsh.provider = document.getElementById('f-dshProvider').value.trim();
   body.dsh.reasoningEffort = document.getElementById('f-dshEffort').value.trim();
@@ -628,6 +634,11 @@ if (T && T.event) T.event.listen('update-progress', e => {
 (async () => { try { document.getElementById('ver').textContent = 'queqiao ' + await T.core.invoke('app_version'); } catch (e) {} })();
 loadRoles();
 setMigrateState();
+// 未保存提示：设置页任意输入变更即标记（切页/关窗前的丢失提醒）。
+document.getElementById('page-settings').addEventListener('input', () => {
+  const st = document.getElementById('status');
+  if (!st.textContent.includes('未保存')) st.textContent = '有未保存的更改 · ' + st.textContent;
+});
 loadCatalog();
 (async () => { await load(); fillModels(); })();
 (async function tick() {
@@ -655,7 +666,7 @@ async function showTurns(key) {
 
 async function refreshCost() {
   const body = $('costBody');
-  if (!bridgeOnline) { body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示累计花费</div></div>'; return; }
+  if (!bridgeOnline) { document.getElementById('costSum').textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示累计花费</div></div>'; return; }
   try {
     const r = await fetch(BRIDGE + '/api/tokens/summary');
     const res = await r.json();
