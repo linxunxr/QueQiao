@@ -183,14 +183,20 @@ if (Test-Path $slCfg) {
 }
 
 Write-Host '== 3/4 DSH MCP 注册 ==' -ForegroundColor Cyan
-$McpExe = Join-Path $Dist 'queqiao-mcp.exe'
-$PatchFile = Join-Path $DshHome "profiles\$Profile\cordis.patch.yml"
-if (-not (Test-Path $PatchFile) -and (Test-Path (Join-Path $DshHome 'profiles'))) {
-    New-Item -ItemType File -Path $PatchFile -Force | Out-Null
-}
-$block = @"
+
+# MCP 注册（web + desktop 两档都写——DSH 桌面版读 desktop、CLI 读 web，
+# 漏写 desktop 时 AI 会话挂不到 queqiao-mcp，2026-10-25 真机总根因）。
+# 幂等三步：清 queqiao/qq-bridge 托管块 → 清无标记的 Node 版 snowluma 两块
+# （保留用户自配的 web-search-safe 等）→ 追加新托管块。
+function Write-McpPatch {
+    param($DshHome, $ProfileName, $McpExe)
+    $dir = Join-Path $DshHome "profiles\$ProfileName"
+    $PatchFile = Join-Path $dir 'cordis.patch.yml'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    if (-not (Test-Path $PatchFile)) { New-Item -ItemType File -Path $PatchFile -Force | Out-Null }
+    $block = @"
 # === queqiao MCP BEGIN ===
-# 由 scripts/setup-dsh.ps1 维护；替换 Node 版 qq-bridge 的托管块。
+# 由 install.ps1 / scripts/upgrade.ps1 维护。
 - insert:
     - id: mcp-snowluma
       name: '@deepseek-ai/dsh-mcp-client'
@@ -202,20 +208,18 @@ $block = @"
         toolCallTimeoutMs: 725000
 # === queqiao MCP END ===
 "@
-if (Test-Path $PatchFile) {
-    $existing = Get-Content $PatchFile -Raw -Encoding UTF8
-    $pattern = '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?'
-    if ($existing -match $pattern) {
-        $updated = $existing -replace $pattern, $block
-        Set-Content $PatchFile $updated -Encoding UTF8 -NoNewline
-        Write-Host "  已替换 Node 版托管块：$PatchFile"
+    $existing = if ((Get-Item $PatchFile).Length -gt 0) { Get-Content $PatchFile -Raw -Encoding UTF8 } else { '' }
+    $existing = $existing -replace '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?', ''
+    $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-snowluma(-host)?\s*\r?\n.*?(?=^\S|\z)', ''
+    if ($existing.Trim()) {
+        Set-Content $PatchFile ($existing.TrimEnd() + "`n`n" + $block) -Encoding UTF8 -NoNewline
     } else {
-        Add-Content $PatchFile "`n$block" -Encoding UTF8
-        Write-Host "  已追加 queqiao 条目：$PatchFile"
+        Set-Content $PatchFile $block -Encoding UTF8 -NoNewline
     }
-} else {
-    Write-Host "  未找到 $PatchFile（DSH 未初始化？跳过注册——手工把块写入该文件）" -ForegroundColor Yellow
+    Write-Host '  ' + "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp（清 Node 旧块，保留其余条目）"
 }
+Write-McpPatch $DshHome 'web' $McpExe
+Write-McpPatch $DshHome 'desktop' $McpExe
 
 Write-Host '== 4/4 启动步骤 ==' -ForegroundColor Cyan
 # 升级时若程序在跑：旧进程仍映射旧文件（已转 .old）——退出重开才加载新版。

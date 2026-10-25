@@ -304,15 +304,18 @@ if (Test-Path $cfgPath) {
     Write-Ok "已生成 $cfgPath（其余配置按默认值深度合并——按需参考仓库 README 修订）"
 }
 
-# ── 6. DSH MCP 注册 ──────────────────────────────────────────────────────────
-Write-Step 6 'DSH MCP 注册'
-$McpExe = Join-Path $Dist 'queqiao-mcp.exe'
-$PatchFile = Join-Path $DshHome "profiles\$Profile\cordis.patch.yml"
-if (-not (Test-Path (Split-Path $PatchFile))) {
-    New-Item -ItemType Directory -Force -Path (Split-Path $PatchFile) | Out-Null
-    New-Item -ItemType File -Path $PatchFile -Force | Out-Null
-}
-$block = @"
+
+# MCP 注册（web + desktop 两档都写——DSH 桌面版读 desktop、CLI 读 web，
+# 漏写 desktop 时 AI 会话挂不到 queqiao-mcp，2026-10-25 真机总根因）。
+# 幂等三步：清 queqiao/qq-bridge 托管块 → 清无标记的 Node 版 snowluma 两块
+# （保留用户自配的 web-search-safe 等）→ 追加新托管块。
+function Write-McpPatch {
+    param($DshHome, $ProfileName, $McpExe)
+    $dir = Join-Path $DshHome "profiles\$ProfileName"
+    $PatchFile = Join-Path $dir 'cordis.patch.yml'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    if (-not (Test-Path $PatchFile)) { New-Item -ItemType File -Path $PatchFile -Force | Out-Null }
+    $block = @"
 # === queqiao MCP BEGIN ===
 # 由 install.ps1 / scripts/upgrade.ps1 维护。
 - insert:
@@ -326,20 +329,18 @@ $block = @"
         toolCallTimeoutMs: 725000
 # === queqiao MCP END ===
 "@
-if ((Test-Path $PatchFile) -and (Get-Item $PatchFile).Length -gt 0) {
-    $existing = Get-Content $PatchFile -Raw -Encoding UTF8
-    $pattern = '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?'
-    if ($existing -match $pattern) {
-        Set-Content $PatchFile ($existing -replace $pattern, $block) -Encoding UTF8 -NoNewline
-        Write-Ok "已替换旧托管块：$PatchFile"
+    $existing = if ((Get-Item $PatchFile).Length -gt 0) { Get-Content $PatchFile -Raw -Encoding UTF8 } else { '' }
+    $existing = $existing -replace '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?', ''
+    $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-snowluma(-host)?\s*\r?\n.*?(?=^\S|\z)', ''
+    if ($existing.Trim()) {
+        Set-Content $PatchFile ($existing.TrimEnd() + "`n`n" + $block) -Encoding UTF8 -NoNewline
     } else {
-        Add-Content $PatchFile "`n$block" -Encoding UTF8
-        Write-Ok "已追加条目：$PatchFile"
+        Set-Content $PatchFile $block -Encoding UTF8 -NoNewline
     }
-} else {
-    Set-Content $PatchFile $block -Encoding UTF8 -NoNewline
-    Write-Ok "已写入：$PatchFile"
+    Write-Ok "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp（清 Node 旧块，保留其余条目）"
 }
+Write-McpPatch $DshHome 'web' $McpExe
+Write-McpPatch $DshHome 'desktop' $McpExe
 
 # ── 7. 收尾：安装器与配套文件迁入安装目录（升级/重装无需回下载目录）────────
 foreach ($f in @('install.bat', 'install.ps1', 'upgrade.bat', 'migrate-from-node.ps1')) {

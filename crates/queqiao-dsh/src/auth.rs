@@ -124,20 +124,46 @@ pub fn mint_browser_session_cookie(
 ///
 /// 密钥缺失 / 结构不符 / 长度不是 32 字节时返回 `None`（调用方回退启动 token
 /// 交换——DSH 换了密钥方案时宁可回退也不发坏 Cookie）。
+///
+/// 手写缩进匹配（替代 serde_yaml，连带去掉 unsafe-libyaml 整条依赖链）：
+/// 该文件由 DSH 机器生成、形状固定（`records:` 下 2 空格缩进的
+/// `client-connection/browser-session:` → kind/payload.version/payload.secret），
+/// 逐行状态机足够；结构意外时解析不到字段，走既有 None 回退，语义不变。
 pub fn parse_browser_session_secret(yaml_text: &str) -> Option<[u8; SECRET_BYTES]> {
-    let doc: serde_yaml::Value = serde_yaml::from_str(yaml_text).ok()?;
-    let record = doc.get("records")?.get(BROWSER_SESSION_KEY)?;
-    if record.get("kind")?.as_str()? != "grant" {
+    let mut in_record = false;
+    let mut kind = String::new();
+    let mut version: Option<i64> = None;
+    let mut secret = String::new();
+    for line in yaml_text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if let Some(rest) = trimmed.strip_prefix(BROWSER_SESSION_KEY) {
+            // 记录头：records 下第一层（2 空格缩进）；同前缀但更深的嵌套不认。
+            in_record = rest == ":" && indent == 2;
+            continue;
+        }
+        if in_record {
+            if indent <= 2 {
+                in_record = false; // 下一个顶级/records 层条目，记录块结束
+                continue;
+            }
+            if let Some(v) = trimmed.strip_prefix("kind:") {
+                kind = v.trim().trim_matches('"').trim_matches('\'').to_owned();
+            } else if let Some(v) = trimmed.strip_prefix("version:") {
+                version = v.trim().parse().ok();
+            } else if let Some(v) = trimmed.strip_prefix("secret:") {
+                secret = v.trim().trim_matches('"').trim_matches('\'').to_owned();
+            }
+        }
+    }
+    if kind != "grant" || version != Some(1) {
         return None;
     }
-    let payload = record.get("payload")?;
-    if payload.get("version")?.as_i64()? != 1 {
-        return None;
-    }
-    let secret = payload.get("secret")?.as_str()?;
-    let decoded = URL_SAFE_NO_PAD.decode(secret).ok()?;
-    let bytes: [u8; SECRET_BYTES] = decoded.try_into().ok()?;
-    Some(bytes)
+    let decoded = URL_SAFE_NO_PAD.decode(&secret).ok()?;
+    decoded.try_into().ok()
 }
 
 /// baseUrl 是否指向本机回环地址。
