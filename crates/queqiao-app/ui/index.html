@@ -667,7 +667,7 @@ async function switchRole() {
   try {
     const r = await fetch(BRIDGE + '/api/role', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role }) });
     const res = await r.json();
-    if (res.ok) { toast('已切换为 ' + role + '（下一条消息生效）', true); }
+    if (res.ok) { toast('已切换为 ' + role + '（下一条消息生效）', true); loadRoles(); }
     else { toast(res.error || '切换失败', false); }
   } catch (e) { toast('切换失败：' + e.message, false); }
 }
@@ -747,9 +747,9 @@ loadCatalog();
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
   if (!document.hidden) {
     const st = await refreshComponents();
-    // 桥从离线转在线：初始化时 load() 可能因桥未就绪而失败（设置页配置基底空，
-    // 保存会缺 JSON 基底）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && !bridgeOnline) { load().then(fillModels); replayLog(); }
+    // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
+    // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
+    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); }
     bridgeOnline = st.bridge;
     refreshPaused();
     refreshSessions();
@@ -799,7 +799,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); replayLog(); } bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); } bridgeOnline = st.bridge; refreshSessions(); }); }
 });
 </script>
 </body>
