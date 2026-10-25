@@ -2782,10 +2782,62 @@ async fn sticker_image(
     let entries = sync_stickers(&state, false);
     let id = q.get("stickerId").map(String::as_str).unwrap_or_default();
     match queqiao_core::sticker::find_sticker(&entries, id) {
-        Some(e) => ok_json(json!({
-            "id": e.id, "url": e.url, "desc": e.desc,
-            "localNote": e.local_note, "tags": e.tags, "usage": e.usage,
-        })),
+        Some(e) => {
+            // 下载图片本体供视觉确认（Node 同义「获取图片给模型看」——QQ preset
+            // 的模型没有抓图工具，只回 URL 它看不了）。失败降级返回元数据+提示，
+            // 不硬拒（列表信息仍有用）。
+            let url = e.url.clone();
+            let img = if url.is_empty() {
+                None
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    let client = reqwest::blocking::Client::builder()
+                        .timeout(std::time::Duration::from_secs(20))
+                        .build()
+                        .ok()?;
+                    let bytes = client.get(&url).send().ok()?.bytes().ok()?;
+                    if bytes.len() > 10 * 1024 * 1024 {
+                        return None;
+                    }
+                    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+                        "image/png"
+                    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+                        "image/jpeg"
+                    } else if bytes.starts_with(b"GIF8") {
+                        "image/gif"
+                    } else if bytes.len() >= 12
+                        && bytes.starts_with(&[0x52, 0x49, 0x46, 0x46])
+                        && &bytes[8..12] == b"WEBP"
+                    {
+                        "image/webp"
+                    } else {
+                        return None;
+                    };
+                    use base64::Engine;
+                    Some((
+                        mime.to_owned(),
+                        base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    ))
+                })
+                .await
+                .unwrap_or(None)
+            };
+            let (image, note) = match img {
+                Some((mime, data)) => (
+                    json!({ "mimeType": mime, "data": data }),
+                    Value::Null,
+                ),
+                None => (
+                    Value::Null,
+                    json!("图片下载失败或格式不受支持，仅返回元数据"),
+                ),
+            };
+            ok_json(json!({
+                "id": e.id, "url": e.url, "desc": e.desc,
+                "localNote": e.local_note, "tags": e.tags, "usage": e.usage,
+                "image": image, "note": note,
+            }))
+        }
         None => denied(StatusCode::NOT_FOUND, "表情未找到（id/md5/URL 任一匹配）"),
     }
 }

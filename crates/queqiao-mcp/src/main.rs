@@ -195,7 +195,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "qq_get_sticker_image",
-        description: "看表情图（返回 URL 供看图确认含义，再决定发不发）",
+        description: "查看指定收藏表情的图片本体（视觉确认含义后再决定发不发）。需带会话令牌。",
         endpoint: "sticker-image",
         method: "GET",
         flag: Some("getStickerImage"),
@@ -1084,19 +1084,31 @@ fn handle_request(
             audit_tool_call(def, &args, &result, &key);
             match result {
                 Ok(value) => {
-                    // qq_get_self_image：单图（value.image）转 MCP image 块。
-                    if name == "qq_get_self_image"
+                    // qq_get_self_image / qq_get_sticker_image：单图（value.image）
+                    // 转 MCP image 块（模型看不了裸 URL）。
+                    if (name == "qq_get_self_image" || name == "qq_get_sticker_image")
                         && let Some(img) = value.get("image")
                         && let (Some(data), Some(mime)) = (
                             img.get("data").and_then(Value::as_str),
                             img.get("mimeType").and_then(Value::as_str),
                         )
                     {
-                        let nickname = value.get("nickname").and_then(Value::as_str).unwrap_or("?");
+                        let label = if name == "qq_get_self_image" {
+                            let nickname = value.get("nickname").and_then(Value::as_str).unwrap_or("?");
+                            format!("当前形象（{nickname}）：")
+                        } else {
+                            let desc = value.get("desc").and_then(Value::as_str).unwrap_or("");
+                            let note = value.get("note").and_then(Value::as_str).unwrap_or("");
+                            if note.is_empty() {
+                                format!("收藏表情（{desc}）：")
+                            } else {
+                                format!("收藏表情（{desc}）——{note}")
+                            }
+                        };
                         return json!({
                             "jsonrpc": "2.0", "id": id,
                             "result": { "content": [
-                                { "type": "text", "text": format!("当前形象（{nickname}）：") },
+                                { "type": "text", "text": label },
                                 { "type": "image", "mimeType": mime, "data": data }
                             ] }
                         });
