@@ -42,6 +42,21 @@ pub fn is_sensitive(text: &str) -> bool {
     sensitive_re().is_match(text)
 }
 
+/// 把命中敏感特征的片段替换为 `***`（Node `redactSensitiveText` 语义——
+/// 日志/反馈/活动记录等**入库前**打码，与出站整条拦截互补）。
+pub fn redact_sensitive(text: &str) -> String {
+    let re = sensitive_re();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in re.find_iter(text) {
+        out.push_str(&text[last..m.start()]);
+        out.push_str("***");
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
 /// 已知令牌原文逐个替换为 `***`（Node `redactKnownTokensOnly` 语义）。
 /// 空令牌跳过；调用方传当前全部会话的 agent token。
 pub fn redact_known_tokens<'a>(
@@ -124,5 +139,15 @@ mod tests {
         assert_eq!(out, "令牌 *** 泄漏了，正常话不受影响");
         let unchanged = redact_known_tokens("没有令牌的话", ["zzzz9999"]);
         assert_eq!(unchanged, "没有令牌的话");
+    }
+
+    #[test]
+    fn redact_sensitive_masks_hits_only() {
+        let out = redact_sensitive("密码是 abc123xyz，其余照旧 C:\\Users\\a\\k.txt 尾部");
+        assert!(!out.contains("abc123xyz"));
+        assert!(!out.contains("Users"));
+        assert!(out.contains("其余照旧"));
+        assert!(out.ends_with("尾部"));
+        assert_eq!(redact_sensitive("干净文本"), "干净文本");
     }
 }

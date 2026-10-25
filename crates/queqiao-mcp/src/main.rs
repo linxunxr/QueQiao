@@ -607,6 +607,7 @@ const TOOLS: &[ToolDef] = &[
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("text", "string", true, "反馈原文"),
+            ("level", "string", false, "反馈级别 info/warning/error，默认 info"),
             ("agentToken", "string", true, "会话令牌"),
         ],
     },

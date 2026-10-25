@@ -31,6 +31,8 @@ pub struct ToolApiState {
     /// 检测到新版本的回投通道（与启动自动检测共用）：主循环收下后
     /// 打印更新内容 → 下载 staging → 全体空闲时应用并重启。
     pub update_tx: tokio::sync::mpsc::Sender<ReleaseInfo>,
+    /// AI 反馈限频（key → 时间戳窗口；内存态，Node feedbackTimes 同款）。
+    pub feedback_times: Mutex<std::collections::HashMap<String, Vec<u64>>>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -187,6 +189,8 @@ pub async fn serve(
         .route("/api/socialV2/my-recent", get(my_recent))
         .route("/api/socialV2/list-groups", get(list_groups))
         .route("/api/socialV2/report-feedback", post(report_feedback))
+        .route("/api/socialV2/feedback", get(feedback_list))
+        .route("/api/socialV2/feedback/clear", post(feedback_clear))
         .route("/api/socialV2/speak-voice", post(speak_voice))
         .route("/api/socialV2/send-voice", post(send_voice))
         .route("/api/socialV2/list-voices", get(list_voices))
@@ -1627,7 +1631,8 @@ async fn list_groups(
     }
 }
 
-/// qq_report_feedback：AI 上报用户反馈/异常（追加 feedback.jsonl + 活动日志）。
+/// qq_report_feedback：AI 上报反馈/异常（Node 全语义：level 三档 + 限频
+/// 5/分 20/时 + maxLength 截断 + 入库前敏感打码 + error 级 notifyOwner 提示）。
 async fn report_feedback(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
     headers: HeaderMap,
@@ -1641,17 +1646,29 @@ async fn report_feedback(
         Ok(k) => k,
         Err(e) => return e,
     };
-    let text = body.get("text").and_then(Value::as_str).unwrap_or_default();
+    // Node 参数名 message，MCP 侧沿用 text——两者都收。
+    let text = body
+        .get("message")
+        .or_else(|| body.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if text.trim().is_empty() {
-        return denied(StatusCode::BAD_REQUEST, "text 不能为空");
+        return denied(StatusCode::BAD_REQUEST, "message 不能为空");
     }
+    let level = match body.get("level").and_then(Value::as_str) {
+        Some("warning") => "warning",
+        Some("error") => "error",
+        _ => "info",
+    };
+    // maxLength 截断 + 入库前敏感打码（Node appendFeedbackEntry redactSensitiveText）。
+    let max = state.cfg.social_v2.feedback.max_length.max(1);
+    let text: String = text.chars().take(max).collect();
+    let text = queqiao_core::sensitive::redact_sensitive(&text);
     let line = json!({
         "time": crate::session_manager::SessionManager::now_ms(),
-        "key": key, "text": text,
+        "key": key, "level": level, "message": text,
     });
-    let file = crate::paths::queqiao_home()
-        .join("state")
-        .join("feedback.jsonl");
+    let file = feedback_file();
     use std::io::Write;
     let mut f = match std::fs::OpenOptions::new()
         .create(true)
@@ -1673,10 +1690,82 @@ async fn report_feedback(
         );
     }
     crate::logging::activity(&format!(
-        "{key} 反馈上报：{}",
+        "{key} 反馈上报 [{level}]：{}",
         text.chars().take(60).collect::<String>()
     ));
+    // Node 同款：notifyOwnerOnError 当前仅记录日志（不实际发消息）。
+    if state.cfg.social_v2.feedback.notify_owner_on_error && level == "error" {
+        let owner = state
+            .cfg
+            .owner_qq
+            .map(|o| o.0.to_string())
+            .unwrap_or_else(|| "未配置".into());
+        crate::logging::log(&format!(
+            "[feedback] 错误级反馈，可通知 owner {owner}（当前仅记录日志）"
+        ));
+    }
+    ok_json(json!({ "ok": true, "key": key, "level": level, "message": text }))
+}
+
+fn feedback_file() -> std::path::PathBuf {
+    crate::paths::queqiao_home()
+        .join("state")
+        .join("feedback.jsonl")
+}
+
+/// 控制台：读 AI 反馈列表（仅控制台可用——agent token 一律 403，Node 同款）。
+async fn feedback_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let text = std::fs::read_to_string(feedback_file()).unwrap_or_default();
+    // 最多回放最近 200 条（jsonl 逐行解析，坏行跳过）。
+    let entries: Vec<serde_json::Value> = text
+        .lines()
+        .rev()
+        .take(200)
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    ok_json(json!({ "ok": true, "entries": entries }))
+}
+
+/// 控制台：清空 AI 反馈（仅控制台可用）。
+async fn feedback_clear(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    match std::fs::remove_file(feedback_file()) {
+        Ok(()) | Err(_) => {}
+    }
+    crate::logging::log("控制台：清空 AI 反馈");
     ok_json(json!({ "ok": true }))
+}
+
+/// 控制台专用校验（tokens_summary 同款令牌门 + agent token 显式拒绝——
+/// MCP 工具同时带两令牌，仅控制台令牌挡不住 AI）。
+fn console_only(
+    state: &ToolApiState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if headers.contains_key("x-agent-token") {
+        return Err(denied(StatusCode::FORBIDDEN, "该接口仅控制台可用"));
+    }
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return Err(denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用"));
+        }
+    }
+    Ok(())
 }
 
 /// qq_speak：文字转语音直发（SAPI 合成 → record 段）。语音默认关（与 Node

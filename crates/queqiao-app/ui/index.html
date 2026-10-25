@@ -184,6 +184,18 @@
   </section>
 
   <section>
+    <details id="feedbackBox">
+      <summary>AI 反馈<span class="sum-note" id="feedbackSum">检测中…</span></summary>
+      <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+        <button class="ghost mini" onclick="refreshFeedback()">刷新</button>
+        <button class="ghost mini" onclick="clearFeedback()">清空</button>
+        <span class="hint">AI 用 qq_report_feedback 上报的问题与建议（入库前已做敏感信息打码）</span>
+      </div>
+      <div id="feedbackBody" class="hint" style="margin-top:10px">检测中…</div>
+    </details>
+  </section>
+
+  <section>
     <details id="migrateBox" open>
       <summary>数据迁移（从 Node 版 qq-bridge）<span class="sum-note" id="migrateNote"></span></summary>
       <div style="margin-top:14px">
@@ -756,7 +768,7 @@ loadCatalog();
     const st = await refreshComponents();
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); }
+    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); }
     bridgeOnline = st.bridge;
     refreshPaused();
     refreshSessions();
@@ -796,6 +808,35 @@ async function refreshDiary() {
   } catch (e) { sum.textContent = ''; body.textContent = '（日记不可读）'; }
 }
 
+// AI 反馈（state/feedback.jsonl）：AI 用 qq_report_feedback 上报的问题闭环面——
+// 此前只写不读，管理员看不到。与日记同为低频回顾，不进 tick 轮询。
+const LEVEL_COLOR = { error: '#e5484d', warning: '#f5a623', info: 'var(--acc)' };
+async function refreshFeedback() {
+  const sum = $('feedbackSum'), body = $('feedbackBody');
+  if (!bridgeOnline) { sum.textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示 AI 反馈</div></div>'; return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/socialV2/feedback');
+    const res = await r.json();
+    const list = (res.value && res.value.entries) || [];
+    if (!list.length) { sum.textContent = '暂无'; body.innerHTML = '<div class="empty"><div class="t">还没有反馈</div><div class="s">AI 遇到问题时会用 qq_report_feedback 上报到这里</div></div>'; return; }
+    sum.textContent = `共 ${list.length} 条`;
+    body.innerHTML = list.map(f => {
+      const lv = String(f.level || 'info');
+      const time = f.time ? new Date(Number(f.time)).toLocaleString('zh-CN', { hour12: false }) : '';
+      return `<div style="margin-bottom:12px"><b style="color:${LEVEL_COLOR[lv] || 'var(--acc)'};font-size:12px">[${lv}] ${esc(f.key || '')} · ${esc(time)}</b>` +
+        `<div style="white-space:pre-wrap;font-size:13px;line-height:1.6;margin-top:2px">${esc(String(f.message || '').trim())}</div></div>`;
+    }).join('');
+  } catch (e) { sum.textContent = ''; body.textContent = '（反馈不可读）'; }
+}
+async function clearFeedback() {
+  if (!confirm('确认清空全部 AI 反馈记录？')) return;
+  try {
+    const r = await fetch(BRIDGE + '/api/socialV2/feedback/clear', { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    toast('AI 反馈已清空', true); refreshFeedback();
+  } catch (e) { toast('清空失败：' + e.message, false); }
+}
+
 async function refreshCost() {
   const body = $('costBody');
   if (!bridgeOnline) { document.getElementById('costSum').textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示累计花费</div></div>'; return; }
@@ -825,7 +866,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); } bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); } bridgeOnline = st.bridge; refreshSessions(); }); }
 });
 </script>
 </body>

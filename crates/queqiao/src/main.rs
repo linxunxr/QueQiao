@@ -688,6 +688,7 @@ async fn run(setup: Setup) {
             update_tx: update_tx.clone(),
             dsh: dsh_arc.clone(),
             sessions: sessions_arc.clone(),
+            feedback_times: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
