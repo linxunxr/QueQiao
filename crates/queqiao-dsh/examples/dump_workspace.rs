@@ -39,19 +39,21 @@ fn make_client(base: &str) -> DshClient<ReqwestTransport> {
 
 fn main() {
     // 可选 --delete <workspaceId>：删 DSH workspace（清理验证时误建的）。
-    let (delete_id, rest): (Option<String>, Vec<String>) = {
-        let mut del = None;
-        let mut rest = Vec::new();
-        let mut it = std::env::args().skip(1);
-        while let Some(a) = it.next() {
-            if a == "--delete" {
-                del = it.next();
-            } else {
-                rest.push(a);
-            }
+    // 可选 --prompt <sessionId> <text>：直投一条 prompt（DSH 侧回合触发排查）。
+    let (mut delete_id, mut prompt): (Option<String>, Option<(String, String)>) = (None, None);
+    let mut rest = Vec::new();
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        if a == "--delete" {
+            delete_id = it.next();
+        } else if a == "--prompt" {
+            let id = it.next().unwrap_or_default();
+            let text = it.next().unwrap_or_default();
+            prompt = Some((id, text));
+        } else {
+            rest.push(a);
         }
-        (del, rest)
-    };
+    }
     let candidates = if rest.is_empty() {
         vec![
             "http://127.0.0.1:3080".to_owned(),
@@ -62,6 +64,26 @@ fn main() {
     };
     for base in &candidates {
         let mut client = make_client(base);
+        if let Some((id, text)) = &prompt {
+            match client.call_unary(
+                "session/prompt",
+                Some(json!({
+                    "sessionId": id,
+                    "mode": "queue",
+                    "content": [ { "type": "text", "text": text } ],
+                })),
+                now_ms(),
+            ) {
+                Ok(o) => println!(
+                    "[{base}] session/prompt ok={} error={:?} value={}",
+                    o.result.ok,
+                    o.result.error,
+                    o.result.value.unwrap_or(serde_json::Value::Null)
+                ),
+                Err(e) => println!("[{base}] session/prompt 调用失败：{e}"),
+            }
+            return;
+        }
         if let Some(id) = &delete_id {
             match client.call_unary(
                 "workspace/delete",
