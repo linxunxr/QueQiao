@@ -78,6 +78,20 @@
     <div class="hint" style="margin-top:6px">DSH 未跑自动拉起；SnowLuma 按 A 档授权（"安装、启动和运行"）代为拉起官方 launcher.bat——QQ 登录与 OneBot 开启仍需你在其窗口完成；桥等两者就绪后自动启动。</div>
   </section>
 
+  <section id="updatePanel" style="display:none">
+    <h2 id="updTitle">发现新版本</h2>
+    <div class="hint" id="updDate" style="margin-bottom:6px"></div>
+    <pre id="updNotes" style="background:#0a0e12; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:11px/1.6 Consolas,monospace; color:#9fb0c0; white-space:pre-wrap; max-height:260px; overflow-y:auto; margin:0 0 8px 0"></pre>
+    <div id="updProgress" style="display:none; margin-bottom:8px">
+      <div style="background:#0a0e12; border:1px solid var(--line); border-radius:6px; height:14px; overflow:hidden">
+        <div id="updBar" style="height:100%; width:0%; background:linear-gradient(90deg,#2f81f7,#3fb950); transition:width .2s"></div>
+      </div>
+      <div class="hint" id="updPct" style="margin-top:4px">准备下载…</div>
+    </div>
+    <button id="btnUpdate" onclick="applyUpdate()">立即更新</button>
+    <div class="hint" style="margin-top:6px">客户端自主更新（不依赖桥在线）：下载完成后自动换新并重启，桥随之恢复。</div>
+  </section>
+
   <section>
     <h2>花费（token 记账）</h2>
     <div id="costBody" class="hint">检测中…</div>
@@ -467,35 +481,54 @@ async function switchRole() {
   } catch (e) { toast('切换失败：' + e.message, false); }
 }
 
+let pendingRel = null;
 async function checkUpdate() {
+  if (!T) { toast('浏览器模式不支持检查更新——请在桌面客户端操作', false); return; }
   toast('正在检查更新…', true);
-  // 客户端直查 GitHub（不经桥——桥挂了升级入口恰恰必须可用）；
-  // 浏览器直开控制台页（无 Tauri）回落桥端点。
-  let v, resOk = true, errMsg = '';
-  try {
-    if (T) { v = await T.core.invoke('check_update_direct'); }
-    else {
-      const r = await fetch(BRIDGE + '/api/update/check', { method: 'POST' });
-      const res = await r.json();
-      v = res.value || res; resOk = res.ok !== false; errMsg = res.error || '';
-    }
-  } catch (e) { toast('检查失败：' + e.message + (bridgeOnline ? '' : '（桥未运行）'), false); return; }
-  try {
-    if (!resOk) { toast(errMsg || '检查失败', false); return; }
-    if (!v.hasUpdate) { toast('已是最新版本 v' + v.current, true); return; }
-    const brief = (v.notes || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).slice(0, 10).join('\n');
-    const follow = bridgeOnline
-      ? '\n\n已开始后台下载，桥空闲时将自动应用并重启。'
-      : '\n\n桥当前未运行——自动下载暂不可用。先启动桥（或一键启动），再点一次检查更新即可开始下载。';
-    alert('发现新版本 ' + v.tag + '（当前 v' + v.current + '）\n\n' + brief + follow);
-    if (bridgeOnline) {
-      try { await fetch(BRIDGE + '/api/update/check', { method: 'POST' }); } catch (e) { }
-      toast('新版本 ' + v.tag + ' 下载中，空闲时自动应用', true);
-    } else {
-      toast('发现新版本 ' + v.tag + '（桥未运行，待桥在线后下载）', true);
-    }
-  } catch (e) { toast('检查失败：' + e.message, false); }
+  // 客户端直查 GitHub（不经桥——桥挂了升级入口恰恰必须可用）。
+  let v;
+  try { v = await T.core.invoke('check_update_direct'); }
+  catch (e) { toast('检查失败：' + e, false); return; }
+  if (!v.hasUpdate) { toast('已是最新版本 v' + v.current, true); return; }
+  pendingRel = v.rel;
+  // 更新面板：版本 + 日期 + 更新日志全文（灵鉴式），确认后客户端自主下载应用。
+  $('updTitle').textContent = '发现新版本 ' + v.rel.tag + '（当前 v' + v.current + '）';
+  $('updDate').textContent = v.rel.published_at ? '发布于 ' + v.rel.published_at.slice(0, 10) : '';
+  $('updNotes').textContent = v.rel.notes || '（本次发布未附更新说明）';
+  $('updProgress').style.display = 'none';
+  $('btnUpdate').disabled = false;
+  $('btnUpdate').textContent = '立即更新';
+  $('updatePanel').style.display = 'block';
+  $('updatePanel').scrollIntoView({ behavior: 'smooth' });
 }
+
+async function applyUpdate() {
+  if (!pendingRel) return;
+  $('btnUpdate').disabled = true;
+  $('btnUpdate').textContent = '下载中…';
+  $('updProgress').style.display = 'block';
+  try {
+    await T.core.invoke('update_self', { rel: pendingRel });
+    $('updBar').style.width = '100%';
+    $('updPct').textContent = '下载完成——即将重启';
+    setTimeout(async () => { try { await T.core.invoke('quit_app'); } catch (e) { } }, 1200);
+  } catch (e) {
+    toast('更新失败：' + e, false);
+    $('btnUpdate').disabled = false;
+    $('btnUpdate').textContent = '立即更新';
+  }
+}
+if (T && T.event) T.event.listen('update-progress', e => {
+  const { received, total } = e.payload || {};
+  const mb = n => (n / 1048576).toFixed(1);
+  if (total > 0) {
+    const pct = Math.floor(received * 100 / total);
+    $('updBar').style.width = pct + '%';
+    $('updPct').textContent = pct + '%（' + mb(received) + ' / ' + mb(total) + ' MB）';
+  } else {
+    $('updPct').textContent = '已下载 ' + mb(received) + ' MB';
+  }
+});
 
 // ── 初始化 ──────────────────────────────────────────────────────────────────
 // 版本号不依赖桥在线：Tauri 客户端直接报自身版本（桥与客户端同版本发布）；

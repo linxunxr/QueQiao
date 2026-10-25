@@ -796,7 +796,7 @@ async fn run(setup: Setup) {
                         let rel = rel.clone();
                         move || {
                             let staging = update::stage_update(&rel, &home)?;
-                            update::write_apply_bat(&staging, &home)
+                            update::write_apply_bat(&staging, &home, false)
                         }
                     })
                     .await

@@ -488,8 +488,8 @@ if ($d.ShowDialog() -eq 'OK') {{ Write-Output $d.SelectedPath }} else {{ Write-O
 }
 
 /// 直查 GitHub latest（不经桥——桥挂了升级入口恰恰必须可用）。
-/// 检测到新版时顺带拉桥的下载通道（桥在线则自动下载/空闲应用；桥离线
-/// 只提示有新版，用户先恢复桥再点一次即可）。
+/// 返回完整 rel（tag/notes/zip_url/published_at）：前端更新面板展示日志，
+/// 确认后原样传回 update_self 由客户端自主完成下载与应用。
 #[tauri::command]
 async fn check_update_direct() -> Result<serde_json::Value, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
@@ -501,9 +501,47 @@ async fn check_update_direct() -> Result<serde_json::Value, String> {
         None => serde_json::json!({ "hasUpdate": false, "current": current }),
         Some(rel) => serde_json::json!({
             "hasUpdate": true, "current": current,
-            "tag": rel.tag, "notes": rel.notes,
+            "rel": serde_json::to_value(&rel).unwrap_or_default(),
         }),
     })
+}
+
+/// 客户端自主更新（桥挂了也必须能升级——2026-10-24 真机死结的根治）：
+/// 下载（进度经 `update-progress` 事件推送，前端渲染进度条）→ 解包 staging
+/// → 写客户端版 apply bat（重启目标=客户端）→ spawn 后返回，前端提示
+/// "即将重启"再调 quit_app 交棒：bat 等客户端退出后换三件套并重启新版。
+#[tauri::command]
+async fn update_self(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, BridgeState>,
+    rel: serde_json::Value,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let rel: queqiao::update::ReleaseInfo =
+        serde_json::from_value(rel).map_err(|e| format!("更新信息无效：{e}"))?;
+    let home = state.home.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let staging = queqiao::update::stage_update_with_progress(&rel, &home, |recv, total| {
+            let _ = app.emit(
+                "update-progress",
+                serde_json::json!({ "received": recv, "total": total }),
+            );
+        })?;
+        let bat = queqiao::update::write_apply_bat(&staging, &home, true)?;
+        std::process::Command::new(&bat)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW——bat 不闪控制台
+            .spawn()
+            .map_err(|e| format!("启动更新脚本失败：{e}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 配合 update_self：前端渲染完"即将重启"后调用，退出交棒 apply bat。
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 /// 从 Node 版桥（qq-bridge）迁移数据：调安装目录随包的 migrate-from-node.ps1
@@ -588,6 +626,8 @@ fn main() {
             open_snowluma_dir,
             migrate_from_node,
             check_update_direct,
+            update_self,
+            quit_app,
             pick_folder,
             start_snowluma
         ])
