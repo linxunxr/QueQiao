@@ -16,5 +16,6 @@ pub mod slang_store;
 pub mod social_store;
 pub mod state;
 pub mod sticker_store;
+pub mod tablet;
 pub mod tools_api;
 pub mod update;

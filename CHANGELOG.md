@@ -11,6 +11,10 @@
 
 ## [0.4.10] - 2026-10-26
 
+### 新增
+
+- **鸿蒙平板控制（tablet 九工具，规格配套 MCP 落地）**：AI 可以看到并操作管理员的鸿蒙平板——截图（图像直接进上下文，本地留档最近 12 张）/ 读屏（dumpLayout 压缩成坐标+文字+可点可滚的紧凑树）/ 点击 / 滑动 / 按方向快滑（刷视频翻列表）/ 按键 / 输入文本（中文走 base64 解码防 shell 拆参）/ 开网页（仅 http/https）。能力面刻意收敛：不做 tablet_shell 或任意 hdc 命令（平板是主人物理设备，任意 shell 等于整台设备交给模型）。两层门禁与 Node 版同款：注册期 `tablet.enabled=false` 时八个控制工具不注册（不占 system prompt、不给误调机会，仅 `tablet_status` 探测可用）；调用期会话令牌反查后须命中 `tablet.allowConvKeys`（默认仅管理员私聊）。hdc 定位顺序：config 显式路径 → PATH → DevEco Studio 默认安装位置；每次调用重新解析（改 config 即生效）；串行闸防 hdc server 并发拒绝；全部带超时（hdc 卡死不拖垮桥）。真机动作待设备连接后验证（本机 hdc 3.2.0f 就位、设备离线时给出可操作指引）。
+
 ### 修复
 
 - **双更新器竞态致换新扑空、客户端消失（2026-10-26 真机事故，根因修复）**：桥自动更新与客户端自主更新是两个独立执行者，却共用同一 staging 目录与同一 apply-update.bat——双触发时一方的"清旧 staging"掏空另一方刚下好的包，apply bat 拷贝扑空：三件套被改名后新件缺失、客户端退出不再回来。现按执行者隔离（客户端 update-staging-app/apply-update-app.bat，桥 update-staging/apply-update.bat）+ update.lock 跨执行者互斥（bat 执行完删除，20 分钟过期防死锁）；apply bat 全程写 update-apply.log（此前每步吞错，失败零痕迹）并加固 cmd 语法（括号块 && 串联与 timeout 在部分环境翻车，改三行独立 if + ping 等待）。

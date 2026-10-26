@@ -13,14 +13,26 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 
 /// 工具定义（name → 桥端点 + 参数转发 + 注册开关键）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum TabletGate {
+    #[default]
+    None,
+    Always,
+    OnEnabled,
+}
+
 struct ToolDef {
     name: &'static str,
     description: &'static str,
-    /// 桥端点（相对 /api/socialV2/）。
+    /// 桥端点（相对 /api/socialV2/；tablet 类为绝对路径）。
     endpoint: &'static str,
     method: &'static str,
     /// config.socialV2.tools 的开关键名（None = 无开关恒注册）。
     flag: Option<&'static str>,
+    /// 平板门禁：Always=恒注册（仅 tablet_status 探测用）；OnEnabled=仅
+    /// tablet.enabled=true 时注册（八个控制类工具——关着不占 system
+    /// prompt、不给模型误调机会，Node 注册期过滤同义）。
+    tablet_gate: TabletGate,
     /// 参数 schema（属性名 + 类型 + 是否必填 + 描述）。
     params: &'static [(&'static str, &'static str, bool, &'static str)],
 }
@@ -46,6 +58,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "prompt",
         method: "GET",
         flag: Some("getPrompt"),
+        tablet_gate: TabletGate::None,
         params: &[],
     },
     ToolDef {
@@ -54,6 +67,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "unread",
         method: "GET",
         flag: Some("getUnread"),
+        tablet_gate: TabletGate::None,
         params: &[(
             "afterSeq",
             "number",
@@ -67,6 +81,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-message",
         method: "POST",
         flag: Some("sendMessage"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("text", "string", true, "消息文本"),
             ("replyToMessageId", "number", false, "引用回复的消息 id"),
@@ -78,6 +93,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "memory-append",
         method: "POST",
         flag: Some("memory"),
+        tablet_gate: TabletGate::None,
         params: &[
             (
                 "category",
@@ -124,6 +140,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "memory",
         method: "GET",
         flag: Some("memory"),
+        tablet_gate: TabletGate::None,
         params: &[],
     },
     ToolDef {
@@ -132,6 +149,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "memory-remove",
         method: "POST",
         flag: Some("memory"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("category", "string", true, "activeTopic / pendingThought"),
             ("content", "string", true, "要删除的记忆原文"),
@@ -143,6 +161,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "recent-messages",
         method: "GET",
         flag: Some("getRecent"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("limit", "number", false, "条数（默认 20，上限 100）"),
             ("onlySelf", "boolean", false, "只看自己发的消息（传 true）"),
@@ -154,6 +173,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "active-members",
         method: "GET",
         flag: Some("getActiveMembers"),
+        tablet_gate: TabletGate::None,
         params: &[("limit", "number", false, "人数上限（默认 10，最大 20）")],
     },
     ToolDef {
@@ -162,6 +182,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "slang/query",
         method: "GET",
         flag: Some("slangQuery"),
+        tablet_gate: TabletGate::None,
         params: &[("query", "string", false, "关键词（匹配词条/含义/用法）")],
     },
     ToolDef {
@@ -170,6 +191,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "slang/submit",
         method: "POST",
         flag: Some("slangSubmit"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("content", "string", true, "黑话词条本身（50 字内）"),
             ("meaning", "string", true, "含义（300 字内）"),
@@ -183,6 +205,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "sticker-list",
         method: "GET",
         flag: Some("listStickers"),
+        tablet_gate: TabletGate::None,
         params: &[
             (
                 "query",
@@ -199,6 +222,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "sticker-image",
         method: "GET",
         flag: Some("getStickerImage"),
+        tablet_gate: TabletGate::None,
         params: &[("stickerId", "string", true, "表情 id/md5/URL 任一")],
     },
     ToolDef {
@@ -207,6 +231,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-sticker",
         method: "POST",
         flag: Some("sendSticker"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("stickerId", "string", true, "表情 id/md5/URL 任一"),
             (
@@ -223,6 +248,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "sticker-note",
         method: "POST",
         flag: Some("stickerNote"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("stickerId", "string", true, "表情 id/md5/URL 任一"),
             ("note", "string", false, "你的理解（如：被戳中时用）"),
@@ -235,6 +261,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "message-detail",
         method: "GET",
         flag: Some("getMessageDetail"),
+        tablet_gate: TabletGate::None,
         params: &[(
             "messageId",
             "string",
@@ -248,6 +275,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "mark-read",
         method: "POST",
         flag: Some("markRead"),
+        tablet_gate: TabletGate::None,
         params: &[(
             "throughSeq",
             "number",
@@ -261,6 +289,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "set-wake-config",
         method: "POST",
         flag: Some("setWakeConfig"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("mode", "string", false, "diving（潜水）或 active（活跃）"),
             ("infinite", "boolean", false, "true=无限期潜水等触发"),
@@ -284,6 +313,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "status",
         method: "GET",
         flag: Some("getUnread"),
+        tablet_gate: TabletGate::None,
         params: &[],
     },
     ToolDef {
@@ -292,6 +322,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "reply",
         method: "POST",
         flag: Some("reply"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("groupId", "string", true, "群号（须在白名单）"),
             (
@@ -315,6 +346,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-message",
         method: "POST",
         flag: Some("sendBurst"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("groupId", "string", true, "群号（须在白名单）"),
             (
@@ -332,6 +364,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-poke",
         method: "POST",
         flag: Some("sendPoke"),
+        tablet_gate: TabletGate::None,
         params: &[
             (
                 "conversationKey",
@@ -354,6 +387,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "react-message",
         method: "POST",
         flag: Some("reactMessage"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -372,6 +406,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "recall-message",
         method: "POST",
         flag: Some("recallMessage"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("messageId", "number", true, "要撤回的消息 id"),
@@ -384,6 +419,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "images/message",
         method: "GET",
         flag: Some("getImages"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -401,6 +437,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "forward-msg",
         method: "GET",
         flag: Some("getForwardMsg"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -418,6 +455,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "collect-sticker",
         method: "POST",
         flag: Some("collectSticker"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("messageId", "number", true, "带图消息的 id"),
@@ -431,6 +469,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "fetch-sticker",
         method: "POST",
         flag: Some("fetchSticker"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("url", "string", true, "图片直链（http/https）"),
@@ -444,6 +483,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "set-sticker-remark",
         method: "POST",
         flag: Some("setStickerRemark"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -462,6 +502,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "write-diary",
         method: "POST",
         flag: Some("writeDiary"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("content", "string", true, "日记内容"),
@@ -474,6 +515,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "get-diary",
         method: "GET",
         flag: Some("getDiary"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("days", "number", false, "天数（默认 7，上限 90）"),
@@ -486,6 +528,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "group-members",
         method: "GET",
         flag: Some("groupMembers"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（group:群号）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -497,6 +540,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "group-profile",
         method: "GET",
         flag: Some("groupProfile"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（group:群号）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -508,6 +552,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "group-history",
         method: "GET",
         flag: Some("groupHistory"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（group:群号）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -519,6 +564,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "self-image",
         method: "GET",
         flag: Some("getSelfImage"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
@@ -530,6 +576,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "wait-messages",
         method: "GET",
         flag: Some("waitMessages"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -559,6 +606,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "social-state",
         method: "GET",
         flag: Some("socialState"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
@@ -570,6 +618,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "memory-clear",
         method: "POST",
         flag: Some("memory"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
@@ -581,6 +630,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "my-recent",
         method: "GET",
         flag: Some("getMyRecent"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("limit", "number", false, "条数（默认 10，上限 50）"),
@@ -593,6 +643,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "list-groups",
         method: "GET",
         flag: Some("socialState"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（鉴权用）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -604,6 +655,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "report-feedback",
         method: "POST",
         flag: Some("feedback"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("text", "string", true, "反馈原文"),
@@ -622,6 +674,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "speak-voice",
         method: "POST",
         flag: Some("sendVoice"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("text", "string", true, "要合成的文本"),
@@ -635,6 +688,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-voice",
         method: "POST",
         flag: Some("sendVoice"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("voiceName", "string", true, "语音名（qq_list_voices 返回）"),
@@ -647,6 +701,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "list-voices",
         method: "GET",
         flag: Some("sendVoice"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（鉴权用）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -658,6 +713,7 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-message",
         method: "POST",
         flag: Some("sendGroup"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("groupId", "string", true, "群号（须在白名单）"),
             ("message", "string", true, "文本（纯文本）"),
@@ -671,10 +727,140 @@ const TOOLS: &[ToolDef] = &[
         endpoint: "send-message",
         method: "POST",
         flag: Some("sendPrivate"),
+        tablet_gate: TabletGate::None,
         params: &[
             ("userId", "string", true, "好友 QQ 号（须在白名单）"),
             ("message", "string", true, "文本（纯文本）"),
             ("replyToMessageId", "number", false, "引用消息 id（可选）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_status",
+        description: "探测鸿蒙平板是否可用（只读）：功能开关、目标设备在线状态、设备型号。不需要会话令牌。其余 tablet_* 工具需要会话令牌，且仅管理员授权的会话（默认管理员私聊）可通过。",
+        endpoint: "/api/tablet/status",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::Always,
+        params: &[],
+    },
+    ToolDef {
+        name: "tablet_screenshot",
+        description: "截取鸿蒙平板当前屏幕，图像直接进入上下文（配合 tablet_read_screen 可同时拿到文字）。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/screenshot",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[("agentToken", "string", true, "会话令牌")],
+    },
+    ToolDef {
+        name: "tablet_read_screen",
+        description: "读取鸿蒙平板屏幕上当前可见的界面结构：每行一个元素的坐标/文字/是否可点可滚，适合获取屏幕上的文字信息（视频标题、评论、设置项等）。返回较大时会被截断。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/read-screen",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            (
+                "maxChars",
+                "number",
+                false,
+                "返回文本上限（字符），默认 18000",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_tap",
+        description: "点击鸿蒙平板屏幕上的坐标。坐标可从 tablet_read_screen 的 [x1,y1,x2,y2] 或 tablet_screenshot 中取（点元素中心）。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/tap",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            ("x", "number", true, "横坐标（像素）"),
+            ("y", "number", true, "纵坐标（像素）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_swipe",
+        description: "在鸿蒙平板上从 (x1,y1) 滑动到 (x2,y2)（慢速精确滑动，如拖动进度条、移动图标）。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/swipe",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            ("x1", "number", true, "起点横坐标"),
+            ("y1", "number", true, "起点纵坐标"),
+            ("x2", "number", true, "终点横坐标"),
+            ("y2", "number", true, "终点纵坐标"),
+            (
+                "speedPxPerS",
+                "number",
+                false,
+                "滑动速度（像素/秒，200~40000，默认 600）",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_fling",
+        description: "在鸿蒙平板上按方向快滑（系统默认速度，适合翻页/刷视频/滚列表）：up=手指向上滑（看下一条），down=向下滑（回看上一条），left/right=横向翻页。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/fling",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            (
+                "direction",
+                "string",
+                true,
+                "手指滑动方向：up/down/left/right",
+            ),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_key",
+        description: "按鸿蒙平板的按键：Back（返回）、Home（回桌面）、Power（电源）或数字键码。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/key",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            ("key", "string", true, "Back / Home / Power 或数字键码"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_text",
+        description: "向鸿蒙平板输入文本（最多 500 字符）。给 x/y 时先点击该坐标处的输入框再输入；不给则输入到当前已聚焦的输入框。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/text",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            ("text", "string", true, "要输入的文本"),
+            (
+                "x",
+                "number",
+                false,
+                "输入框横坐标（可选，不给则输入到已聚焦输入框）",
+            ),
+            ("y", "number", false, "输入框纵坐标（与 x 一起给）"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "tablet_open_url",
+        description: "在鸿蒙平板的默认浏览器里打开一个 http(s) 网页（能用平板上已登录的账号看到渲染后的页面）。看内容用 tablet_screenshot 截图 / tablet_read_screen 读文字，tablet_fling 滚动页面，tablet_key Back 返回。仅允许 http/https。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/tablet/open-url",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::OnEnabled,
+        params: &[
+            ("url", "string", true, "要打开的 http(s) 网址"),
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
@@ -684,6 +870,16 @@ fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
     match flag {
         Some(key) => tools.get(key).and_then(Value::as_bool).unwrap_or(true),
         None => true,
+    }
+}
+
+/// 平板门禁判定（注册期与调用期共用）：OnEnabled 仅 tablet.enabled=true 时
+/// 放行（八个控制类工具——关着不占 system prompt、不给模型误调机会，Node
+/// 注册期过滤同义）；Always 恒放行（仅 tablet_status 探测）。
+fn tablet_gate_ok(gate: TabletGate, tablet_cfg: &Value) -> bool {
+    match gate {
+        TabletGate::None | TabletGate::Always => true,
+        TabletGate::OnEnabled => tablet_cfg.get("enabled") == Some(&Value::Bool(true)),
     }
 }
 
@@ -851,11 +1047,29 @@ fn call_tool(def: &ToolDef, args: &Value, console_token: &str) -> Result<Value, 
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let url = format!("{bridge}/api/socialV2/{}", def.endpoint);
+    // tablet 端点是绝对路径（/api/tablet/*），QQ 工具是相对（/api/socialV2/）。
+    let url = if def.endpoint.starts_with('/') {
+        format!("{bridge}{}", def.endpoint)
+    } else {
+        format!("{bridge}/api/socialV2/{}", def.endpoint)
+    };
     let resp = if def.method == "GET" {
         let mut extra = String::new();
         if let Some(seq) = args.get("afterSeq").and_then(Value::as_u64) {
             extra = format!("&afterSeq={seq}");
+        }
+        // tablet GET 工具的查询参数按参数表转发（如 read-screen 的 maxChars）。
+        for (name, _, _, _) in def.params {
+            if *name == "agentToken" || *name == "conversationKey" {
+                continue;
+            }
+            if let Some(v) = args.get(*name) {
+                let val = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                extra.push_str(&format!("&{name}={val}"));
+            }
         }
         client
             .get(format!("{url}?conversationKey={key}{extra}"))
@@ -995,6 +1209,7 @@ fn handle_request(
     method: &str,
     params: &Value,
     tools_cfg: &Value,
+    tablet_cfg: &Value,
     console_token: &str,
 ) -> Value {
     match method {
@@ -1010,7 +1225,10 @@ fn handle_request(
         "tools/list" => {
             let tools: Vec<Value> = TOOLS
                 .iter()
-                .filter(|d| tool_flag_enabled(d.flag, tools_cfg))
+                .filter(|d| {
+                    tool_flag_enabled(d.flag, tools_cfg)
+                        && tablet_gate_ok(d.tablet_gate, tablet_cfg)
+                })
                 .map(|d| {
                     json!({
                         "name": d.name,
@@ -1038,6 +1256,12 @@ fn handle_request(
                 return json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": { "content": [ { "type": "text", "text": format!("工具 {name} 已被 config.socialV2.tools 关闭") } ], "isError": true }
+                });
+            }
+            if !tablet_gate_ok(def.tablet_gate, tablet_cfg) {
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "content": [ { "type": "text", "text": format!("工具 {name} 已被 config.tablet.enabled=false 关闭（仅 tablet_status 探测可用）") } ], "isError": true }
                 });
             }
             let key = args
@@ -1113,9 +1337,11 @@ fn handle_request(
             audit_tool_call(def, &args, &result, &key);
             match result {
                 Ok(value) => {
-                    // qq_get_self_image / qq_get_sticker_image：单图（value.image）
-                    // 转 MCP image 块（模型看不了裸 URL）。
-                    if (name == "qq_get_self_image" || name == "qq_get_sticker_image")
+                    // qq_get_self_image / qq_get_sticker_image / tablet_screenshot：
+                    // 单图（value.image）转 MCP image 块（模型看不了裸 URL）。
+                    if (name == "qq_get_self_image"
+                        || name == "qq_get_sticker_image"
+                        || name == "tablet_screenshot")
                         && let Some(img) = value.get("image")
                         && let (Some(data), Some(mime)) = (
                             img.get("data").and_then(Value::as_str),
@@ -1126,6 +1352,9 @@ fn handle_request(
                             let nickname =
                                 value.get("nickname").and_then(Value::as_str).unwrap_or("?");
                             format!("当前形象（{nickname}）：")
+                        } else if name == "tablet_screenshot" {
+                            let file = value.get("file").and_then(Value::as_str).unwrap_or("");
+                            format!("平板截图（{file}）：")
                         } else {
                             let desc = value.get("desc").and_then(Value::as_str).unwrap_or("");
                             let note = value.get("note").and_then(Value::as_str).unwrap_or("");
@@ -1204,13 +1433,16 @@ fn main() {
         .get("tools")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let tablet_cfg = load_section("tablet");
     let console_token = load_section("consoleToken")
         .as_str()
         .unwrap_or_default()
         .to_owned();
     let registered = TOOLS
         .iter()
-        .filter(|d| tool_flag_enabled(d.flag, &tools_cfg))
+        .filter(|d| {
+            tool_flag_enabled(d.flag, &tools_cfg) && tablet_gate_ok(d.tablet_gate, &tablet_cfg)
+        })
         .count();
     eprintln!(
         "queqiao-mcp {} 启动：{} 个工具注册（{} 个被注册期过滤）",
@@ -1240,7 +1472,14 @@ fn main() {
             .unwrap_or_default()
             .to_owned();
         let params = msg.get("params").cloned().unwrap_or(json!({}));
-        let resp = handle_request(&id, &method, &params, &tools_cfg, &console_token);
+        let resp = handle_request(
+            &id,
+            &method,
+            &params,
+            &tools_cfg,
+            &tablet_cfg,
+            &console_token,
+        );
         if let Ok(text) = serde_json::to_string(&resp)
             && writeln!(out, "{text}").is_ok()
         {

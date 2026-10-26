@@ -36,6 +36,7 @@ pub mod sensitive;
 pub mod session_router;
 pub mod slang;
 pub mod sticker;
+pub mod tablet;
 pub mod token_ledger;
 pub mod triggers;
 pub mod v2_wait;

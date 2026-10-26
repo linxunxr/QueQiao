@@ -172,8 +172,9 @@ impl Default for SnowLumaConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-/// 平板控制（tablet）：**未实现**——仅配置形状占位（规格列为可选项，实现前
-/// enabled 恒无效）。
+/// 平板控制（tablet）：hdc 执行器在 queqiao::tablet，端点 /api/tablet/*，
+/// MCP tablet_* 九工具；两层门禁=注册期 enabled + 调用期 allowConvKeys
+/// （默认仅管理员私聊）。真机动作（截图/点击等）待设备连接后验证。
 pub struct TabletConfig {
     pub enabled: bool,
     pub hdc_path: String,

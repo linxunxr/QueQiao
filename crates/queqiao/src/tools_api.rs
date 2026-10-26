@@ -193,6 +193,15 @@ pub fn build_router(
         .route("/api/slang/research", post(slang_admin_research))
         .route("/api/slang/{id}", axum::routing::patch(slang_admin_patch))
         .route("/api/slang/{id}/{action}", post(slang_admin_single))
+        .route("/api/tablet/status", get(tablet_status_ep))
+        .route("/api/tablet/screenshot", get(tablet_screenshot_ep))
+        .route("/api/tablet/read-screen", get(tablet_read_screen_ep))
+        .route("/api/tablet/tap", post(tablet_tap_ep))
+        .route("/api/tablet/swipe", post(tablet_swipe_ep))
+        .route("/api/tablet/fling", post(tablet_fling_ep))
+        .route("/api/tablet/key", post(tablet_key_ep))
+        .route("/api/tablet/text", post(tablet_text_ep))
+        .route("/api/tablet/open-url", post(tablet_open_url_ep))
         .route("/api/socialV2/speak-voice", post(speak_voice))
         .route("/api/socialV2/send-voice", post(send_voice))
         .route("/api/socialV2/list-voices", get(list_voices))
@@ -1753,6 +1762,266 @@ async fn feedback_clear(
     }
     crate::logging::log("控制台：清空 AI 反馈");
     ok_json(json!({ "ok": true }))
+}
+
+// ── 鸿蒙平板控制端点（Node /api/tablet/* 同语义）───────────────────────────
+// 两层门禁：注册期 tablet.enabled（MCP 侧不注册控制工具）+ 调用期会话令牌
+// 命中 tablet.allowConvKeys（默认仅 private:<ownerQQ> 管理员私聊）。
+// capability 面收敛：截图/读屏/点击/滑动/快滑/按键/输入/开网页——不做任意
+// hdc 命令（平板是主人物理设备，shell 等于整台设备交给模型）。
+
+/// 调用期鉴权：agent token 反查会话 key → allowConvKeys 白名单（空列表 =
+/// 默认仅管理员私聊 private:<ownerQQ>）。群聊/伪造令牌/未配置 owner 一律拒。
+fn tablet_authorized(
+    state: &ToolApiState,
+    headers: &HeaderMap,
+    key: &str,
+) -> Result<String, String> {
+    let expected = {
+        let store = state.social.lock().unwrap();
+        store
+            .conversation(key)
+            .and_then(|st| st.agent_token.clone())
+            .unwrap_or_default()
+    };
+    let token = headers
+        .get("x-agent-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if token.is_empty() || token != expected {
+        return Err("会话令牌无效或缺失（平板控制需要管理员授权会话）".into());
+    }
+    // 默认白名单：管理员私聊。
+    let mut allowed = state.cfg.tablet.allow_conv_keys.clone();
+    if allowed.is_empty()
+        && let Some(owner) = state.cfg.owner_qq
+    {
+        allowed.push(format!("private:{}", owner.0));
+    }
+    if !allowed.iter().any(|k| k == key) {
+        return Err(format!(
+            "会话 {key} 不在 tablet.allowConvKeys 白名单（默认仅管理员私聊）"
+        ));
+    }
+    Ok(key.to_owned())
+}
+
+/// GET /api/tablet/status：只读探测（不需要令牌）。
+async fn tablet_status_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+) -> ApiResult {
+    let info = tokio::task::spawn_blocking({
+        let cfg = state.cfg.tablet.clone();
+        move || crate::tablet::status(&cfg)
+    })
+    .await
+    .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+    ok_json(info)
+}
+
+/// 控制类动作共用：鉴权 → spawn_blocking 执行 hdc 动作（reqwest blocking
+/// 不嵌 tokio 坑不适用——这里是 std::process::Command，但串行闸在 blocking
+/// 线程池更安全）。
+async fn tablet_action<F>(state: &ToolApiState, headers: &HeaderMap, key: &str, f: F) -> ApiResult
+where
+    F: FnOnce(&crate::config::TabletConfig) -> Result<String, String> + Send + 'static,
+{
+    if !state.cfg.tablet.enabled {
+        return denied(
+            StatusCode::FORBIDDEN,
+            "平板工具未启用（config.json tablet.enabled）",
+        );
+    }
+    if let Err(e) = tablet_authorized(state, headers, key) {
+        return denied(StatusCode::FORBIDDEN, &e);
+    }
+    let cfg = state.cfg.tablet.clone();
+    let out = tokio::task::spawn_blocking(move || f(&cfg))
+        .await
+        .unwrap_or_else(|e| Err(format!("join：{e}")));
+    match out {
+        Ok(msg) => ok_json(serde_json::json!({ "ok": true, "message": msg })),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// GET /api/tablet/screenshot：截图 → {image:{mimeType,data}, file, bytes}
+/// （响应形状与通用 message 包装不同——图片 base64 需要独立字段）。
+async fn tablet_screenshot_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    if !state.cfg.tablet.enabled {
+        return denied(
+            StatusCode::FORBIDDEN,
+            "平板工具未启用（config.json tablet.enabled）",
+        );
+    }
+    if let Err(e) = tablet_authorized(&state, &headers, &key) {
+        return denied(StatusCode::FORBIDDEN, &e);
+    }
+    let cfg = state.cfg.tablet.clone();
+    let out = tokio::task::spawn_blocking(move || crate::tablet::screenshot(&cfg))
+        .await
+        .unwrap_or_else(|e| Err(format!("join：{e}")));
+    match out {
+        // tablet::screenshot 返回 JSON 字符串（image/file/bytes），原样透传。
+        Ok(json_text) => match serde_json::from_str::<Value>(&json_text) {
+            Ok(v) => ok_json(v),
+            Err(e) => denied(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("截图结果解析失败：{e}"),
+            ),
+        },
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// POST /api/tablet/read-screen?maxChars=…
+async fn tablet_read_screen_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    let max_chars: usize = q
+        .get("maxChars")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(18_000)
+        .clamp(2_000, 40_000);
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::read_screen(cfg, max_chars)
+    })
+    .await
+}
+
+async fn tablet_tap_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let x = body.get("x").and_then(Value::as_i64).unwrap_or(-1);
+    let y = body.get("y").and_then(Value::as_i64).unwrap_or(-1);
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::tap(cfg, x, y)
+    })
+    .await
+}
+
+async fn tablet_swipe_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let g = |name: &str| body.get(name).and_then(Value::as_i64).unwrap_or(-1);
+    let (x1, y1, x2, y2) = (g("x1"), g("y1"), g("x2"), g("y2"));
+    let speed = body.get("speedPxPerS").and_then(Value::as_i64);
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::swipe(cfg, x1, y1, x2, y2, speed)
+    })
+    .await
+}
+
+async fn tablet_fling_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let dir = body
+        .get("direction")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::fling(cfg, &dir)
+    })
+    .await
+}
+
+async fn tablet_key_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key_name = body
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::key(cfg, &key_name)
+    })
+    .await
+}
+
+async fn tablet_text_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let text = body
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(500)
+        .collect::<String>();
+    let x = body.get("x").and_then(Value::as_i64);
+    let y = body.get("y").and_then(Value::as_i64);
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::input_text(cfg, &text, x, y)
+    })
+    .await
+}
+
+async fn tablet_open_url_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let url = body
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(800)
+        .collect::<String>();
+    tablet_action(&state, &headers, &key, move |cfg| {
+        crate::tablet::open_url(cfg, &url)
+    })
+    .await
 }
 
 /// 控制台专用校验（tokens_summary 同款令牌门 + agent token 显式拒绝——
