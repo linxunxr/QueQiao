@@ -1290,7 +1290,7 @@ async fn run(setup: Setup) {
                     match tokio::task::spawn_blocking({
                         let rel = rel.clone();
                         move || {
-                            let staging = update::stage_update(&rel, &home)?;
+                            let staging = update::stage_update(&rel, &home, "bridge")?;
                             update::write_apply_bat(&staging, &home, false)
                         }
                     })

@@ -521,12 +521,13 @@ async fn update_self(
         serde_json::from_value(rel).map_err(|e| format!("更新信息无效：{e}"))?;
     let home = state.home.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let staging = queqiao::update::stage_update_with_progress(&rel, &home, |recv, total| {
-            let _ = app.emit(
-                "update-progress",
-                serde_json::json!({ "received": recv, "total": total }),
-            );
-        })?;
+        let staging =
+            queqiao::update::stage_update_with_progress(&rel, &home, "app", |recv, total| {
+                let _ = app.emit(
+                    "update-progress",
+                    serde_json::json!({ "received": recv, "total": total }),
+                );
+            })?;
         let bat = queqiao::update::write_apply_bat(&staging, &home, true)?;
         std::process::Command::new(&bat)
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW——bat 不闪控制台

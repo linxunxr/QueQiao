@@ -17,7 +17,7 @@ fn main() {
     println!("发现 {}（发布于 {}）", rel.tag, rel.published_at);
 
     let last_pct = std::cell::Cell::new(-1i32);
-    let staging = stage_update_with_progress(&rel, &base, |recv, total| {
+    let staging = stage_update_with_progress(&rel, &base, "app", |recv, total| {
         if let Some(pct) = (recv * 100).checked_div(total).map(|v| v as i32)
             && pct != last_pct.get()
         {

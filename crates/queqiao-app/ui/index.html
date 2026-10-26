@@ -754,23 +754,45 @@ async function checkUpdate() {
 
 async function applyUpdate() {
   if (!pendingRel) return;
+  // 浏览器直开的控制台页没有 Tauri 桥：收不到进度事件也无法执行换新——
+  // 此前直接抛 TypeError，进度条冻在"准备下载…"像卡死（用户实测报障）。
+  if (!T) { toast('浏览器模式不能执行更新——请在桌面客户端的更新面板点"立即更新"', false); return; }
   $('btnUpdate').disabled = true;
   $('btnUpdate').textContent = '下载中…';
   $('updProgress').style.display = 'block';
+  $('updBar').style.width = '0%';
+  $('updPct').textContent = '连接 GitHub…';
+  // 复位速度基线（重试时不用上一轮的脏数据算 EMA）。
+  dlLast = null; dlSpeedEma = 0; dlGotEvent = false;
+  // 看门狗：20 秒内没收到任何进度事件（连首块 64KB 都没到）就明示"在等"，
+  // 而不是死寂——网络抖动时下载会在 5 分钟总超时后报错，届时可重试。
+  const startedAt = Date.now();
+  const watchdog = setInterval(() => {
+    if (dlGotEvent) { clearInterval(watchdog); return; }
+    const waited = Math.round((Date.now() - startedAt) / 1000);
+    if (waited < 5) return;
+    $('updPct').textContent = '连接较慢，已等待 ' + waited + ' 秒（未收到首字节；5 分钟自动超时后可重试）';
+  }, 1000);
   try {
     await T.core.invoke('update_self', { rel: pendingRel });
+    clearInterval(watchdog);
     $('updBar').style.width = '100%';
     $('updPct').textContent = '下载完成——即将重启';
     setTimeout(async () => { try { await T.core.invoke('quit_app'); } catch (e) { } }, 1200);
   } catch (e) {
+    clearInterval(watchdog);
+    // 失败就地明示（此前只弹 toast，进度条区永久停在旧状态像卡死）。
+    $('updPct').textContent = '更新失败：' + e + '（可点击重试）';
+    $('updBar').style.width = '0%';
     toast('更新失败：' + e, false);
     $('btnUpdate').disabled = false;
     $('btnUpdate').textContent = '立即更新';
   }
 }
 // 实时速度：事件间隔的瞬时速度做 EMA 平滑（0.3 权重），卡住时下次事件自然归零。
-let dlLast = null, dlSpeedEma = 0;
+let dlLast = null, dlSpeedEma = 0, dlGotEvent = false;
 if (T && T.event) T.event.listen('update-progress', e => {
+  dlGotEvent = true;
   const { received, total } = e.payload || {};
   const mb = n => (n / 1048576).toFixed(1);
   const now = Date.now();
