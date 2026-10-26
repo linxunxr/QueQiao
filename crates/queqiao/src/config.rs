@@ -263,9 +263,10 @@ impl Default for SecurityConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct SlangConfig {
     pub enabled: bool,
-    // 自动提取管线参数：extractMinMessages/extractCooldownMs/learnerPreset/
-    // workspaceTitle 由主循环消费（滚动窗口攒消息 → DSH 学习会话提取候选）；
-    // inferenceThresholds/autoResearch 属联网研究管线，仍未消费。
+    // 学习管线参数全部生效：extractMinMessages/extractCooldownMs/learnerPreset/
+    // workspaceTitle 由提取管线消费（滚动窗口攒消息 → DSH 学习会话提取候选）；
+    // inferenceThresholds/autoResearch 由研究管线消费（阈值命中自动联网考究，
+    // 研究结果写回释义、转正仍须管理员在词库页确认）。
     pub extract_min_messages: usize,
     pub extract_cooldown_ms: u64,
     pub inference_thresholds: Vec<u32>,

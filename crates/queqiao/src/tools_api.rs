@@ -33,6 +33,10 @@ pub struct ToolApiState {
     pub update_tx: tokio::sync::mpsc::Sender<ReleaseInfo>,
     /// AI 反馈限频（key → 时间戳窗口；内存态，Node feedbackTimes 同款）。
     pub feedback_times: Mutex<std::collections::HashMap<String, Vec<u64>>>,
+    /// 黑话提取/研究串行闸（控制台「送研究」预检；派发由主循环完成）。
+    pub slang_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// 手动送研究通道（ids 空 = 全部候选；主循环消费派发研究任务）。
+    pub slang_research_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -186,6 +190,7 @@ pub fn build_router(
         .route("/api/slang/batch-delete", post(slang_admin_batch_delete))
         .route("/api/slang/batch-confirm", post(slang_admin_batch_confirm))
         .route("/api/slang/batch-reject", post(slang_admin_batch_reject))
+        .route("/api/slang/research", post(slang_admin_research))
         .route("/api/slang/{id}", axum::routing::patch(slang_admin_patch))
         .route("/api/slang/{id}/{action}", post(slang_admin_single))
         .route("/api/socialV2/speak-voice", post(speak_voice))
@@ -2808,6 +2813,26 @@ async fn slang_admin_batch_confirm(
         "ok": true, "confirmedCount": out.confirmed,
         "skippedCount": out.skipped.len(), "skipped": skipped
     }))
+}
+
+/// POST /api/slang/research：手动送研究（ids 空 = 全部候选；Node /api/slang/research）。
+/// 串行闸预检 409，派发交主循环（学习会话/回合观察都在那一侧）。
+async fn slang_admin_research(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    if state.slang_busy.load(std::sync::atomic::Ordering::SeqCst) {
+        return denied(StatusCode::CONFLICT, "提取/研究进行中，请稍后再试");
+    }
+    let ids = slang_ids_from(&body);
+    if state.slang_research_tx.send(ids).is_err() {
+        return denied(StatusCode::INTERNAL_SERVER_ERROR, "研究派发通道已关闭");
+    }
+    ok_json(json!({ "ok": true, "dispatched": true }))
 }
 
 /// POST /api/slang/batch-reject：任意非 rejected 可拒（confirmed 事后下架同路径）。

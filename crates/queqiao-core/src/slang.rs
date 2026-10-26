@@ -61,6 +61,9 @@ pub struct SlangEntry {
     /// manual / ai。
     pub source: String,
     pub count: u64,
+    /// 上次联网研究时的出现次数（阈值 2/4/8 命中一次后不再重复研究）。
+    #[serde(default)]
+    pub last_inference_count: u64,
     #[serde(default)]
     pub evidence: Vec<SlangEvidence>,
     pub created_at: String,
@@ -101,6 +104,7 @@ pub fn normalize_entry(raw: &SlangEntry) -> SlangEntry {
         }
         .into(),
         count: raw.count,
+        last_inference_count: raw.last_inference_count,
         evidence: raw
             .evidence
             .iter()
@@ -772,5 +776,267 @@ mod learner_tests {
         assert_eq!((a2, u2), (0, 3));
         let j = entries.iter().find(|e| e.content == "绝绝子").unwrap();
         assert_eq!(j.evidence.len(), 1, "相同证据不重复入列");
+    }
+}
+
+// ── 联网研究管线（Node slang-learner.js 研究面子集）──────────────────────────
+
+/// 到期研究判定（Node inferenceThresholds 语义）：候选态 + count 恰好命中某档
+/// 阈值 + 本次次数已超过上次研究时（同一次不重复研究）。返回到期词条 id。
+pub fn research_due(entries: &[SlangEntry], thresholds: &[u32]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| {
+            e.status == "candidate"
+                && e.count > e.last_inference_count
+                && thresholds.iter().any(|t| *t as u64 == e.count)
+        })
+        .map(|e| e.id.clone())
+        .collect()
+}
+
+/// 研究 prompt（Node buildResearchPrompt 同构：候选 + 群友语境证据 + 联网
+/// 考究指示——web_search/web_fetch 是 learner preset 侧工具，桥侧只发指令，
+/// 无工具时模型按语境判断并 confirmed=false，语义自洽降级）。
+pub fn build_research_prompt(candidates: &[&SlangEntry]) -> String {
+    let list = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let evidence = if e.evidence.is_empty() {
+                String::new()
+            } else {
+                e.evidence
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .rev()
+                    .map(|x| format!("（群友语境：{}）", learner_escape(&clip_plain(&x.text, 80))))
+                    .collect::<Vec<_>>()
+                    .join("")
+            };
+            format!(
+                "{}. {}{}",
+                i + 1,
+                learner_escape(&clip_plain(&e.content, 50)),
+                evidence
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "你是群聊黑话研究员。请针对以下候选网络用语/黑话做**深度联网考究**：先结合给出的群友语境判断可能含义，再使用 web_search 搜索确认，并对最相关的 1~2 个结果用 web_fetch 抓取正文阅读（只读搜索/抓取，不要执行任何本地操作）。不要只依赖搜索摘要。\n\n候选：\n{list}\n\n请输出 JSON 数组，每个元素：\n{{\n  \"content\": \"词条\",\n  \"meaning\": \"含义（简洁，适合群友理解，必须基于真实网络用法）\",\n  \"usage\": \"使用场景/语气（可选）\",\n  \"example\": \"一个自然短句示例（可选）\",\n  \"risk\": \"是否有敏感/慎用风险（可选，没有就留空）\",\n  \"sources\": [\"参考来源URL1\", \"参考来源URL2\"],\n  \"confirmed\": true 或 false\n}}\n\n注意：\n- 不确定是否为网络用语的普通词，confirmed 设为 false。\n- 不要编造离谱含义；搜不到就写\"不确定\"并把 confirmed 设为 false。\n- 只输出 JSON 数组，不要输出其他文字。"
+    )
+}
+
+/// 研究结果（Node parseResearchJson：confirmed 必须显式 true）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlangResearch {
+    pub content: String,
+    pub meaning: String,
+    pub usage: String,
+    pub example: String,
+    pub risk: String,
+    pub sources: Vec<String>,
+    pub confirmed: bool,
+}
+
+pub fn parse_research_json(text: &str) -> Vec<SlangResearch> {
+    let Some(arr) = extract_json_array(text) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let content = item.get("content")?.as_str()?.trim().to_owned();
+            if content.is_empty() {
+                return None;
+            }
+            Some(SlangResearch {
+                content,
+                meaning: item
+                    .get("meaning")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
+                usage: item
+                    .get("usage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
+                example: item
+                    .get("example")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
+                risk: item
+                    .get("risk")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned(),
+                sources: item
+                    .get("sources")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .take(10)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                confirmed: item.get("confirmed") == Some(&serde_json::Value::Bool(true)),
+            })
+        })
+        .collect()
+}
+
+/// 研究结果写回（Node runSlangResearch 语义）：仅 confirmed=true 的写回
+/// meaning/usage/example/risk/sources 并记 last_inference_count=count
+/// （**不改 status**——转正仍须管理员在词库页确认，RULES 红线）；未确认的
+/// 保留候选允许下次再研究。返回写回条数。
+pub fn apply_research(
+    entries: &mut [SlangEntry],
+    results: &[SlangResearch],
+    now_iso: &str,
+) -> usize {
+    let mut applied = 0;
+    for r in results {
+        let Some(e) = entries.iter_mut().find(|e| e.content == r.content) else {
+            continue;
+        };
+        if !r.confirmed {
+            // 未确认也算研究过：记水位防同档反复研究。
+            e.last_inference_count = e.count;
+            continue;
+        }
+        if !r.meaning.is_empty() {
+            e.meaning = r.meaning.clone();
+        }
+        if !r.usage.is_empty() {
+            e.usage = r.usage.clone();
+        }
+        if !r.example.is_empty() {
+            e.example = r.example.clone();
+        }
+        if !r.risk.is_empty() {
+            e.risk = r.risk.clone();
+        }
+        if !r.sources.is_empty() {
+            e.sources = r.sources.clone();
+        }
+        e.last_inference_count = e.count;
+        e.updated_at = now_iso.to_owned();
+        applied += 1;
+    }
+    applied
+}
+
+#[cfg(test)]
+mod research_tests {
+    use super::*;
+
+    fn cand(content: &str, count: u64, last_inference: u64) -> SlangEntry {
+        SlangEntry {
+            id: format!("id-{content}"),
+            content: content.into(),
+            status: "candidate".into(),
+            count,
+            last_inference_count: last_inference,
+            evidence: vec![SlangEvidence {
+                key: "group:1".into(),
+                sender: "甲".into(),
+                text: format!("{content} 出现的语境"),
+                time: 1,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// 阈值判定：命中 2/4/8 且超上次水位才到期；confirmed 态不研究。
+    #[test]
+    fn research_due_thresholds() {
+        let entries = vec![
+            cand("甲", 2, 0), // 命中 2，未研究过 → 到期
+            cand("乙", 3, 0), // 不在任何档位
+            cand("丙", 4, 4), // 命中 4 但已研究过（水位=次数）
+            cand("丁", 8, 0), // 命中 8 → 到期
+            SlangEntry {
+                status: "confirmed".into(),
+                count: 2,
+                ..cand("戊", 2, 0)
+            },
+        ];
+        let due = research_due(&entries, &[2, 4, 8]);
+        assert_eq!(due, vec!["id-甲".to_owned(), "id-丁".to_owned()]);
+    }
+
+    /// 研究 prompt：候选带编号与群友语境；联网考究指示在场。
+    #[test]
+    fn research_prompt_shape() {
+        let e = cand("yyds", 2, 0);
+        let refs = vec![&e];
+        let p = build_research_prompt(&refs);
+        assert!(p.contains("1. yyds"));
+        assert!(p.contains("群友语境：yyds 出现的语境"));
+        assert!(p.contains("web_search"));
+        assert!(p.contains("confirmed"));
+    }
+
+    /// 结果解析：confirmed 必须显式 true；来源列表清洗截断。
+    #[test]
+    fn parse_research_shape() {
+        let out = parse_research_json(
+            r#"[{"content":"yyds","meaning":"永远的神","confirmed":true,"sources":["https://a"," ","https://b"]},
+                {"content":"糊词","meaning":"猜的","confirmed":false}]"#,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out[0].confirmed);
+        assert_eq!(out[0].sources.len(), 2, "空串来源被滤掉");
+        assert!(!out[1].confirmed);
+    }
+
+    /// 写回：confirmed 才写释义与来源、记水位；status 不动；未确认只记水位。
+    #[test]
+    fn apply_research_semantics() {
+        let mut entries = vec![cand("yyds", 2, 0), cand("糊词", 2, 0), cand("缺席", 2, 0)];
+        let results = vec![
+            SlangResearch {
+                content: "yyds".into(),
+                meaning: "永远的神".into(),
+                usage: "夸人".into(),
+                example: "这波yyds".into(),
+                risk: String::new(),
+                sources: vec!["https://a".into()],
+                confirmed: true,
+            },
+            SlangResearch {
+                content: "糊词".into(),
+                meaning: "猜的".into(),
+                usage: String::new(),
+                example: String::new(),
+                risk: String::new(),
+                sources: vec![],
+                confirmed: false,
+            },
+        ];
+        let applied = apply_research(&mut entries, &results, "t");
+        assert_eq!(applied, 1);
+        let y = &entries[0];
+        assert_eq!(y.meaning, "永远的神");
+        assert_eq!(y.sources, vec!["https://a".to_owned()]);
+        assert_eq!(y.status, "candidate", "转正仍须管理员确认");
+        assert_eq!(y.last_inference_count, 2);
+        let h = &entries[1];
+        assert_eq!(h.meaning, "", "未确认不写释义");
+        assert_eq!(h.last_inference_count, 2, "未确认也记水位防反复研究");
+        // 同档不再到期（缺席未被研究的词条仍到期）。
+        let due = research_due(&entries, &[2, 4, 8]);
+        assert_eq!(due, vec!["id-缺席".to_owned()], "研究过的不再到期");
     }
 }

@@ -63,6 +63,8 @@ fn make_router(home: &std::path::Path) -> Router {
         )),
         update_tx,
         feedback_times: Mutex::new(std::collections::HashMap::new()),
+        slang_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
     });
     build_router(state, "", None)
 }

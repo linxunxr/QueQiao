@@ -461,8 +461,6 @@ struct SlangPipeline {
     windows: std::collections::HashMap<String, Vec<queqiao_core::slang::SlangWindowItem>>,
     /// 每会话上次提取时间（触发冷却）。
     cooldowns: std::collections::HashMap<String, u64>,
-    /// 提取任务串行（Node slangTaskChain：防并发写库）。
-    busy: bool,
     watch: Option<SlangWatch>,
 }
 
@@ -475,10 +473,21 @@ async fn maybe_slang_extract(
     msg: &queqiao_core::action::IncomingMessage,
     now: u64,
     reconnect: &std::sync::Arc<tokio::sync::Notify>,
+    slang_busy: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    let auto_research = slang_cfg.auto_research;
+    let thresholds = slang_cfg.inference_thresholds.clone();
     let Some(learner) = learner else { return };
+    // 串行闸（Node slangTaskChain）：swap 既测又置，竞态安全；不通过即放弃
+    // （本条消息只算喂窗，下一条再触发）。
+    if slang_busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let (prompt, window_len) = {
-        let Ok(mut guard) = pipe.lock() else { return };
+        let Ok(mut guard) = pipe.lock() else {
+            slang_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        };
         // guard 的 Deref 会打散字段级借用精度（windows 与 cooldowns 冲突），
         // 先解引用成 &mut SlangPipeline。
         let p: &mut SlangPipeline = &mut guard;
@@ -494,19 +503,17 @@ async fn maybe_slang_extract(
             return;
         }
         let len = window.len();
-        if p.busy
-            || !queqiao_core::slang::should_extract(
-                slang_cfg.enabled,
-                len,
-                slang_cfg.extract_min_messages,
-                now.saturating_sub(last),
-                slang_cfg.extract_cooldown_ms,
-            )
-        {
+        if !queqiao_core::slang::should_extract(
+            slang_cfg.enabled,
+            len,
+            slang_cfg.extract_min_messages,
+            now.saturating_sub(last),
+            slang_cfg.extract_cooldown_ms,
+        ) {
+            slang_busy.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
         let prompt = queqiao_core::slang::build_extraction_prompt(window);
-        p.busy = true;
         p.cooldowns.insert(msg.key.clone(), now);
         (prompt, len)
     };
@@ -515,17 +522,30 @@ async fn maybe_slang_extract(
         msg.key, slang_cfg.extract_min_messages
     ));
     let pipe = pipe.clone();
+    let slang_busy = slang_busy.clone();
     let learner = learner.clone();
     let key = msg.key.clone();
     let reconnect = reconnect.clone();
     tokio::spawn(async move {
-        run_slang_extraction(&pipe, &learner, &key, prompt, window_len, &reconnect).await;
+        run_slang_extraction(
+            &pipe,
+            &learner,
+            &key,
+            prompt,
+            window_len,
+            &reconnect,
+            auto_research,
+            thresholds,
+            &slang_busy,
+        )
+        .await;
     });
 }
 
 /// 一次提取任务（Node runSlangExtraction）：确保学习会话 → 注册回合观察 →
 /// 投递 → 等回合全文 → 解析候选入库 → 已消费消息滑出窗口。任何失败保留
 /// 窗口（冷却已置，稍后再试）；结束统一释放 busy 与 watch。
+#[allow(clippy::too_many_arguments)]
 async fn run_slang_extraction(
     pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>,
     learner: &std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
@@ -533,6 +553,9 @@ async fn run_slang_extraction(
     prompt: String,
     consumed: usize,
     reconnect: &std::sync::Arc<tokio::sync::Notify>,
+    auto_research: bool,
+    thresholds: Vec<u32>,
+    slang_busy: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     const LEARNER_KEY: &str = "slang-learner";
     // ① 学习会话（preset fail-closed / 404 重建由管理器承担）。
@@ -549,7 +572,7 @@ async fn run_slang_extraction(
         Ok(sid) => sid,
         Err(e) => {
             queqiao::logging::log(&format!("[slang] 学习会话不可用，本次提取跳过：{e}"));
-            release_slang_pipe(pipe);
+            release_slang_pipe(pipe, slang_busy);
             return;
         }
     };
@@ -579,7 +602,7 @@ async fn run_slang_extraction(
     };
     if let Err(e) = delivered {
         queqiao::logging::log(&format!("[slang] 提取 prompt 投递失败（{key}）：{e}"));
-        release_slang_pipe(pipe);
+        release_slang_pipe(pipe, slang_busy);
         return;
     }
     // ④ 等回合全文（120s 超时——学习会话不提问不审批，失败形态即超时/空回合）。
@@ -628,6 +651,43 @@ async fn run_slang_extraction(
                         let cut = consumed.min(w.len());
                         w.drain(0..cut);
                     }
+                    // ⑦ 阈值链式研究（Node inferenceThresholds + autoResearch）：
+                    // 候选 count 命中档位且超水位即接着考究——busy 不释放，串行。
+                    if auto_research {
+                        let due = {
+                            let file =
+                                queqiao::slang_store::slang_file(&queqiao::paths::queqiao_home());
+                            queqiao::slang_store::load(&file)
+                                .map(|entries| {
+                                    queqiao_core::slang::research_due(&entries, &thresholds)
+                                })
+                                .unwrap_or_default()
+                        };
+                        if !due.is_empty() {
+                            let file =
+                                queqiao::slang_store::slang_file(&queqiao::paths::queqiao_home());
+                            let entries = queqiao::slang_store::load(&file).unwrap_or_default();
+                            let refs: Vec<_> =
+                                entries.iter().filter(|e| due.contains(&e.id)).collect();
+                            let prompt = queqiao_core::slang::build_research_prompt(&refs);
+                            queqiao::logging::log(&format!(
+                                "[slang] {} 个候选命中研究阈值（{:?}），链式考究",
+                                refs.len(),
+                                thresholds
+                            ));
+                            run_slang_research(
+                                pipe,
+                                learner,
+                                prompt,
+                                refs.len(),
+                                reconnect,
+                                slang_busy,
+                            )
+                            .await;
+                            // run_slang_research 自带收尾释放，链式到此结束。
+                            return;
+                        }
+                    }
                 }
                 Err(e) => {
                     queqiao::logging::log(&format!("[slang] 提取入库失败（{key}）：{e}"));
@@ -643,15 +703,108 @@ async fn run_slang_extraction(
             ));
         }
     }
-    release_slang_pipe(pipe);
+    release_slang_pipe(pipe, slang_busy);
+}
+
+/// 一次联网研究任务（Node runSlangResearch）：复用学习会话与回合观察机制；
+/// 仅 confirmed=true 的结果写回释义/来源并记水位（status 不动——转正仍须
+/// 管理员确认，RULES 红线）。任何失败保留候选（下次阈值再研究）。
+async fn run_slang_research(
+    pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>,
+    learner: &std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
+    prompt: String,
+    candidate_count: usize,
+    reconnect: &std::sync::Arc<tokio::sync::Notify>,
+    slang_busy: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    const LEARNER_KEY: &str = "slang-learner";
+    let ensure = {
+        let learner = learner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut m = learner.lock().map_err(|e| e.to_string())?;
+            m.ensure_session(LEARNER_KEY)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join：{e}")))
+    };
+    let session_id = match ensure {
+        Ok(sid) => sid,
+        Err(e) => {
+            queqiao::logging::log(&format!("[slang] 研究会话不可用，跳过：{e}"));
+            release_slang_pipe(pipe, slang_busy);
+            return;
+        }
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Ok(mut p) = pipe.lock() {
+        p.watch = Some(SlangWatch {
+            session_id: session_id.clone(),
+            collector: queqiao_dsh::turn::TurnCollector::new(),
+            done: Some(tx),
+        });
+    }
+    reconnect.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let delivered = {
+        let learner = learner.clone();
+        let prompt = prompt.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut m = learner.lock().map_err(|e| e.to_string())?;
+            m.deliver_prompt(LEARNER_KEY, &prompt)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join：{e}")))
+    };
+    if let Err(e) = delivered {
+        queqiao::logging::log(&format!("[slang] 研究 prompt 投递失败：{e}"));
+        release_slang_pipe(pipe, slang_busy);
+        return;
+    }
+    // 联网考究含搜索+抓取，窗口放宽到 180s。
+    match tokio::time::timeout(std::time::Duration::from_secs(180), rx).await {
+        Ok(Ok(turn)) if !turn.text.trim().is_empty() => {
+            let results = queqiao_core::slang::parse_research_json(&turn.text);
+            let home = queqiao::paths::queqiao_home();
+            let stored = tokio::task::spawn_blocking(move || {
+                let file = queqiao::slang_store::slang_file(&home);
+                let mut entries = queqiao::slang_store::load(&file)?;
+                let now_iso = queqiao::logging::local_timestamp().unwrap_or_default();
+                let applied = queqiao_core::slang::apply_research(&mut entries, &results, &now_iso);
+                queqiao::slang_store::save(&file, entries)?;
+                Ok::<usize, String>(applied)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("join：{e}")));
+            match stored {
+                Ok(applied) => {
+                    queqiao::logging::log(&format!(
+                        "[slang] 研究完成：{candidate_count} 个候选考究，{applied} 条写回释义（待管理员确认）"
+                    ));
+                }
+                Err(e) => {
+                    queqiao::logging::log(&format!("[slang] 研究入库失败：{e}"));
+                }
+            }
+        }
+        Ok(_) => {
+            queqiao::logging::log("[slang] 研究回合为空，保留候选稍后再试");
+        }
+        Err(_) => {
+            queqiao::logging::log("[slang] 研究回合超时 180s，保留候选稍后再试");
+        }
+    }
+    release_slang_pipe(pipe, slang_busy);
 }
 
 /// 收尾：清回合观察 + 释放串行闸（任何路径都会走到这里或提前调用）。
-fn release_slang_pipe(pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>) {
+fn release_slang_pipe(
+    pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>,
+    slang_busy: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     if let Ok(mut p) = pipe.lock() {
         p.watch = None;
-        p.busy = false;
     }
+    slang_busy.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 async fn run(setup: Setup) {
@@ -665,6 +818,10 @@ async fn run(setup: Setup) {
     // ── 黑话自动提取管线（Node slangWindows + slangTaskChain 语义）──────────
     // 共享给主循环（喂窗口/收回合事件）与提取任务；busy 串行防并发写库。
     let slang_pipe = std::sync::Arc::new(std::sync::Mutex::new(SlangPipeline::default()));
+    let slang_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // 手动送研究（控制台端点 → 主循环派发）通道。
+    let (slang_research_tx, mut slang_research_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
         .expect("OneBot WS 连接失败（token 失效？重跑或检查 per-account 配置）");
@@ -937,6 +1094,8 @@ async fn run(setup: Setup) {
             dsh: dsh_arc.clone(),
             sessions: sessions_arc.clone(),
             feedback_times: std::sync::Mutex::new(std::collections::HashMap::new()),
+            slang_busy: slang_busy.clone(),
+            slang_research_tx: slang_research_tx.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
@@ -1073,6 +1232,7 @@ async fn run(setup: Setup) {
                         msg,
                         now,
                         &reconnect,
+                        &slang_busy,
                     )
                     .await;
                 }
@@ -1145,6 +1305,79 @@ async fn run(setup: Setup) {
                         Err(e) => queqiao::logging::log(&format!("[update] 下载/准备失败（本次跳过，下次启动重试）：{e}")),
                     }
                 }
+            }
+            maybe_research = slang_research_rx.recv() => {
+                // 控制台「送研究」：候选批量送学习会话联网考究（ids 空 = 全部候选）。
+                let Some(ids) = maybe_research else { continue };
+                if slang_busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    queqiao::logging::log("[slang] 提取/研究进行中，跳过手动研究请求");
+                    continue;
+                }
+                let home = queqiao::paths::queqiao_home();
+                let picked = tokio::task::spawn_blocking(move || {
+                    let file = queqiao::slang_store::slang_file(&home);
+                    queqiao::slang_store::load(&file).map(|entries| {
+                        entries
+                            .iter()
+                            .filter(|e| {
+                                e.status == "candidate"
+                                    && (ids.is_empty() || ids.contains(&e.id))
+                            })
+                            .map(|e| e.id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("join：{e}")));
+                let targets = match picked {
+                    Ok(t) if !t.is_empty() => t,
+                    Ok(_) => {
+                        queqiao::logging::log("[slang] 没有可研究的候选词条");
+                        slang_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                        continue;
+                    }
+                    Err(e) => {
+                        queqiao::logging::log(&format!("[slang] 词库读取失败：{e}"));
+                        slang_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                        continue;
+                    }
+                };
+                let home = queqiao::paths::queqiao_home();
+                let count = targets.len();
+                let prompt = tokio::task::spawn_blocking(move || {
+                    let file = queqiao::slang_store::slang_file(&home);
+                    let entries = queqiao::slang_store::load(&file).unwrap_or_default();
+                    let refs: Vec<_> = entries
+                        .iter()
+                        .filter(|e| targets.contains(&e.id))
+                        .collect();
+                    queqiao_core::slang::build_research_prompt(&refs)
+                })
+                .await
+                .unwrap_or_default();
+                queqiao::logging::log(&format!(
+                    "[slang] 控制台手动送研究：{count} 个候选"
+                ));
+                let pipe = slang_pipe.clone();
+                let busy = slang_busy.clone();
+                let learner = slang_learner.clone();
+                let reconnect_arc = reconnect.clone();
+                tokio::spawn(async move {
+                    let Some(learner) = learner else {
+                        queqiao::logging::log("[slang] 学习会话不可用，研究未执行");
+                        busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    };
+                    run_slang_research(
+                        &pipe,
+                        &learner,
+                        prompt,
+                        count,
+                        &reconnect_arc,
+                        &busy,
+                    )
+                    .await;
+                });
             }
             _ = timeout => {
                 let now = now_ms();

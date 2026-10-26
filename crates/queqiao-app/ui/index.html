@@ -301,7 +301,7 @@
 <main id="page-slang" style="display:none">
   <section>
     <h2>黑话词库</h2>
-    <div class="hint" style="margin-bottom:10px">群聊黑话/网络用语库：AI 可用 qq_slang_submit 提交候选，也可在此手动添加；确认/拒绝/编辑后，<b>已确认且有含义</b>的词条注入 AI 聊天上下文（按出现次数排序，上限见参数）。自动提取已启用：每会话攒够消息后自动交给独立学习会话提取候选（冷却 5 分钟）；联网研究管线未迁移，候选含义可手动补或由 AI 提交时带上。</div>
+    <div class="hint" style="margin-bottom:10px">群聊黑话/网络用语库：AI 可用 qq_slang_submit 提交候选，也可在此手动添加；确认/拒绝/编辑后，<b>已确认且有含义</b>的词条注入 AI 聊天上下文（按出现次数排序，上限见参数）。自动提取已启用：每会话攒够消息后自动交给独立学习会话提取候选（冷却 5 分钟）；联网研究按阈值（出现 2/4/8 次）自动触发，也可在候选面板手动送研究——考究确认的释义写回候选，转正仍需你在此确认。</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="slangEnabled"> 启用注入</label>
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin:0">注入上限 <input type="number" id="slangInjectMax" min="1" max="30" style="width:60px"></label>
@@ -924,7 +924,7 @@ function renderSlangToolbar() {
   const common = '<label class="hint" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" onchange="document.querySelectorAll(\'#slangList input[data-sid]\').forEach(i=>i.checked=this.checked)"> 全选</label>' +
     '<input type="text" value="' + esc(slangQuery) + '" placeholder="搜索词条/含义/用法/示例" style="flex:1;min-width:160px" oninput="slangQuery=this.value;renderSlangList()">';
   let btns = '';
-  if (slangCur === 'candidate') btns = '<button class="ghost mini" onclick="slangBatch(\'batch-confirm\')">批量确认（有含义）</button><button class="ghost mini" onclick="slangBatch(\'batch-reject\')">批量拒绝</button>';
+  if (slangCur === 'candidate') btns = '<button class="ghost mini" onclick="slangBatch(\'batch-confirm\')">批量确认（有含义）</button><button class="ghost mini" onclick="slangBatch(\'batch-reject\')">批量拒绝</button><button class="ghost mini" onclick="slangResearch(false)">送研究（选中）</button><button class="ghost mini" onclick="slangResearch(true)">研究全部候选</button>';
   if (slangCur === 'confirmed') btns = '<button class="ghost mini" onclick="slangBatch(\'batch-reject\')">批量下架（拒绝）</button>';
   if (slangCur === 'rejected') btns = '<button class="ghost mini" onclick="slangRestore()">恢复为候选</button>';
   btns += '<button class="ghost mini" onclick="slangBatch(\'batch-delete\')">删除选中</button>';
@@ -960,6 +960,15 @@ async function slangCall(path, method, body) {
   const res = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(res.error || ('HTTP ' + r.status));
   return res.value || {};
+}
+
+async function slangResearch(all) {
+  const ids = all ? [] : slangSelectedIds();
+  if (!all && !ids.length) { toast('先勾选要研究的词条（或用「研究全部候选」）', false); return; }
+  try {
+    await slangCall('/api/slang/research', 'POST', ids.length ? { ids } : {});
+    toast('已派发研究任务（联网考究需 1~3 分钟，释义写回后仍需你确认转正）', true);
+  } catch (e) { toast('派发失败：' + e.message, false); }
 }
 
 async function slangBatch(action) {
