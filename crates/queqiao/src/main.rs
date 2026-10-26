@@ -305,6 +305,10 @@ struct Setup {
     dsh: std::sync::Arc<std::sync::Mutex<DshClient<ReqwestTransport>>>,
     sessions: std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
     social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+    /// 黑话学习会话管理器（独立映射文件/工作区/preset；加载失败为 None——
+    /// 仅停用自动提取，不拦桥启动）。
+    slang_learner:
+        Option<std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>>,
 }
 
 fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
@@ -400,6 +404,24 @@ fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
             m.set_dsh_model(&d.provider, &d.model, &d.reasoning_effort);
         }
     }
+    // 黑话学习会话（Node ensureSlangLearnerSession 同构）：独立映射文件 +
+    // 独立 agent 目录 + learner preset（preset fail-closed 由管理器承担）。
+    let home = queqiao::paths::queqiao_home();
+    let slang_learner = match queqiao::session_manager::SessionManager::new(
+        dsh.clone(),
+        &home.join("state").join("slang-session.json"),
+        &cfg.slang.learner_preset,
+        &cfg.slang.workspace_title,
+        &home.join("state").join("slang-agent").display().to_string(),
+    ) {
+        Ok(m) => Some(std::sync::Arc::new(std::sync::Mutex::new(m))),
+        Err(e) => {
+            queqiao::logging::log(&format!(
+                "[slang] 学习会话管理器初始化失败，自动提取停用：{e}"
+            ));
+            None
+        }
+    };
 
     let social = std::sync::Arc::new(std::sync::Mutex::new(
         queqiao::social_store::SocialStore::load(
@@ -420,7 +442,216 @@ fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
         dsh,
         sessions,
         social,
+        slang_learner,
     })
+}
+
+// ── 黑话自动提取管线（Node bridge.js slang 段的编排面）──────────────────────
+
+/// 在途学习回合的观察者：mux 事件喂 collector，turn 终结时把全文交回提取任务。
+struct SlangWatch {
+    session_id: String,
+    collector: queqiao_dsh::turn::TurnCollector,
+    done: Option<tokio::sync::oneshot::Sender<queqiao_dsh::turn::TurnEnd>>,
+}
+
+#[derive(Default)]
+struct SlangPipeline {
+    /// 每会话滚动窗口（内存态——Node 同款，重启即清）。
+    windows: std::collections::HashMap<String, Vec<queqiao_core::slang::SlangWindowItem>>,
+    /// 每会话上次提取时间（触发冷却）。
+    cooldowns: std::collections::HashMap<String, u64>,
+    /// 提取任务串行（Node slangTaskChain：防并发写库）。
+    busy: bool,
+    watch: Option<SlangWatch>,
+}
+
+/// 喂窗口 + 触发判定 + 派发提取任务（Node feedSlangWindow /
+/// maybeQueueSlangExtraction；冷却在派发时即置——Node 同款，失败也不连环重试）。
+async fn maybe_slang_extract(
+    pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>,
+    learner: &Option<std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>>,
+    slang_cfg: &queqiao::config::SlangConfig,
+    msg: &queqiao_core::action::IncomingMessage,
+    now: u64,
+    reconnect: &std::sync::Arc<tokio::sync::Notify>,
+) {
+    let Some(learner) = learner else { return };
+    let (prompt, window_len) = {
+        let Ok(mut guard) = pipe.lock() else { return };
+        // guard 的 Deref 会打散字段级借用精度（windows 与 cooldowns 冲突），
+        // 先解引用成 &mut SlangPipeline。
+        let p: &mut SlangPipeline = &mut guard;
+        let last = p.cooldowns.get(&msg.key).copied().unwrap_or(0);
+        let window = p.windows.entry(msg.key.clone()).or_default();
+        if !queqiao_core::slang::feed_window(
+            window,
+            &msg.sender,
+            &msg.text,
+            msg.time_ms,
+            msg.is_self,
+        ) {
+            return;
+        }
+        let len = window.len();
+        if p.busy
+            || !queqiao_core::slang::should_extract(
+                slang_cfg.enabled,
+                len,
+                slang_cfg.extract_min_messages,
+                now.saturating_sub(last),
+                slang_cfg.extract_cooldown_ms,
+            )
+        {
+            return;
+        }
+        let prompt = queqiao_core::slang::build_extraction_prompt(window);
+        p.busy = true;
+        p.cooldowns.insert(msg.key.clone(), now);
+        (prompt, len)
+    };
+    queqiao::logging::log(&format!(
+        "[slang] {} 攒够 {window_len} 条（≥{}），派发提取任务",
+        msg.key, slang_cfg.extract_min_messages
+    ));
+    let pipe = pipe.clone();
+    let learner = learner.clone();
+    let key = msg.key.clone();
+    let reconnect = reconnect.clone();
+    tokio::spawn(async move {
+        run_slang_extraction(&pipe, &learner, &key, prompt, window_len, &reconnect).await;
+    });
+}
+
+/// 一次提取任务（Node runSlangExtraction）：确保学习会话 → 注册回合观察 →
+/// 投递 → 等回合全文 → 解析候选入库 → 已消费消息滑出窗口。任何失败保留
+/// 窗口（冷却已置，稍后再试）；结束统一释放 busy 与 watch。
+async fn run_slang_extraction(
+    pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>,
+    learner: &std::sync::Arc<std::sync::Mutex<queqiao::session_manager::SessionManager>>,
+    key: &str,
+    prompt: String,
+    consumed: usize,
+    reconnect: &std::sync::Arc<tokio::sync::Notify>,
+) {
+    const LEARNER_KEY: &str = "slang-learner";
+    // ① 学习会话（preset fail-closed / 404 重建由管理器承担）。
+    let ensure = {
+        let learner = learner.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut m = learner.lock().map_err(|e| e.to_string())?;
+            m.ensure_session(LEARNER_KEY)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join：{e}")))
+    };
+    let session_id = match ensure {
+        Ok(sid) => sid,
+        Err(e) => {
+            queqiao::logging::log(&format!("[slang] 学习会话不可用，本次提取跳过：{e}"));
+            release_slang_pipe(pipe);
+            return;
+        }
+    };
+    // ② 注册回合观察（必须先于投递——turn/start 丢了文本收不齐）。
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if let Ok(mut p) = pipe.lock() {
+        p.watch = Some(SlangWatch {
+            session_id: session_id.clone(),
+            collector: queqiao_dsh::turn::TurnCollector::new(),
+            done: Some(tx),
+        });
+    }
+    // ②′ mux 重连重放 follow（学习会话可能是新映射或 404 重建后的新 id）；
+    // 等 1.5s 让跟随建立后再投递——否则 prompt 触发的回合事件先于 follow 丢失。
+    reconnect.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // ③ 投递提取 prompt。
+    let delivered = {
+        let learner = learner.clone();
+        let prompt = prompt.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut m = learner.lock().map_err(|e| e.to_string())?;
+            m.deliver_prompt(LEARNER_KEY, &prompt)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("join：{e}")))
+    };
+    if let Err(e) = delivered {
+        queqiao::logging::log(&format!("[slang] 提取 prompt 投递失败（{key}）：{e}"));
+        release_slang_pipe(pipe);
+        return;
+    }
+    // ④ 等回合全文（120s 超时——学习会话不提问不审批，失败形态即超时/空回合）。
+    match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+        Ok(Ok(turn)) if !turn.text.trim().is_empty() => {
+            let cands = queqiao_core::slang::parse_extraction_json(&turn.text);
+            // ⑤ 入库：证据取共享窗口前 consumed 条（本次语料——提取期间可能
+            // 又喂了新消息，不参与本次证据）。
+            let evidence_window: Vec<_> = {
+                match pipe.lock() {
+                    Ok(p) => p
+                        .windows
+                        .get(key)
+                        .map(|w| w.iter().take(consumed).cloned().collect())
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            };
+            let home = queqiao::paths::queqiao_home();
+            let key_owned = key.to_owned();
+            let stored = tokio::task::spawn_blocking(move || {
+                let file = queqiao::slang_store::slang_file(&home);
+                let mut entries = queqiao::slang_store::load(&file)?;
+                let now_iso = queqiao::logging::local_timestamp().unwrap_or_default();
+                let (added, updated) = queqiao_core::slang::upsert_candidates(
+                    &mut entries,
+                    &key_owned,
+                    &evidence_window,
+                    &cands,
+                    &now_iso,
+                );
+                queqiao::slang_store::save(&file, entries)?;
+                Ok::<(usize, usize), String>((added, updated))
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("join：{e}")));
+            match stored {
+                Ok((added, updated)) => {
+                    queqiao::logging::log(&format!(
+                        "[slang] 提取完成（{key}）：新增 {added} 条候选，更新 {updated} 条"
+                    ));
+                    // ⑥ 已消费消息滑出窗口（Node win.slice(consumed)）。
+                    if let Ok(mut p) = pipe.lock()
+                        && let Some(w) = p.windows.get_mut(key)
+                    {
+                        let cut = consumed.min(w.len());
+                        w.drain(0..cut);
+                    }
+                }
+                Err(e) => {
+                    queqiao::logging::log(&format!("[slang] 提取入库失败（{key}）：{e}"));
+                }
+            }
+        }
+        Ok(_) => {
+            queqiao::logging::log(&format!("[slang] 提取回合为空（{key}），保留窗口稍后再试"));
+        }
+        Err(_) => {
+            queqiao::logging::log(&format!(
+                "[slang] 提取回合超时 120s（{key}），保留窗口稍后再试"
+            ));
+        }
+    }
+    release_slang_pipe(pipe);
+}
+
+/// 收尾：清回合观察 + 释放串行闸（任何路径都会走到这里或提前调用）。
+fn release_slang_pipe(pipe: &std::sync::Arc<std::sync::Mutex<SlangPipeline>>) {
+    if let Ok(mut p) = pipe.lock() {
+        p.watch = None;
+        p.busy = false;
+    }
 }
 
 async fn run(setup: Setup) {
@@ -430,6 +661,10 @@ async fn run(setup: Setup) {
     let sessions_arc = setup.sessions;
     let onebot_http = setup.onebot_http;
     let social_arc = setup.social;
+    let slang_learner = setup.slang_learner;
+    // ── 黑话自动提取管线（Node slangWindows + slangTaskChain 语义）──────────
+    // 共享给主循环（喂窗口/收回合事件）与提取任务；busy 串行防并发写库。
+    let slang_pipe = std::sync::Arc::new(std::sync::Mutex::new(SlangPipeline::default()));
     let stream = EventStream::connect(&ws_url, &setup.ws_token)
         .await
         .expect("OneBot WS 连接失败（token 失效？重跑或检查 per-account 配置）");
@@ -604,6 +839,7 @@ async fn run(setup: Setup) {
     {
         let dsh = dsh_arc.clone();
         let sessions = sessions_arc.clone();
+        let slang_learner_mux = slang_learner.clone();
         let env_tx = mux_env_tx.clone();
         let reconnect = reconnect.clone();
         // DSH 基址重探测的起点（config 值）；DSH 重启端口漂移时 mux 失败
@@ -647,10 +883,15 @@ async fn run(setup: Setup) {
                         continue;
                     }
                 };
-                let desired: HashSet<String> = sessions
+                let mut desired: HashSet<String> = sessions
                     .lock()
                     .map(|m| m.mappings().values().cloned().collect())
                     .unwrap_or_default();
+                // 黑话学习会话（独立管理器）一并 follow——否则其回合事件永远
+                // 收不到，提取观察必超时。
+                if let Some(learner) = slang_learner_mux.as_ref().and_then(|l| l.lock().ok()) {
+                    desired.extend(learner.mappings().values().cloned());
+                }
                 queqiao::logging::log(&format!(
                     "DSH mux 已连接 {base}（follow {} 个会话）",
                     desired.len()
@@ -822,6 +1063,19 @@ async fn run(setup: Setup) {
                         queqiao::logging::log(&format!("动态注册会话 {k}（allowAllWhenEmpty）"));
                     }
                 }
+                // 黑话窗口喂入与提取触发（Node feedSlangWindow +
+                // maybeQueueSlangExtraction；群友普通消息才进窗口）。
+                if let queqiao_core::action::BridgeEvent::MessageArrived(msg) = &event {
+                    maybe_slang_extract(
+                        &slang_pipe,
+                        &slang_learner,
+                        &cfg.slang,
+                        msg,
+                        now,
+                        &reconnect,
+                    )
+                    .await;
+                }
                 let actions = orchestrator.on_event(event, now, now_local(), &mut rng);
                 executor.execute(actions, now).await;
                 let tick_actions = orchestrator.advance(now_ms(), now_local(), &mut rng);
@@ -841,6 +1095,19 @@ async fn run(setup: Setup) {
                         event.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
                         session_id
                     ));
+                    // 黑话学习会话回合事件 → 在册观察者收集（在桥接转换前；
+                    // 学习会话无 QQ 映射，正常链路本会丢弃）。turn/start 必须先
+                    // 于投递注册观察，否则回合文本收不齐。
+                    if let Ok(mut sp) = slang_pipe.lock()
+                        && let Some(w) = sp
+                            .watch
+                            .as_mut()
+                            .filter(|w| &w.session_id == session_id)
+                        && let Some(turn_end) = w.collector.push(event)
+                        && let Some(done) = w.done.take()
+                    {
+                        let _ = done.send(turn_end);
+                    }
                 }
                 if let Some(event) = maybe_envelope
                     .and_then(|envelope| bridge_mux_envelope(&executor.sessions, envelope))

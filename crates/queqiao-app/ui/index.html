@@ -301,7 +301,7 @@
 <main id="page-slang" style="display:none">
   <section>
     <h2>黑话词库</h2>
-    <div class="hint" style="margin-bottom:10px">群聊黑话/网络用语库：AI 可用 qq_slang_submit 提交候选，也可在此手动添加；确认/拒绝/编辑后，<b>已确认且有含义</b>的词条注入 AI 聊天上下文（按出现次数排序，上限见参数）。自动提取与联网研究管线未迁移，候选暂无自动来源。</div>
+    <div class="hint" style="margin-bottom:10px">群聊黑话/网络用语库：AI 可用 qq_slang_submit 提交候选，也可在此手动添加；确认/拒绝/编辑后，<b>已确认且有含义</b>的词条注入 AI 聊天上下文（按出现次数排序，上限见参数）。自动提取已启用：每会话攒够消息后自动交给独立学习会话提取候选（冷却 5 分钟）；联网研究管线未迁移，候选含义可手动补或由 AI 提交时带上。</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="slangEnabled"> 启用注入</label>
       <label class="hint" style="display:flex;gap:6px;align-items:center;margin:0">注入上限 <input type="number" id="slangInjectMax" min="1" max="30" style="width:60px"></label>

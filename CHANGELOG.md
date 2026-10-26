@@ -17,6 +17,7 @@
 - **AI 反馈查看与闭环（总览页折叠区）**：此前 AI 用 qq_report_feedback 上报的问题只落文件、无处可看（闭环断裂）；提交侧补齐 Node 全语义（level 三档/限频 5 分 20 时/maxLength 截断/入库前敏感打码），控制台新增读/清端点与「AI 反馈」折叠区。
 - **主动冒泡（proactive）接线**：core 有定时器与处理器、config 有整套参数，但从未有人调度——AI 永不主动开话题。现启动全量排程 + 触发后自重排（检查环常驻），判定改配置驱动（空闲阈值/概率/间隔），暂停期间不自主冒泡。
 - **收藏表情看图**：qq_get_sticker_image 此前只回 URL（QQ preset 的模型看不了），现返回图片本体转视觉 image 块（魔数判格式、失败降级元数据）。
+- **黑话自动提取管线（第二期）**：候选从此有自动来源——每会话滚动窗口攒群友普通消息（上限 80 条，/命令与自己发言不入窗），攒够 extractMinMessages（默认 10）且过冷却（默认 5 分钟）即派发独立 DSH 学习会话（learner preset、独立映射文件/工作区，preset fail-closed 与 404 重建由会话管理器承担）提取候选；回合全文经 mux 回流收集（观察者先于投递注册、mux follow 并入学习会话映射、投递前通知重连等跟随建立），解析用 Node 同款括号配平抠数组（防解释文字+[1] 干扰静默丢结果），同词条 count+1 合并去重证据不覆盖已有释义；busy 串行防并发写库，失败保留窗口稍后再试。extractMinMessages/cooldown/learnerPreset/workspaceTitle 四个配置从死字段转正。
 - **黑话词库审核面（控制台第三页「黑话」）**：此前 AI 用 qq_slang_submit 提交的候选词条永远停在 candidate、无任何转正途径（闭环断裂的核心）；新增 /api/slang 管理端点八件（列表/手动添加/编辑/批量确认/批量拒绝/单条捷径/批量删除/清空，agent token 一律 403），core 补批量状态流转纯函数（确认须 candidate 且有含义，拒绝可下架已确认）；UI 三态页签（候选/已确认/已拒绝）+ 批量操作 + 搜索 + 手动添加 + 编辑面板 + 注入参数（enabled/注入上限走 config 深度合并）。进程内集成测试（build_router 抽取 + tower oneshot）九步全链 + Playwright 浏览器全流程验证；顺手修掉黑话页初始化的 TDZ 隐患（showTab 先于 bridgeOnline 声明执行）。
 
 ### 修复

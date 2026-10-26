@@ -263,9 +263,9 @@ impl Default for SecurityConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct SlangConfig {
     pub enabled: bool,
-    // 注意：以下学习管线参数（extractMinMessages/cooldown/inferenceThresholds/
-    // learnerPreset/workspaceTitle）在黑话学习会话迁移前**无消费方**——当前
-    // 仅 enabled 与 injectMax 生效（注入链）。
+    // 自动提取管线参数：extractMinMessages/extractCooldownMs/learnerPreset/
+    // workspaceTitle 由主循环消费（滚动窗口攒消息 → DSH 学习会话提取候选）；
+    // inferenceThresholds/autoResearch 属联网研究管线，仍未消费。
     pub extract_min_messages: usize,
     pub extract_cooldown_ms: u64,
     pub inference_thresholds: Vec<u32>,
