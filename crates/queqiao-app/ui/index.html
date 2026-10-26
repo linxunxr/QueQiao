@@ -806,10 +806,14 @@ loadCatalog();
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
   if (!document.hidden) {
     const st = await refreshComponents();
+    // 标志置位必须先于翻转分支：refreshDiary 等低频面板内部以 bridgeOnline
+    // 门禁渲染，晚置位会让它们在"桥刚上线"时渲染成"桥未运行"，而它们不在
+    // 每轮刷新清单里——错误状态会一直卡到下次桥重启（又踩同坑）。7369cb3 引入。
+    const wasOffline = !bridgeOnline;
+    bridgeOnline = st.bridge;
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); }
-    bridgeOnline = st.bridge;
+    if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); }
     refreshPaused();
     refreshSessions();
     refreshCost();
@@ -1077,7 +1081,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { if (st.bridge && !bridgeOnline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); } bridgeOnline = st.bridge; refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); } refreshSessions(); }); }
 });
 </script>
 </body>
