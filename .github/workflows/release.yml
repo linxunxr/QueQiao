@@ -79,9 +79,31 @@ jobs:
           '@ | Out-File "$Stage/INSTALL-NOTES.txt" -Encoding utf8
           Compress-Archive -Path "$Stage/*" -DestinationPath "queqiao-$Tag-win64.zip" -Force
           Get-Item "queqiao-$Tag-win64.zip"
+          # 更新日志：从 CHANGELOG.md 提取本版本段落作为 Release body——更新
+          # 检查（桥/客户端）读的就是 Release body，为空则用户更新时看不到
+          # 更新了什么（v0.4.x 全部 Release body 为空的根因即此步骤曾缺失）。
+          $Ver = $Tag.TrimStart('v')
+          $Lines = Get-Content CHANGELOG.md -Encoding UTF8
+          $Start = -1
+          for ($i = 0; $i -lt $Lines.Count; $i++) {
+            if ($Lines[$i] -match ('^## \[' + [regex]::Escape($Ver) + '\]')) { $Start = $i; break }
+          }
+          if ($Start -ge 0) {
+            $End = $Lines.Count
+            for ($i = $Start + 1; $i -lt $Lines.Count; $i++) {
+              if ($Lines[$i] -match '^## \[') { $End = $i; break }
+            }
+            ($Lines[$Start..($End - 1)] -join [Environment]::NewLine) |
+              Out-File release-body.md -Encoding utf8
+            Write-Output ("release body: " + ($End - $Start) + " 行（" + $Ver + " 段）")
+          } else {
+            Write-Output ("警告：CHANGELOG.md 未找到 [" + $Ver + "] 段，Release body 留空")
+          }
 
       - name: 上传到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: queqiao-*-win64.zip
+          # 更新日志正文（组包步骤生成；文件不存在时 action 会忽略 body_path）。
+          body_path: release-body.md

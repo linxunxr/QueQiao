@@ -23,6 +23,7 @@
 
 ### 修复
 
+- **更新面板恒无更新日志（v0.1.0 起全部版本）**：release 工作流上传产物时从未给 Release 写 body，更新检查（桥/客户端）读到的发布说明恒为空串——面板只剩版本号和日期。组包步骤现从 CHANGELOG.md 提取本版本段落（新增/修复明细）写入 release-body.md 并随上传带上；下次发版起生效，历史 Release 的 body 需另行补写。
 - **发送链敏感审计缺失（安全）**：v2 工具发送此前只有白名单+频率两道闸，模型被诱导可把本机路径/凭据特征发进群；现移植 Node SENSITIVE_RE（命中即 403 整条拦截）+ 已知 agent token 出站打码，正则与 Node 原版 21 用例对拍一致。
 - **死配置接线与误导默认值**：deny 黑名单/allowAllWhenEmpty 此前全库无消费（现统一准入判定 + allowAllWhenEmpty 动态注册会话）；pricing.models 自定义价目表现在生效（换中转模型费用折算不再走兜底价）；连发间隔改吃 send 节配置（长间隔概率/区间/maxGapMs，此前硬编码 600-1500ms）；voice.asrEnabled/autoReadback 未实现改默认关；slang 学习参数等未消费字段补注释标明。
 
