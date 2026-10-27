@@ -104,7 +104,7 @@ jobs:
         shell: pwsh
         run: |
           # Chromium 官方快照（Windows x64）；钉死版本，桥侧按资产名前缀识别。
-          $Position = "1457500"  # 2025-10 附近的稳定快照；可按需升级
+          $Position = "1710741"  # npmmirror 实测存在的最新快照（2026-10 验证）
           $Url = "https://storage.googleapis.com/chromium-browser-snapshots/Win_x64/$Position/chrome-win.zip"
           try {
             Invoke-WebRequest -Uri $Url -OutFile chromium-raw.zip -MaximumRedirection 5
