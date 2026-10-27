@@ -684,3 +684,214 @@ mod tests {
         assert!(!js.contains("fetch("), "快照脚本只读 DOM，无网络/执行面");
     }
 }
+
+// ── 账号绑定（站点注册表 + bind/bind_status/unbind）─────────────────────────
+
+/// 绑定站点注册表条目：加站点 = 加一条配置（域名/登录页/会话 cookie 键/
+/// 登录按钮点击脚本/昵称刮取脚本），不写新代码。
+pub struct SiteDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// CDP Storage.clearDataForOrigin 用的 origin（协议+域名）。
+    pub origin: &'static str,
+    /// 登录落地页（小黑盒无独立登录页——首页 + 自动点开登录弹窗）。
+    pub login_url: &'static str,
+    /// 打开登录页后注入的内置脚本（点开登录弹窗；不给模型任意 JS 的边界
+    /// 内，这是注册表里的静态脚本）。
+    pub login_click_js: &'static str,
+    /// 任一存在且非空即视为已登录的会话 cookie 名（pkey 是小黑盒 Web/App
+    /// 共用的会话凭据，xhh_auto 抓包同源）。
+    pub session_cookie_any: &'static [&'static str],
+    /// 登录后刮昵称的内置脚本（localStorage 常见用户缓存 + DOM 兜底；
+    /// 刮不到返回空——不阻塞登录态判定）。
+    pub nickname_js: &'static str,
+}
+
+pub const SITES: &[SiteDef] = &[SiteDef {
+    id: "xiaoheihe",
+    name: "小黑盒",
+    origin: "https://www.xiaoheihe.cn",
+    login_url: "https://www.xiaoheihe.cn",
+    login_click_js: r"(() => { document.querySelector('.login-btn')?.click(); return 'ok'; })()",
+    session_cookie_any: &["pkey", "heybox_uid"],
+    nickname_js: r#"(() => {
+  for (const k of Object.keys(localStorage)) {
+    if (!/user|account|profile|self/i.test(k)) continue;
+    try {
+      const v = JSON.parse(localStorage[k]);
+      const nick = v.nickname || v.nick_name || v.username
+        || (v.user && (v.user.nickname || v.user.username))
+        || (v.data && (v.data.nickname || v.data.username));
+      if (nick) return String(nick);
+    } catch {}
+  }
+  const el = document.querySelector('[class*="avatar"],[class*="user"]');
+  const img = el && el.querySelector && el.querySelector('img');
+  if (img && img.alt) return img.alt;
+  return '';
+})()"#,
+}];
+
+pub fn find_site(id: &str) -> Option<&'static SiteDef> {
+    SITES.iter().find(|s| s.id == id)
+}
+
+/// 登录态判定（纯函数）：任一会话 cookie 名存在且值非空。
+pub fn cookies_indicate_login(cookies: &[(String, String)], keys: &[&str]) -> bool {
+    cookies
+        .iter()
+        .any(|(name, value)| !value.is_empty() && keys.iter().any(|k| k.eq_ignore_ascii_case(name)))
+}
+
+impl Browser {
+    /// 绑定流程：强制有头 → 登录落地页 → 点开登录弹窗 → 窗口前置。
+    pub async fn bind(&self, cfg: &BrowserConfig, site: &SiteDef) -> Result<String, String> {
+        self.ensure(cfg, true).await?;
+        let guard = self.session.lock().await;
+        let s = guard.as_ref().ok_or("浏览器会话缺失")?;
+        s.ws.call("Page.navigate", json!({ "url": site.login_url }))
+            .await?;
+        let _ = wait_ready(&s.ws, 15).await;
+        let _ = s.ws.evaluate(site.login_click_js).await;
+        let _ = s.ws.call("Page.bringToFront", json!({})).await;
+        drop(guard);
+        if let Some(s) = self.session.lock().await.as_mut() {
+            s.last_used = std::time::Instant::now();
+        }
+        Ok(format!(
+            "已打开 {} 登录窗口（有头模式），请在窗口中完成登录（扫码/验证码）；登录成功后此处状态自动变绿",
+            site.name
+        ))
+    }
+
+    /// 登录态查询（不启动浏览器——浏览器没跑时返回 running:false；轮询场景
+    /// 浏览器必然在跑，空转时不拉起进程）。scrape=true 时已登录则导航到
+    /// 站点刮一次昵称（仅在绑定确认时调一次，轮询别带）。
+    pub async fn bind_status(&self, _cfg: &BrowserConfig, site: &SiteDef, scrape: bool) -> Value {
+        let mut out = json!({ "site": site.id, "name": site.name });
+        let running = self.session.lock().await.is_some();
+        out["running"] = json!(running);
+        if !running {
+            out["loggedIn"] = json!(false);
+            out["hint"] = json!("浏览器未运行——点「绑定/登录」拉起登录窗口");
+            return out;
+        }
+        let guard = self.session.lock().await;
+        let Some(s) = guard.as_ref() else {
+            out["loggedIn"] = json!(false);
+            return out;
+        };
+        let cookies = match s.ws.call("Storage.getCookies", json!({})).await {
+            Ok(v) => v
+                .get("cookies")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            Some((
+                                c.get("name")?.as_str()?.to_owned(),
+                                c.get("value")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            Err(e) => {
+                out["error"] = json!(e);
+                Vec::new()
+            }
+        };
+        drop(guard);
+        let logged_in = cookies_indicate_login(&cookies, site.session_cookie_any);
+        out["loggedIn"] = json!(logged_in);
+        if logged_in
+            && scrape
+            && let Some(s) = self.session.lock().await.as_ref()
+            && let Ok(url) = s.ws.evaluate("location.href").await
+        {
+            let on_site = url.starts_with(site.origin);
+            if !on_site {
+                let _ =
+                    s.ws.call("Page.navigate", json!({ "url": site.origin }))
+                        .await;
+                let _ = wait_ready(&s.ws, 10).await;
+            }
+            if let Ok(nick) = s.ws.evaluate(site.nickname_js).await
+                && !nick.is_empty()
+            {
+                out["nickname"] = json!(nick);
+            }
+        } else {
+            out["hint"] = json!("未检测到会话 cookie——未登录或已失效，点「绑定/登录」重新扫码");
+        }
+        out
+    }
+
+    /// 解绑：按 origin 清 cookie + localStorage（不碰 profile 里其他站点）。
+    /// 浏览器没跑时以当前显示模式拉起（一次性操作，可接受）。
+    pub async fn unbind(&self, cfg: &BrowserConfig, site: &SiteDef) -> Result<String, String> {
+        self.ensure(cfg, false).await?;
+        let guard = self.session.lock().await;
+        let s = guard.as_ref().ok_or("浏览器会话缺失")?;
+        s.ws.call(
+            "Storage.clearDataForOrigin",
+            json!({ "origin": site.origin, "storageTypes": "cookies,local_storage" }),
+        )
+        .await?;
+        drop(guard);
+        if let Some(s) = self.session.lock().await.as_mut() {
+            s.last_used = std::time::Instant::now();
+        }
+        Ok(format!(
+            "已解绑 {}（该站 cookie 与本地存储已清，其他站点登录态不受影响）",
+            site.name
+        ))
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    #[test]
+    fn site_registry_and_lookup() {
+        let site = find_site("xiaoheihe").expect("注册表有小黑盒");
+        assert_eq!(site.origin, "https://www.xiaoheihe.cn");
+        assert!(site.session_cookie_any.contains(&"pkey"));
+        assert!(site.login_click_js.contains("login-btn"));
+        assert!(site.nickname_js.contains("localStorage"));
+        assert!(find_site("nonexistent").is_none());
+    }
+
+    /// 登录态判定：会话 cookie 存在且非空才算；空值/其他 cookie 不算。
+    #[test]
+    fn login_cookie_detection() {
+        let keys = &["pkey", "heybox_uid"];
+        assert!(cookies_indicate_login(
+            &[("pkey".into(), "abc".into())],
+            keys
+        ));
+        assert!(
+            cookies_indicate_login(
+                &[
+                    ("other".into(), "x".into()),
+                    ("HeyBox_Uid".into(), "42".into())
+                ],
+                keys
+            ),
+            "大小写不敏感"
+        );
+        assert!(
+            !cookies_indicate_login(&[("pkey".into(), String::new())], keys),
+            "空值不算"
+        );
+        assert!(!cookies_indicate_login(
+            &[("session".into(), "x".into())],
+            keys
+        ));
+        assert!(!cookies_indicate_login(&[], keys));
+    }
+}

@@ -405,6 +405,59 @@ fn browser_gate_chain_and_cdp_full_chain() {
             raw.len()
         );
         assert!(raw.len() > 5000, "截图非空");
+
+        // —— 账号绑定端点链 ——
+        // bind-status（console 面，浏览器在跑）：file:// 页面无小黑盒 cookie → 未登录。
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/bind-status?site=xiaoheihe")
+            .body(Body::empty())
+            .unwrap();
+        let resp = r.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&String::from_utf8_lossy(&bytes)).unwrap();
+        assert_eq!(v["value"]["site"], json!("xiaoheihe"));
+        assert_eq!(v["value"]["running"], json!(true));
+        assert_eq!(
+            v["value"]["loggedIn"],
+            json!(false),
+            "无会话 cookie 应判未登录：{v}"
+        );
+
+        // 未知站点：400。
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/bind-status?site=nonexistent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = r.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // AI 侧 login-status（agent 面）：无令牌 403。
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/login-status?site=xiaoheihe&conversationKey=private%3A1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = r.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // 带令牌：只读登录态（未登录 + 浏览器在跑）。
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/login-status?site=xiaoheihe&conversationKey=private%3A1")
+            .header("x-agent-token", &token)
+            .body(Body::empty())
+            .unwrap();
+        let resp = r.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&String::from_utf8_lossy(&bytes)).unwrap();
+        assert_eq!(v["value"]["loggedIn"], json!(false));
         let _ = hdr("x"); // 消除未用警告
     });
 

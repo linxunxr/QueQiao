@@ -1059,6 +1059,20 @@ const TOOLS: &[ToolDef] = &[
         ],
     },
     ToolDef {
+        name: "browser_login_status",
+        description: "查询指定网站在专属浏览器里的登录态（只读：已登录/未登录/浏览器未运行）。刷网页遇到未登录页面时可先查这个再向管理员报告。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/login-status",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("site", "string", true, "站点 id（当前支持：xiaoheihe）"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
         name: "browser_show",
         description: "把专属浏览器以可见窗口打开（登录流程）：无视无头配置强制有头，可选直接导航到登录页。人在窗口里扫码/输验证码，cookie 自动留在专属 profile。需要会话令牌；仅管理员授权的会话可用。",
         endpoint: "/api/browser/show",

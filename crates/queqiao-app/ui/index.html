@@ -197,6 +197,21 @@
   </section>
 
   <section>
+    <details id="bindBox">
+      <summary>账号绑定<span class="sum-note" id="bindSum">检测中…</span></summary>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <span id="bindSiteName" style="font-weight:600">小黑盒</span>
+        <span class="hint" id="bindState">检测中…</span>
+        <span style="flex:1"></span>
+        <button class="ghost mini" onclick="bindSite()">绑定 / 登录</button>
+        <button class="ghost mini" onclick="unbindSite()">解绑</button>
+        <button class="ghost mini" onclick="refreshBind(true)">刷新</button>
+      </div>
+      <div class="hint" style="margin-top:8px">绑定 = 在专属浏览器的可见窗口里扫码/验证码登录，登录态只存在鹊桥自己的浏览器 profile 里（与日常浏览器完全隔离）。AI 刷网页时自动携带；解绑只清该站，不影响其他登录。</div>
+    </details>
+  </section>
+
+  <section>
     <details id="migrateBox" open>
       <summary>数据迁移（从 Node 版 qq-bridge）<span class="sum-note" id="migrateNote"></span></summary>
       <div style="margin-top:14px">
@@ -1112,6 +1127,61 @@ async function saveSlangConfig() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     toast('黑话参数已保存', true);
   } catch (e) { toast('保存失败：' + e.message, false); }
+}
+
+// ── 账号绑定（/api/browser/bind*）：绑定=有头窗口扫码，状态轮询自动变绿 ──
+let bindPolling = null;
+async function refreshBind(scrape) {
+  const sum = $('bindSum'), state = $('bindState');
+  if (!bridgeOnline) { sum.textContent = ''; state.textContent = '桥未运行——启动后可绑定账号'; return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/browser/bind-status?site=xiaoheihe' + (scrape ? '&scrape=1' : ''));
+    const res = await r.json();
+    const v = res.value || {};
+    if (v.enabled === false) { sum.textContent = '未启用'; state.textContent = '专属浏览器未开启——设置页「行为」区开启后可绑定'; return; }
+    if (!v.loggedIn) {
+      sum.textContent = v.running ? '未登录' : '未运行';
+      state.textContent = v.hint || '未登录';
+    } else {
+      sum.textContent = '已登录';
+      state.textContent = '已绑定' + (v.nickname ? '：' + v.nickname : '') + (v.running ? '' : '（浏览器未运行，登录态保留）');
+    }
+  } catch (e) { sum.textContent = ''; state.textContent = '（状态不可读：' + e.message + '）'; }
+}
+async function bindSite() {
+  try {
+    const r = await fetch(BRIDGE + '/api/browser/bind', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ site: 'xiaoheihe' })
+    });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    toast((res.value && res.value.message) || '登录窗口已打开', true);
+    refreshBind();
+    // 轮询：每 3s 查一次，登录成功即停（最长 3 分钟）。
+    if (bindPolling) clearInterval(bindPolling);
+    let tries = 0;
+    bindPolling = setInterval(async () => {
+      tries += 1;
+      if (tries > 60) { clearInterval(bindPolling); bindPolling = null; return; }
+      await refreshBind(tries % 10 === 0); // 每 30s 带一次昵称刮取
+      const sum = $('bindSum').textContent;
+      if (sum === '已登录') { clearInterval(bindPolling); bindPolling = null; refreshBind(true); toast('账号绑定成功', true); }
+    }, 3000);
+  } catch (e) { toast('绑定失败：' + e.message, false); }
+}
+async function unbindSite() {
+  if (!confirm('确认解绑小黑盒？该站登录态将被清除（其他站点不受影响）。')) return;
+  try {
+    const r = await fetch(BRIDGE + '/api/browser/unbind', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ site: 'xiaoheihe' })
+    });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    toast((res.value && res.value.message) || '已解绑', true);
+    refreshBind();
+  } catch (e) { toast('解绑失败：' + e.message, false); }
 }
 
 async function refreshCost() {

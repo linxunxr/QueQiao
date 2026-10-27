@@ -205,6 +205,10 @@ pub fn build_router(
         .route("/api/browser/back", post(browser_back_ep))
         .route("/api/browser/wait", get(browser_wait_ep))
         .route("/api/browser/show", post(browser_show_ep))
+        .route("/api/browser/bind", post(browser_bind_ep))
+        .route("/api/browser/bind-status", get(browser_bind_status_ep))
+        .route("/api/browser/unbind", post(browser_unbind_ep))
+        .route("/api/browser/login-status", get(browser_login_status_ep))
         .route("/api/tablet/status", get(tablet_status_ep))
         .route("/api/tablet/screenshot", get(tablet_screenshot_ep))
         .route("/api/tablet/read-screen", get(tablet_read_screen_ep))
@@ -2043,6 +2047,110 @@ async fn browser_show_ep(
         Ok(m) => msg_out(m),
         Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
     }
+}
+
+// ── 账号绑定端点（console 鉴权——管理操作，非 AI 会话操作）──────────────────
+
+/// POST /api/browser/bind {site}：打开有头登录窗口（绑定流程）。
+async fn browser_bind_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    if !state.cfg.browser.enabled {
+        return denied(
+            StatusCode::FORBIDDEN,
+            "浏览器工具未启用（config.json browser.enabled）",
+        );
+    }
+    let site_id = body.get("site").and_then(Value::as_str).unwrap_or_default();
+    let Some(site) = crate::browser::find_site(site_id) else {
+        return denied(StatusCode::BAD_REQUEST, &format!("未知站点：{site_id}"));
+    };
+    let cfg = state.cfg.browser.clone();
+    match state.browser.bind(&cfg, site).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// GET /api/browser/bind-status?site=…&scrape=1：登录态（+可选昵称刮取）。
+async fn browser_bind_status_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    if !state.cfg.browser.enabled {
+        return ok_json(json!({
+            "enabled": false,
+            "hint": "浏览器工具未启用：设置页开启「专属浏览器」后可绑定账号"
+        }));
+    }
+    let Some(site) =
+        crate::browser::find_site(q.get("site").map(String::as_str).unwrap_or_default())
+    else {
+        return denied(StatusCode::BAD_REQUEST, "未知站点");
+    };
+    let scrape = q
+        .get("scrape")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let cfg = state.cfg.browser.clone();
+    let v = state.browser.bind_status(&cfg, site, scrape).await;
+    ok_json(v)
+}
+
+/// POST /api/browser/unbind {site}：按 origin 清该站登录态。
+async fn browser_unbind_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    if !state.cfg.browser.enabled {
+        return denied(
+            StatusCode::FORBIDDEN,
+            "浏览器工具未启用（config.json browser.enabled）",
+        );
+    }
+    let Some(site) =
+        crate::browser::find_site(body.get("site").and_then(Value::as_str).unwrap_or_default())
+    else {
+        return denied(StatusCode::BAD_REQUEST, "未知站点");
+    };
+    let cfg = state.cfg.browser.clone();
+    match state.browser.unbind(&cfg, site).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// GET /api/browser/login-status?site=…：AI 侧只读登录态（agent 鉴权——
+/// AI 刷信息流遇到未登录页时可主动报告，闭环加分项）。
+async fn browser_login_status_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    let site_id = q.get("site").cloned().unwrap_or_default();
+    let site = match crate::browser::find_site(&site_id) {
+        Some(s) => s,
+        None => return denied(StatusCode::BAD_REQUEST, &format!("未知站点：{site_id}")),
+    };
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    let v = state.browser.bind_status(&cfg, site, false).await;
+    ok_json(v)
 }
 
 // ── 鸿蒙平板控制端点（Node /api/tablet/* 同语义）───────────────────────────
