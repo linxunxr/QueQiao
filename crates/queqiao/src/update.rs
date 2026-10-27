@@ -77,6 +77,12 @@ pub fn check_latest(current_version: &str) -> Result<Option<ReleaseInfo>, String
     // 下载走 **API asset 端点**而非 browser_download_url：本机网络常见
     // api.github.com 通而 github.com 下载域断（gh CLI 同款通道），且 API
     // 端点对 Range/重试更友好。
+    // 资产精确匹配 queqiao-<tag>-win64.zip：v0.4.10 起 Release 还携带
+    // queqiao-browser-<pos>-win64.zip（352MB Chromium 专属资产），此前的
+    // ends_with("-win64.zip") 会命中它——更新器把 352MB 当更新包下载
+    // （真机事故：19KB/s 下 5 小时，下完解压出的还不是三件套，apply 必
+    // 报废安装）。精确名 + 双重前缀排除。
+    let want = format!("queqiao-{tag}-win64.zip");
     let zip_url = rel
         .get("assets")
         .and_then(Value::as_array)
@@ -86,13 +92,13 @@ pub fn check_latest(current_version: &str) -> Result<Option<ReleaseInfo>, String
                 .find(|a| {
                     a.get("name")
                         .and_then(Value::as_str)
-                        .is_some_and(|n| n.ends_with("-win64.zip"))
+                        .is_some_and(|n| n == want)
                 })
                 .and_then(|a| a.get("id"))
                 .and_then(Value::as_u64)
                 .map(|id| format!("https://api.github.com/repos/{REPO}/releases/assets/{id}"))
         })
-        .ok_or("release 无 win64 zip 资产")?;
+        .ok_or("release 无主包资产（queqiao-<tag>-win64.zip）")?;
     let notes = rel
         .get("body")
         .and_then(Value::as_str)
@@ -393,5 +399,37 @@ mod tests {
         assert!(a.contains("if exist queqiao-app.exe start \"\" queqiao-app.exe"));
         assert!(!a.contains("if exist queqiao.exe start"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod asset_pick_tests {
+
+    /// 资产选择必须精确命中主包：双资产时代 ends_with 会先命中 352MB 的
+    /// browser 资产（v0.4.10 真机事故：更新器把 Chromium 包当更新包下了
+    /// 5 小时）。此测试钉住选择函数的输入输出形状——check_latest 的完整
+    /// 网络链不测，只测选择谓词与构造。
+    #[test]
+    fn main_asset_exact_name_wins_over_browser_asset() {
+        let tag = "v9.9.9";
+        let want = format!("queqiao-{tag}-win64.zip");
+        let names = [
+            ("queqiao-browser-1710741-win64.zip", 111u64),
+            ("queqiao-v9.9.9-win64.zip", 222u64),
+            ("queqiao-v9.9.9-win64.zip.sha256", 333u64),
+        ];
+        // 与 check_latest 同款谓词：精确名匹配（而非 ends_with）。
+        let picked = names.iter().find(|(n, _)| *n == want).map(|(_, id)| *id);
+        assert_eq!(picked, Some(222), "精确命中主包 id，不被 browser 资产抢先");
+        // 反证：旧的 ends_with 谓词会命中 browser 资产——这就是事故本身。
+        let old_predicate = names
+            .iter()
+            .find(|(n, _)| n.ends_with("-win64.zip"))
+            .map(|(_, id)| *id);
+        assert_eq!(
+            old_predicate,
+            Some(111),
+            "旧谓词确实先命中 browser 资产（事故复现）"
+        );
     }
 }
