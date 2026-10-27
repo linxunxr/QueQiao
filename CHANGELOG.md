@@ -13,6 +13,7 @@
 
 ### 新增
 
+- **专属浏览器（browser 十工具，AI 的独立 Chromium）**：给 AI 一只完全隔离的浏览器——独立进程、独立 profile（state/browser-profile，删目录=登录态清空）、CDP 只绑本机随机端口，用户日常浏览器/注册表/扩展零接触。能力面：导航/快照（DOM 压缩树，坐标+文字+可点标注，坐标直接喂点击）/截图（JPEG 进上下文）/点击/输入（中文 base64 经 CDP insertText）/滚动/后退/等待/登录显示（强制有头窗口，人在窗口里扫码，cookie 自动留 profile）。两层门禁同 tablet：注册期 browser.enabled=false 时九个控制工具不注册（仅 browser_status 探测），调用期会话令牌须命中 browser.allowConvKeys（默认仅管理员私聊）。无头/有头设置页可控（默认有头可监督），切换在下一次浏览器生命周期生效；懒启动 + 闲置自动关闭（默认 30 分钟）。进程内集成测试全链绿：本机 Chrome 无头跑通 导航→快照→中文输入→点击联动→截图 JPEG 魔数。**真机排查两坑入册**：①程序化 spawn Chromium 系浏览器 --user-data-dir 必须等号连写（两参数分离在本机静默卡死：进程活着但 profile 不初始化、DevToolsActivePort 永不出现，bash 终端启动却正常）；②DevTools /json/list 对 Connection: close 不总关连接，HTTP 客户端须按 Content-Length 精确读体（read_to_end 挂到超时）。专属 Chromium 以独立 Release 资产分发（主包不携带，升级不重下），资产发布前开发兜底顺序 browser/ 目录 → 系统 Chrome → 系统 Edge（Edge 无头对位置参数报 Multiple targets 拒启，仅最后兜底）。
 - **鸿蒙平板控制（tablet 九工具，规格配套 MCP 落地）**：AI 可以看到并操作管理员的鸿蒙平板——截图（图像直接进上下文，本地留档最近 12 张）/ 读屏（dumpLayout 压缩成坐标+文字+可点可滚的紧凑树）/ 点击 / 滑动 / 按方向快滑（刷视频翻列表）/ 按键 / 输入文本（中文走 base64 解码防 shell 拆参）/ 开网页（仅 http/https）。能力面刻意收敛：不做 tablet_shell 或任意 hdc 命令（平板是主人物理设备，任意 shell 等于整台设备交给模型）。两层门禁与 Node 版同款：注册期 `tablet.enabled=false` 时八个控制工具不注册（不占 system prompt、不给误调机会，仅 `tablet_status` 探测可用）；调用期会话令牌反查后须命中 `tablet.allowConvKeys`（默认仅管理员私聊）。hdc 定位顺序：config 显式路径 → PATH → DevEco Studio 默认安装位置；每次调用重新解析（改 config 即生效）；串行闸防 hdc server 并发拒绝；全部带超时（hdc 卡死不拖垮桥）。真机动作待设备连接后验证（本机 hdc 3.2.0f 就位、设备离线时给出可操作指引）。
 
 ### 修复

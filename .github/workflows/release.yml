@@ -100,10 +100,30 @@ jobs:
             Write-Output ("警告：CHANGELOG.md 未找到 [" + $Ver + "] 段，Release body 留空")
           }
 
+      - name: 下载 Chromium 固化专属浏览器资产（独立 zip，主包不携带——升级不重下）
+        shell: pwsh
+        run: |
+          # Chromium 官方快照（Windows x64）；钉死版本，桥侧按资产名前缀识别。
+          $Position = "1457500"  # 2025-10 附近的稳定快照；可按需升级
+          $Url = "https://storage.googleapis.com/chromium-browser-snapshots/Win_x64/$Position/chrome-win.zip"
+          try {
+            Invoke-WebRequest -Uri $Url -OutFile chromium-raw.zip -MaximumRedirection 5
+          } catch {
+            # 官方源不可达时走 npmmirror 国内镜像（同 snap 体系）。
+            $Url2 = "https://registry.npmmirror.com/-/binary/chromium-browser-snapshots/win_x64/$Position/chrome-win.zip"
+            Invoke-WebRequest -Uri $Url2 -OutFile chromium-raw.zip
+          }
+          Expand-Archive -Path chromium-raw.zip -DestinationPath chromium-stage -Force
+          Compress-Archive -Path chromium-stage/chrome-win -DestinationPath queqiao-browser-$Position-win64.zip -Force
+          "browser_asset=queqiao-browser-$Position-win64.zip" | Out-File -Append $env:GITHUB_ENV
+          Write-Output "browser asset: queqiao-browser-$Position-win64.zip"
+
       - name: 上传到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          files: queqiao-*-win64.zip
+          files: |
+            queqiao-v*-win64.zip
+            queqiao-browser-*-win64.zip
           # 更新日志正文（组包步骤生成；文件不存在时 action 会忽略 body_path）。
           body_path: release-body.md

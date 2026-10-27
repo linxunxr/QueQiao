@@ -13,6 +13,15 @@ use std::io::{BufRead, Write};
 use serde_json::{Value, json};
 
 /// 工具定义（name → 桥端点 + 参数转发 + 注册开关键）。
+/// 浏览器门禁（与 TabletGate 同构，独立枚举避免语义混用）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum BrowserGate {
+    #[default]
+    None,
+    Always,
+    OnEnabled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 enum TabletGate {
     #[default]
@@ -33,6 +42,9 @@ struct ToolDef {
     /// tablet.enabled=true 时注册（八个控制类工具——关着不占 system
     /// prompt、不给模型误调机会，Node 注册期过滤同义）。
     tablet_gate: TabletGate,
+    /// 浏览器门禁（同构）：Always=仅 browser_status；OnEnabled=仅
+    /// browser.enabled=true 时注册。
+    browser_gate: BrowserGate,
     /// 参数 schema（属性名 + 类型 + 是否必填 + 描述）。
     params: &'static [(&'static str, &'static str, bool, &'static str)],
 }
@@ -59,6 +71,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getPrompt"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[],
     },
     ToolDef {
@@ -68,6 +81,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getUnread"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[(
             "afterSeq",
             "number",
@@ -82,6 +96,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendMessage"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("text", "string", true, "消息文本"),
             ("replyToMessageId", "number", false, "引用回复的消息 id"),
@@ -94,6 +109,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             (
                 "category",
@@ -141,6 +157,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[],
     },
     ToolDef {
@@ -150,6 +167,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("category", "string", true, "activeTopic / pendingThought"),
             ("content", "string", true, "要删除的记忆原文"),
@@ -162,6 +180,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getRecent"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("limit", "number", false, "条数（默认 20，上限 100）"),
             ("onlySelf", "boolean", false, "只看自己发的消息（传 true）"),
@@ -174,6 +193,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getActiveMembers"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[("limit", "number", false, "人数上限（默认 10，最大 20）")],
     },
     ToolDef {
@@ -183,6 +203,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("slangQuery"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[("query", "string", false, "关键词（匹配词条/含义/用法）")],
     },
     ToolDef {
@@ -192,6 +213,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("slangSubmit"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("content", "string", true, "黑话词条本身（50 字内）"),
             ("meaning", "string", true, "含义（300 字内）"),
@@ -206,6 +228,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("listStickers"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             (
                 "query",
@@ -223,6 +246,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getStickerImage"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[("stickerId", "string", true, "表情 id/md5/URL 任一")],
     },
     ToolDef {
@@ -232,6 +256,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendSticker"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("stickerId", "string", true, "表情 id/md5/URL 任一"),
             (
@@ -249,6 +274,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("stickerNote"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("stickerId", "string", true, "表情 id/md5/URL 任一"),
             ("note", "string", false, "你的理解（如：被戳中时用）"),
@@ -262,6 +288,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getMessageDetail"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[(
             "messageId",
             "string",
@@ -276,6 +303,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("markRead"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[(
             "throughSeq",
             "number",
@@ -290,6 +318,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("setWakeConfig"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("mode", "string", false, "diving（潜水）或 active（活跃）"),
             ("infinite", "boolean", false, "true=无限期潜水等触发"),
@@ -314,6 +343,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getUnread"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[],
     },
     ToolDef {
@@ -323,6 +353,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("reply"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("groupId", "string", true, "群号（须在白名单）"),
             (
@@ -347,6 +378,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendBurst"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("groupId", "string", true, "群号（须在白名单）"),
             (
@@ -365,6 +397,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendPoke"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             (
                 "conversationKey",
@@ -388,6 +421,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("reactMessage"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -407,6 +441,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("recallMessage"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("messageId", "number", true, "要撤回的消息 id"),
@@ -420,6 +455,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getImages"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -438,6 +474,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getForwardMsg"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -456,6 +493,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("collectSticker"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("messageId", "number", true, "带图消息的 id"),
@@ -470,6 +508,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("fetchSticker"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("url", "string", true, "图片直链（http/https）"),
@@ -484,6 +523,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("setStickerRemark"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -503,6 +543,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("writeDiary"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("content", "string", true, "日记内容"),
@@ -516,6 +557,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getDiary"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("days", "number", false, "天数（默认 7，上限 90）"),
@@ -529,6 +571,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("groupMembers"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（group:群号）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -541,6 +584,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("groupProfile"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（group:群号）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -553,6 +597,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("groupHistory"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（group:群号）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -565,6 +610,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getSelfImage"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
@@ -577,6 +623,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("waitMessages"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             (
@@ -607,6 +654,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("socialState"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
@@ -619,6 +667,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
@@ -631,6 +680,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("getMyRecent"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("limit", "number", false, "条数（默认 10，上限 50）"),
@@ -644,6 +694,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("socialState"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（鉴权用）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -656,6 +707,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("feedback"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("text", "string", true, "反馈原文"),
@@ -675,6 +727,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendVoice"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("text", "string", true, "要合成的文本"),
@@ -689,6 +742,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendVoice"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key"),
             ("voiceName", "string", true, "语音名（qq_list_voices 返回）"),
@@ -702,6 +756,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: Some("sendVoice"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("conversationKey", "string", true, "会话 key（鉴权用）"),
             ("agentToken", "string", true, "会话令牌"),
@@ -714,6 +769,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendGroup"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("groupId", "string", true, "群号（须在白名单）"),
             ("message", "string", true, "文本（纯文本）"),
@@ -728,6 +784,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: Some("sendPrivate"),
         tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
         params: &[
             ("userId", "string", true, "好友 QQ 号（须在白名单）"),
             ("message", "string", true, "文本（纯文本）"),
@@ -742,6 +799,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: None,
         tablet_gate: TabletGate::Always,
+        browser_gate: BrowserGate::None,
         params: &[],
     },
     ToolDef {
@@ -751,6 +809,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[("agentToken", "string", true, "会话令牌")],
     },
     ToolDef {
@@ -760,6 +819,7 @@ const TOOLS: &[ToolDef] = &[
         method: "GET",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             (
                 "maxChars",
@@ -777,6 +837,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             ("x", "number", true, "横坐标（像素）"),
             ("y", "number", true, "纵坐标（像素）"),
@@ -790,6 +851,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             ("x1", "number", true, "起点横坐标"),
             ("y1", "number", true, "起点纵坐标"),
@@ -811,6 +873,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             (
                 "direction",
@@ -828,6 +891,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             ("key", "string", true, "Back / Home / Power 或数字键码"),
             ("agentToken", "string", true, "会话令牌"),
@@ -840,6 +904,7 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             ("text", "string", true, "要输入的文本"),
             (
@@ -859,8 +924,151 @@ const TOOLS: &[ToolDef] = &[
         method: "POST",
         flag: None,
         tablet_gate: TabletGate::OnEnabled,
+        browser_gate: BrowserGate::None,
         params: &[
             ("url", "string", true, "要打开的 http(s) 网址"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_status",
+        description: "探测专属浏览器状态（只读）：功能开关、运行态、当前页面。不需要会话令牌。其余 browser_* 工具需要会话令牌，且仅管理员授权的会话（默认管理员私聊）可通过。",
+        endpoint: "/api/browser/status",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::Always,
+        params: &[],
+    },
+    ToolDef {
+        name: "browser_navigate",
+        description: "在专属浏览器中打开网页（http/https/file），等到加载完成。已登录站点的 cookie 保存在专属 profile 里。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/navigate",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("url", "string", true, "要打开的网址"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_snapshot",
+        description: "读取专属浏览器当前页面的可见元素树：每行 [x1,y1,x2,y2]坐标 + 文字/输入框值/是否可点。坐标可直接喂给 browser_click。返回较大时截断。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/snapshot",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            (
+                "maxChars",
+                "number",
+                false,
+                "返回文本上限（字符），默认 18000",
+            ),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_screenshot",
+        description: "截取专属浏览器当前页面（JPEG 图像直接进上下文）。canvas/视频等快照读不到的画面用这个看。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/screenshot",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_click",
+        description: "点击专属浏览器视口坐标（坐标来自 browser_snapshot 的 [x1,y1,x2,y2] 取中心）。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/click",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("x", "number", true, "横坐标（像素）"),
+            ("y", "number", true, "纵坐标（像素）"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_type",
+        description: "向专属浏览器输入文本（最多 2000 字符）。给 x/y 时先点击该坐标处的输入框再输入；不给则输入到已聚焦输入框。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/type",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("text", "string", true, "要输入的文本"),
+            ("x", "number", false, "输入框横坐标（可选）"),
+            ("y", "number", false, "输入框纵坐标（与 x 一起给）"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_scroll",
+        description: "滚动专属浏览器页面：up=向下看更多内容，down=向上回滚，left/right=横向。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/scroll",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("direction", "string", true, "滚动方向：up/down/left/right"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_back",
+        description: "专属浏览器后退一页。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/back",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_wait_load",
+        description: "等待专属浏览器页面加载稳定（慢页面/登录跳转后用；timeoutS 默认 5 秒）。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/wait",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("timeoutS", "number", false, "等待上限秒数（1~60，默认 5）"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_show",
+        description: "把专属浏览器以可见窗口打开（登录流程）：无视无头配置强制有头，可选直接导航到登录页。人在窗口里扫码/输验证码，cookie 自动留在专属 profile。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/show",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("url", "string", false, "要打开的登录页网址（可选）"),
+            ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
@@ -880,6 +1088,13 @@ fn tablet_gate_ok(gate: TabletGate, tablet_cfg: &Value) -> bool {
     match gate {
         TabletGate::None | TabletGate::Always => true,
         TabletGate::OnEnabled => tablet_cfg.get("enabled") == Some(&Value::Bool(true)),
+    }
+}
+
+fn browser_gate_ok(gate: BrowserGate, browser_cfg: &Value) -> bool {
+    match gate {
+        BrowserGate::None | BrowserGate::Always => true,
+        BrowserGate::OnEnabled => browser_cfg.get("enabled") == Some(&Value::Bool(true)),
     }
 }
 
@@ -1210,6 +1425,7 @@ fn handle_request(
     params: &Value,
     tools_cfg: &Value,
     tablet_cfg: &Value,
+    browser_cfg: &Value,
     console_token: &str,
 ) -> Value {
     match method {
@@ -1262,6 +1478,12 @@ fn handle_request(
                 return json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": { "content": [ { "type": "text", "text": format!("工具 {name} 已被 config.tablet.enabled=false 关闭（仅 tablet_status 探测可用）") } ], "isError": true }
+                });
+            }
+            if !browser_gate_ok(def.browser_gate, browser_cfg) {
+                return json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "content": [ { "type": "text", "text": format!("工具 {name} 已被 config.browser.enabled=false 关闭（仅 browser_status 探测可用）") } ], "isError": true }
                 });
             }
             let key = args
@@ -1341,7 +1563,8 @@ fn handle_request(
                     // 单图（value.image）转 MCP image 块（模型看不了裸 URL）。
                     if (name == "qq_get_self_image"
                         || name == "qq_get_sticker_image"
-                        || name == "tablet_screenshot")
+                        || name == "tablet_screenshot"
+                        || name == "browser_screenshot")
                         && let Some(img) = value.get("image")
                         && let (Some(data), Some(mime)) = (
                             img.get("data").and_then(Value::as_str),
@@ -1434,6 +1657,7 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| json!({}));
     let tablet_cfg = load_section("tablet");
+    let browser_cfg = load_section("browser");
     let console_token = load_section("consoleToken")
         .as_str()
         .unwrap_or_default()
@@ -1478,6 +1702,7 @@ fn main() {
             &params,
             &tools_cfg,
             &tablet_cfg,
+            &browser_cfg,
             &console_token,
         );
         if let Ok(text) = serde_json::to_string(&resp)

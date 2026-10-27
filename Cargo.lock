@@ -2539,6 +2539,7 @@ version = "0.4.9"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "futures-util",
  "queqiao-core",
  "queqiao-dsh",
  "queqiao-media",
@@ -2548,6 +2549,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tower",
 ]
 

@@ -195,6 +195,34 @@ impl Default for TabletConfig {
     }
 }
 
+/// 专属浏览器（browser）：独立 Chromium 进程 + 独立 profile + CDP 驱动；
+/// 两层门禁同 tablet（注册期 enabled + 调用期 allowConvKeys 默认仅管理员
+/// 私聊）。headless 切换在下一次浏览器生命周期生效；executablePath 为
+/// 开发覆盖（生产用 browser/chrome-win/chrome.exe，缺省回落系统 Edge）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BrowserConfig {
+    pub enabled: bool,
+    pub headless: bool,
+    pub allow_conv_keys: Vec<String>,
+    pub executable_path: String,
+    pub idle_close_min: u64,
+    pub max_screenshot_bytes: u64,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            headless: false,
+            allow_conv_keys: vec![],
+            executable_path: String::new(),
+            idle_close_min: 30,
+            max_screenshot_bytes: 4_000_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 /// 电脑控制（pc）：**未实现**——仅配置形状占位（同 tablet）。
@@ -871,6 +899,7 @@ pub struct Config {
     pub role: RoleConfig,
     pub snowluma: SnowLumaConfig,
     pub tablet: TabletConfig,
+    pub browser: BrowserConfig,
     pub pc: PcConfig,
     #[serde(rename = "ownerQQ", deserialize_with = "deserialize_owner_qq", default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -908,6 +937,7 @@ impl Default for Config {
             role: Default::default(),
             snowluma: Default::default(),
             tablet: Default::default(),
+            browser: Default::default(),
             pc: Default::default(),
             owner_qq: None,
             session_cwd: String::new(),

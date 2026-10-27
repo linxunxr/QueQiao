@@ -819,6 +819,9 @@ async fn run(setup: Setup) {
     // 共享给主循环（喂窗口/收回合事件）与提取任务；busy 串行防并发写库。
     let slang_pipe = std::sync::Arc::new(std::sync::Mutex::new(SlangPipeline::default()));
     let slang_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // 专属浏览器（懒启动；闲置看门狗按配置分钟数自动关）。
+    let browser_arc = queqiao::browser::new_browser();
+    browser_arc.start_idle_watcher(cfg.browser.idle_close_min);
     // 手动送研究（控制台端点 → 主循环派发）通道。
     let (slang_research_tx, mut slang_research_rx) =
         tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
@@ -1096,6 +1099,7 @@ async fn run(setup: Setup) {
             feedback_times: std::sync::Mutex::new(std::collections::HashMap::new()),
             slang_busy: slang_busy.clone(),
             slang_research_tx: slang_research_tx.clone(),
+            browser: browser_arc.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {

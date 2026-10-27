@@ -106,3 +106,10 @@ webpki-roots
 - Apache-2.0：同上；若上游 crate 附带 NOTICE 文件则一并保留（经查本依赖集内
   无附带 NOTICE 的 crate）；
 - 双许可（OR）条目按其中任一许可履行即可，以上分组已按惯例归并展示。
+
+## Chromium（专属浏览器，独立资产分发）
+
+- 上游：<https://www.chromium.org/>（Chromium 开源项目）
+- 许可：BSD 3-Clause License 等（见资产包内 chrome-win/ 目录随附的许可文件；源码许可 <https://chromium.googlesource.com/chromium/src/+/main/LICENSE>）
+- 用途：鹊桥「专属浏览器」功能的浏览器内核，作为独立 Release 资产（queqiao-browser-*-win64.zip）分发，首次启用时下载到安装目录 browser/ 下；不修改上游代码。
+- 说明：开源 Chromium 构建不含 H.264/AAC 等专有编解码器，部分站点视频可能无法播放（文字交互不受影响）。

@@ -35,6 +35,8 @@ pub struct ToolApiState {
     pub feedback_times: Mutex<std::collections::HashMap<String, Vec<u64>>>,
     /// 黑话提取/研究串行闸（控制台「送研究」预检；派发由主循环完成）。
     pub slang_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// 专属浏览器管理器（懒启动；端点共享）。
+    pub browser: Arc<crate::browser::Browser>,
     /// 手动送研究通道（ids 空 = 全部候选；主循环消费派发研究任务）。
     pub slang_research_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
 }
@@ -193,6 +195,16 @@ pub fn build_router(
         .route("/api/slang/research", post(slang_admin_research))
         .route("/api/slang/{id}", axum::routing::patch(slang_admin_patch))
         .route("/api/slang/{id}/{action}", post(slang_admin_single))
+        .route("/api/browser/status", get(browser_status_ep))
+        .route("/api/browser/navigate", post(browser_navigate_ep))
+        .route("/api/browser/snapshot", get(browser_snapshot_ep))
+        .route("/api/browser/screenshot", get(browser_screenshot_ep))
+        .route("/api/browser/click", post(browser_click_ep))
+        .route("/api/browser/type", post(browser_type_ep))
+        .route("/api/browser/scroll", post(browser_scroll_ep))
+        .route("/api/browser/back", post(browser_back_ep))
+        .route("/api/browser/wait", get(browser_wait_ep))
+        .route("/api/browser/show", post(browser_show_ep))
         .route("/api/tablet/status", get(tablet_status_ep))
         .route("/api/tablet/screenshot", get(tablet_screenshot_ep))
         .route("/api/tablet/read-screen", get(tablet_read_screen_ep))
@@ -1762,6 +1774,275 @@ async fn feedback_clear(
     }
     crate::logging::log("控制台：清空 AI 反馈");
     ok_json(json!({ "ok": true }))
+}
+
+// ── 专属浏览器端点（tablet 同款两层门禁）────────────────────────────────────
+// 注册期 browser.enabled（MCP 不注册控制工具）+ 调用期会话令牌命中
+// browser.allowConvKeys（默认仅管理员私聊）。能力面：导航/快照/截图/点击/
+// 输入/滚动/返回/等待/登录显示——不给任意 JS 执行。
+
+fn browser_authorized(
+    state: &ToolApiState,
+    headers: &HeaderMap,
+    key: &str,
+) -> Result<String, String> {
+    let expected = {
+        let store = state.social.lock().unwrap();
+        store
+            .conversation(key)
+            .and_then(|st| st.agent_token.clone())
+            .unwrap_or_default()
+    };
+    let token = headers
+        .get("x-agent-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if token.is_empty() || token != expected {
+        return Err("会话令牌无效或缺失（浏览器控制需要管理员授权会话）".into());
+    }
+    let mut allowed = state.cfg.browser.allow_conv_keys.clone();
+    if allowed.is_empty()
+        && let Some(owner) = state.cfg.owner_qq
+    {
+        allowed.push(format!("private:{}", owner.0));
+    }
+    if !allowed.iter().any(|k| k == key) {
+        return Err(format!(
+            "会话 {key} 不在 browser.allowConvKeys 白名单（默认仅管理员私聊）"
+        ));
+    }
+    Ok(key.to_owned())
+}
+
+/// 门禁 + 取配置：通过返回 BrowserConfig 快照。
+fn browser_gate(
+    state: &ToolApiState,
+    headers: &HeaderMap,
+    key: &str,
+) -> Result<crate::config::BrowserConfig, (StatusCode, Json<Value>)> {
+    if !state.cfg.browser.enabled {
+        return Err(denied(
+            StatusCode::FORBIDDEN,
+            "浏览器工具未启用（config.json browser.enabled）",
+        ));
+    }
+    if let Err(e) = browser_authorized(state, headers, key) {
+        return Err(denied(StatusCode::FORBIDDEN, &e));
+    }
+    Ok(state.cfg.browser.clone())
+}
+
+/// GET /api/browser/status：只读探测（不需要令牌）。
+async fn browser_status_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+) -> ApiResult {
+    if !state.cfg.browser.enabled {
+        return ok_json(json!({
+            "enabled": false,
+            "hint": "浏览器工具未启用：在 config.json 设置 browser.enabled=true（默认仅管理员私聊可用）"
+        }));
+    }
+    let cfg = state.cfg.browser.clone();
+    let info = state.browser.status(&cfg).await;
+    ok_json(info)
+}
+
+/// 动作结果 → 统一 {ok, value:{message|text}}。
+fn msg_out(msg: String) -> ApiResult {
+    ok_json(json!({ "message": msg }))
+}
+
+async fn browser_navigate_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let url = body
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.navigate(&cfg, &url).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn browser_snapshot_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    let max_chars: usize = q
+        .get("maxChars")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(18_000)
+        .clamp(2_000, 40_000);
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.snapshot(&cfg, max_chars).await {
+        Ok(text) => ok_json(json!({ "text": text })),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// GET /api/browser/screenshot：{image:{mimeType,data}}（独立响应形状）。
+async fn browser_screenshot_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.screenshot(&cfg).await {
+        Ok(json_text) => match serde_json::from_str::<Value>(&json_text) {
+            Ok(v) => ok_json(v),
+            Err(e) => denied(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("截图结果解析失败：{e}"),
+            ),
+        },
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn browser_click_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let x = body.get("x").and_then(Value::as_i64).unwrap_or(-1);
+    let y = body.get("y").and_then(Value::as_i64).unwrap_or(-1);
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.click(&cfg, x, y).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn browser_type_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let text = body
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let x = body.get("x").and_then(Value::as_i64);
+    let y = body.get("y").and_then(Value::as_i64);
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.input_text(&cfg, &text, x, y).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn browser_scroll_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let dir = body
+        .get("direction")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.scroll(&cfg, &dir).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn browser_back_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.back(&cfg).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn browser_wait_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    let timeout_s: u64 = q.get("timeoutS").and_then(|v| v.parse().ok()).unwrap_or(5);
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.wait_load(&cfg, timeout_s).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// POST /api/browser/show：登录流程——强制有头窗口（可选直接开登录页）。
+async fn browser_show_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let url = body.get("url").and_then(Value::as_str).map(str::to_owned);
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.show(&cfg, url.as_deref()).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
 }
 
 // ── 鸿蒙平板控制端点（Node /api/tablet/* 同语义）───────────────────────────

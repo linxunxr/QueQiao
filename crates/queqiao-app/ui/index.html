@@ -286,6 +286,8 @@
       <div class="field"><label>单条消息长度上限</label><input id="f-maxChars" type="number" min="1"></div>
       <div class="field"><label>合批窗口（毫秒）</label><input id="f-batch" type="number" min="1000"></div>
       <div class="field"><label>日记</label><select id="f-diary"><option value="true">开启（每晚定点写）</option><option value="false">关闭</option></select></div>
+      <div class="field"><label>专属浏览器</label><select id="f-browser"><option value="false">关闭（默认，仅管理员私聊可用）</option><option value="true">开启</option></select></div>
+      <div class="field"><label>浏览器显示</label><select id="f-browser-headless"><option value="false">有头窗口（可监督 AI 操作）</option><option value="true">无头（不打扰）</option></select></div>
       <div class="field"><label>主动发言</label><select id="f-proactive"><option value="true">开启（安静时偶尔冒泡）</option><option value="false">关闭</option></select></div>
     </div>
   </section>
@@ -563,6 +565,8 @@ async function load() {
   v('f-wakeMin', wake.maxWakePerMinute); v('f-wakeHour', wake.maxWakePerHour);
   v('f-maxChars', send.maxMessageChars); v('f-batch', wake.batchWindowMs);
   const di = document.getElementById('f-diary'); if (cfg.socialV2 && cfg.socialV2.diary) di.value = String(!!cfg.socialV2.diary.enabled);
+  const fb = document.getElementById('f-browser'); if (cfg.browser) fb.value = String(!!cfg.browser.enabled);
+  const fbh = document.getElementById('f-browser-headless'); if (cfg.browser) fbh.value = String(!!cfg.browser.headless);
   const pr = document.getElementById('f-proactive'); if (cfg.socialV2 && cfg.socialV2.proactive) pr.value = String(!!cfg.socialV2.proactive.enabled);
   const au = document.getElementById('f-autoUpdate'); au.value = String(cfg.autoUpdate !== false);
   chipLists.groups = ((cfg.allow && cfg.allow.groups) || []).map(String);
@@ -635,6 +639,9 @@ async function save() {
   body.socialV2.send = body.socialV2.send || {};
   if (num('f-maxChars') !== undefined) body.socialV2.send.maxMessageChars = num('f-maxChars');
   body.socialV2.diary = body.socialV2.diary || {}; body.socialV2.diary.enabled = document.getElementById('f-diary').value === 'true';
+  body.browser = body.browser || {};
+  body.browser.enabled = document.getElementById('f-browser').value === 'true';
+  body.browser.headless = document.getElementById('f-browser-headless').value === 'true';
   body.socialV2.proactive = body.socialV2.proactive || {}; body.socialV2.proactive.enabled = document.getElementById('f-proactive').value === 'true';
   body.autoUpdate = document.getElementById('f-autoUpdate').value === 'true';
   body.socialV2 = body.socialV2 || {};
