@@ -199,11 +199,14 @@
   <section>
     <details id="bindBox">
       <summary>账号绑定<span class="sum-note" id="bindSum">检测中…</span></summary>
-      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <span id="bindSiteName" style="font-weight:600">小黑盒</span>
-        <span class="hint" id="bindState">检测中…</span>
-        <span style="flex:1"></span>
+      <div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+        <img id="bindAvatar" src="" alt="" style="width:40px;height:40px;border-radius:50%;display:none;object-fit:cover;border:2px solid var(--line)">
+        <div style="flex:1;min-width:120px">
+          <div><span style="font-weight:600">小黑盒</span><span id="bindNickname" style="margin-left:8px;font-size:14px"></span><span id="bindLevel" class="hint" style="margin-left:6px"></span></div>
+          <div class="hint" id="bindState" style="margin-top:2px">检测中…</div>
+        </div>
         <button class="ghost mini" onclick="bindSite()">绑定 / 登录</button>
+        <button class="ghost mini" id="bindProfileBtn" onclick="openProfile()" style="display:none">个人主页</button>
         <button class="ghost mini" onclick="unbindSite()">解绑</button>
         <button class="ghost mini" onclick="refreshBind(true)">刷新</button>
       </div>
@@ -1139,12 +1142,22 @@ async function refreshBind(scrape) {
     const res = await r.json();
     const v = res.value || {};
     if (v.enabled === false) { sum.textContent = '未启用'; state.textContent = '专属浏览器未开启——设置页「行为」区开启后可绑定'; return; }
+    const av = document.getElementById('bindAvatar');
+    const nick = document.getElementById('bindNickname');
+    const lv = document.getElementById('bindLevel');
+    const profileBtn = document.getElementById('bindProfileBtn');
     if (!v.loggedIn) {
       sum.textContent = v.running ? '未登录' : '未运行';
       state.textContent = v.hint || '未登录';
+      av.style.display = 'none'; nick.textContent = ''; lv.textContent = '';
+      profileBtn.style.display = 'none';
     } else {
       sum.textContent = '已登录';
-      state.textContent = '已绑定' + (v.nickname ? '：' + v.nickname : '') + (v.running ? '' : '（浏览器未运行，登录态保留）');
+      state.textContent = v.running ? '登录态有效' : '登录态保留（浏览器未运行）';
+      if (v.avatar) { av.src = v.avatar; av.style.display = 'inline-block'; } else { av.style.display = 'none'; }
+      nick.textContent = v.nickname || '';
+      lv.textContent = v.level ? 'Lv.' + v.level : '';
+      profileBtn.style.display = v.profileUrl ? 'inline-block' : 'none';
     }
   } catch (e) { sum.textContent = ''; state.textContent = '（状态不可读：' + e.message + '）'; }
 }
@@ -1170,6 +1183,17 @@ async function bindSite() {
     }, 3000);
   } catch (e) { toast('绑定失败：' + e.message, false); }
 }
+async function openProfile() {
+  try {
+    const r = await fetch(BRIDGE + '/api/browser/bind', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ site: 'xiaoheihe', url: 'https://www.xiaoheihe.cn/user' })
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    toast('已在浏览器中打开个人主页', true);
+  } catch (e) { toast('打开失败：' + e.message, false); }
+}
+
 async function unbindSite() {
   if (!confirm('确认解绑小黑盒？该站登录态将被清除（其他站点不受影响）。')) return;
   try {

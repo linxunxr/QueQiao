@@ -692,6 +692,8 @@ mod tests {
 pub struct SiteDef {
     pub id: &'static str,
     pub name: &'static str,
+    /// 个人主页/设置页 URL（客户端「个人主页」按钮直达）。
+    pub profile_url: &'static str,
     /// CDP Storage.clearDataForOrigin 用的 origin（协议+域名）。
     pub origin: &'static str,
     /// 登录落地页（小黑盒无独立登录页——首页 + 自动点开登录弹窗）。
@@ -710,25 +712,40 @@ pub struct SiteDef {
 pub const SITES: &[SiteDef] = &[SiteDef {
     id: "xiaoheihe",
     name: "小黑盒",
+    profile_url: "https://www.xiaoheihe.cn/user",
     origin: "https://www.xiaoheihe.cn",
     login_url: "https://www.xiaoheihe.cn",
     login_click_js: r"(() => { document.querySelector('.login-btn')?.click(); return 'ok'; })()",
     session_cookie_any: &["pkey", "heybox_uid"],
     nickname_js: r#"(() => {
+  const out = {};
+  // 1) localStorage 用户缓存（SPA 常见）。
   for (const k of Object.keys(localStorage)) {
-    if (!/user|account|profile|self/i.test(k)) continue;
+    if (!/user|account|profile|self|heybox/i.test(k)) continue;
     try {
       const v = JSON.parse(localStorage[k]);
-      const nick = v.nickname || v.nick_name || v.username
-        || (v.user && (v.user.nickname || v.user.username))
-        || (v.data && (v.data.nickname || v.data.username));
-      if (nick) return String(nick);
+      const o = v.user || v.data || v;
+      if (o.nickname || o.nick_name) out.nickname = o.nickname || o.nick_name;
+      if (o.username) out.nickname = out.nickname || o.username;
+      if (o.avatar || o.avatar_url || o.head_img) out.avatar = o.avatar || o.avatar_url || o.head_img;
+      if (o.level || o.lv) out.level = String(o.level || o.lv);
     } catch {}
   }
-  const el = document.querySelector('[class*="avatar"],[class*="user"]');
-  const img = el && el.querySelector && el.querySelector('img');
-  if (img && img.alt) return img.alt;
-  return '';
+  // 2) DOM 兜底：头像 img（alt="XXX头像" / src=URL）+ 用户名元素。
+  if (!out.nickname || !out.avatar) {
+    const av = document.querySelector('img[class*="avatar"],[class*="avatar"] img,[alt*="头像"]');
+    if (av) {
+      if (!out.nickname && av.alt) out.nickname = av.alt.replace(/头像$/,'').trim();
+      if (!out.avatar && av.src && av.src.startsWith('http')) out.avatar = av.src;
+    }
+  }
+  if (!out.nickname) {
+    const el = document.querySelector('[class*="user"],[class*="nick"]');
+    if (el && el.textContent && el.textContent.trim() && el.textContent.trim().length < 30) {
+      out.nickname = el.textContent.trim();
+    }
+  }
+  return JSON.stringify(out);
 })()"#,
 }];
 
@@ -819,10 +836,33 @@ impl Browser {
                         .await;
                 let _ = wait_ready(&s.ws, 10).await;
             }
-            if let Ok(nick) = s.ws.evaluate(site.nickname_js).await
-                && !nick.is_empty()
+            if let Ok(profile_json) = s.ws.evaluate(site.nickname_js).await
+                && !profile_json.is_empty()
             {
-                out["nickname"] = json!(nick);
+                // nickname_js 返回 JSON {nickname, avatar, level}；兼容旧字符串。
+                match serde_json::from_str::<Value>(&profile_json) {
+                    Ok(v) => {
+                        if let Some(n) = v.get("nickname").and_then(Value::as_str)
+                            && !n.is_empty()
+                        {
+                            out["nickname"] = json!(n);
+                        }
+                        if let Some(a) = v.get("avatar").and_then(Value::as_str)
+                            && !a.is_empty()
+                        {
+                            out["avatar"] = json!(a);
+                        }
+                        if let Some(l) = v.get("level").and_then(Value::as_str) {
+                            out["level"] = json!(l);
+                        }
+                    }
+                    Err(_) => {
+                        // 兼容：脚本返回纯字符串（旧格式）。
+                        if !profile_json.contains("{") {
+                            out["nickname"] = json!(profile_json);
+                        }
+                    }
+                }
             }
         } else {
             out["hint"] = json!("未检测到会话 cookie——未登录或已失效，点「绑定/登录」重新扫码");
