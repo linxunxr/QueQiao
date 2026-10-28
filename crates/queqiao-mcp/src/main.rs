@@ -1096,7 +1096,12 @@ const TOOLS: &[ToolDef] = &[
         browser_gate: BrowserGate::OnEnabled,
         params: &[
             ("action", "string", false, "list=列出（默认）；close=关闭"),
-            ("index", "number", false, "要关的标签页序号（action=close 可选；不给=只留当前页）"),
+            (
+                "index",
+                "number",
+                false,
+                "要关的标签页序号（action=close 可选；不给=只留当前页）",
+            ),
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
         ],

@@ -20,10 +20,8 @@ use queqiao::tools_api::{ToolApiState, build_router};
 /// 每个测试独立临时目录（pid+tag）：两个测试先后跑时，前一个垂死的
 /// Chrome 还握着旧目录句柄，复用同一路径会撞 Chromium 单例机制。
 fn temp_home(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "queqiao-browser-api-{}-{tag}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("queqiao-browser-api-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("state")).unwrap();
     dir
@@ -227,9 +225,20 @@ fn auth_post(uri: &str, body: Value, token: &str) -> Request<Body> {
 
 /// 从快照文本里取含 needle 的行的 [x1,y1,x2,y2] 中心坐标。
 fn center_of(text: &str, needle: &str) -> (i64, i64) {
-    let line = text.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("快照缺 {needle} 行：{text}"));
-    let coords = line.split(']').next().unwrap_or("").trim().trim_start_matches('[');
-    let nums: Vec<i64> = coords.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+    let line = text
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("快照缺 {needle} 行：{text}"));
+    let coords = line
+        .split(']')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('[');
+    let nums: Vec<i64> = coords
+        .split(',')
+        .filter_map(|n| n.trim().parse().ok())
+        .collect();
     assert_eq!(nums.len(), 4, "坐标行：{line}");
     ((nums[0] + nums[2]) / 2, (nums[1] + nums[3]) / 2)
 }
@@ -541,8 +550,14 @@ fn browser_tab_governance() {
     // 当前页打开）；页 B：_blank 链接的去向（标记验证）。
     let page_a = home.join("tab-a.html");
     let page_b = home.join("tab-b.html");
-    let a_url = format!("file:///{}", page_a.display().to_string().replace('\\', "/"));
-    let b_url = format!("file:///{}", page_b.display().to_string().replace('\\', "/"));
+    let a_url = format!(
+        "file:///{}",
+        page_a.display().to_string().replace('\\', "/")
+    );
+    let b_url = format!(
+        "file:///{}",
+        page_b.display().to_string().replace('\\', "/")
+    );
     std::fs::write(
         &page_a,
         format!(
@@ -629,7 +644,10 @@ fn browser_tab_governance() {
         .await;
         assert_eq!(code, StatusCode::OK, "{v}");
         assert!(
-            v["value"]["message"].as_str().unwrap_or("").contains("已关 2 个"),
+            v["value"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("已关 2 个"),
             "关掉 2 个泄漏页：{v}"
         );
         let (_, v) = fire(&r, auth_get(&list_uri, &token)).await;

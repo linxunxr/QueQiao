@@ -163,7 +163,9 @@ impl Session {
             if excess == 0 {
                 break;
             }
-            let Some(id) = p.get("id").and_then(Value::as_str) else { continue };
+            let Some(id) = p.get("id").and_then(Value::as_str) else {
+                continue;
+            };
             if id == self.target_id {
                 continue;
             }
@@ -173,7 +175,9 @@ impl Session {
             }
         }
         if closed > 0 {
-            crate::logging::log(&format!("[browser] 标签页超预算（>{TAB_BUDGET}），已回收 {closed} 个"));
+            crate::logging::log(&format!(
+                "[browser] 标签页超预算（>{TAB_BUDGET}），已回收 {closed} 个"
+            ));
         }
         Ok(())
     }
@@ -237,11 +241,9 @@ impl Browser {
                     crate::logging::log("[browser] 闲置自动关闭");
                     if let Some(mut s) = guard.take() {
                         let _ = s.child.start_kill();
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_secs(5),
-                            s.child.wait(),
-                        )
-                        .await;
+                        let _ =
+                            tokio::time::timeout(std::time::Duration::from_secs(5), s.child.wait())
+                                .await;
                     } // Drop → kill_on_drop 兜底
                 }
             }
@@ -266,8 +268,7 @@ impl Browser {
                 "[browser] 按配置切换显示模式，重启浏览器"
             });
             let _ = s.child.start_kill();
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_secs(5), s.child.wait()).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), s.child.wait()).await;
         }
         let s = launch(cfg, want_headless).await?;
         *guard = Some(s);
@@ -498,8 +499,9 @@ impl Browser {
         self.ensure(cfg, false).await?;
         let guard = self.session.lock().await;
         let s = guard.as_ref().ok_or("浏览器会话缺失")?;
-        let pages =
-            list_pages(s.port).await.map_err(|e| format!("标签页扫描失败：{e}"))?;
+        let pages = list_pages(s.port)
+            .await
+            .map_err(|e| format!("标签页扫描失败：{e}"))?;
         let tabs: Vec<Value> = pages
             .iter()
             .enumerate()
@@ -527,8 +529,9 @@ impl Browser {
         self.ensure(cfg, false).await?;
         let mut guard = self.session.lock().await;
         let s = guard.as_mut().ok_or("浏览器会话缺失")?;
-        let pages =
-            list_pages(s.port).await.map_err(|e| format!("标签页扫描失败：{e}"))?;
+        let pages = list_pages(s.port)
+            .await
+            .map_err(|e| format!("标签页扫描失败：{e}"))?;
         if pages.is_empty() {
             return Err("浏览器没有标签页".into());
         }
@@ -951,7 +954,8 @@ async fn http_req_local(port: u16, method: &str, path: &str) -> Result<String, S
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .await
         .map_err(|e| e.to_string())?;
-    let req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let req =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(req.as_bytes())
         .await
@@ -1019,8 +1023,14 @@ mod tests {
     #[test]
     fn single_tab_script_shape() {
         assert!(SINGLE_TAB_JS.contains("__qqSingleTab"), "幂等守卫");
-        assert!(SINGLE_TAB_JS.contains("addEventListener('click'"), "捕获点击改写");
-        assert!(SINGLE_TAB_JS.contains("a.target = '_self'"), "blank 链接改当前页");
+        assert!(
+            SINGLE_TAB_JS.contains("addEventListener('click'"),
+            "捕获点击改写"
+        );
+        assert!(
+            SINGLE_TAB_JS.contains("a.target = '_self'"),
+            "blank 链接改当前页"
+        );
         assert!(SINGLE_TAB_JS.contains("window.open"), "window.open 覆盖");
         assert!(
             SINGLE_TAB_JS.contains("origin === location.origin"),
@@ -1041,7 +1051,9 @@ mod tests {
             page_target("t3", "https://a.example/3"),
         ];
         assert_eq!(
-            pick_replacement_target(&pages).and_then(|p| p.get("id")).and_then(Value::as_str),
+            pick_replacement_target(&pages)
+                .and_then(|p| p.get("id"))
+                .and_then(Value::as_str),
             Some("t3"),
             "跳过 devtools 取最新普通页"
         );
@@ -1050,11 +1062,16 @@ mod tests {
             page_target("d2", "devtools://b"),
         ];
         assert_eq!(
-            pick_replacement_target(&devtools_only).and_then(|p| p.get("id")).and_then(Value::as_str),
+            pick_replacement_target(&devtools_only)
+                .and_then(|p| p.get("id"))
+                .and_then(Value::as_str),
             Some("d2"),
             "全 devtools 退最新"
         );
-        assert!(pick_replacement_target(&[]).is_none(), "无页可接 → 上层新开空白页");
+        assert!(
+            pick_replacement_target(&[]).is_none(),
+            "无页可接 → 上层新开空白页"
+        );
         // 空白页也是合法候选（target=_blank 泄漏页常停在 about:blank）。
         let blank = vec![page_target("b1", "about:blank")];
         assert!(pick_replacement_target(&blank).is_some());
