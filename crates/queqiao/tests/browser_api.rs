@@ -17,8 +17,13 @@ use queqiao::config::Config;
 use queqiao::social_store::SocialStore;
 use queqiao::tools_api::{ToolApiState, build_router};
 
-fn temp_home() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("queqiao-browser-api-{}", std::process::id()));
+/// 每个测试独立临时目录（pid+tag）：两个测试先后跑时，前一个垂死的
+/// Chrome 还握着旧目录句柄，复用同一路径会撞 Chromium 单例机制。
+fn temp_home(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "queqiao-browser-api-{}-{tag}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("state")).unwrap();
     dir
@@ -85,6 +90,15 @@ fn chromium_exists() -> bool {
     .any(|p| std::path::Path::new(p).exists())
 }
 
+/// QUEQIAO_HOME 是进程级环境变量，本文件两个测试必须串行（否则互相覆盖
+/// home，浏览器 profile 落到对方的临时目录里——真机并行跑踩过）。锁只做
+/// 串行化用，容忍中毒（前一个测试 panic 不该连坐后一个）。
+static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+fn home_guard() -> std::sync::MutexGuard<'static, ()> {
+    HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 async fn get(router: &mut axum::Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("GET")
@@ -116,13 +130,118 @@ async fn post(router: &mut axum::Router, uri: &str, body: Value) -> (StatusCode,
     (status, serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
+/// 造带合法会话令牌的 router：social-v2.json 里 private:1 预置令牌、owner=1
+/// （allowConvKeys 默认即 private:1）。返回 (router, token)，两个 CDP 链测试
+/// 共用。
+fn make_authorized_router(home: &std::path::Path) -> (axum::Router, String) {
+    let social = SocialStore::load(&home.join("state").join("social-v2.json"), None).unwrap();
+    {
+        let mut st = social;
+        let _ = st.ensure_agent_token("private:1");
+        st.save();
+    }
+    let mut cfg = Config::default();
+    cfg.browser.enabled = true;
+    cfg.browser.headless = true;
+    cfg.owner_qq = Some(queqiao::config::OwnerQQ(1));
+    let social = SocialStore::load(&home.join("state").join("social-v2.json"), Some(1)).unwrap();
+    let (update_tx, _rx) = tokio::sync::mpsc::channel(1);
+    let mk_dsh = || {
+        queqiao_dsh::client::DshClient::new(
+            "http://127.0.0.1:1",
+            queqiao_dsh::client::ReqwestTransport::new(50),
+            queqiao_dsh::client::AuthSources {
+                launch_token: String::new(),
+                token_explicit: false,
+                secret: Box::new(|| None),
+                rediscover_token: None,
+            },
+            false,
+        )
+    };
+    let state = Arc::new(ToolApiState {
+        social: Arc::new(Mutex::new(social)),
+        onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),
+        cfg,
+        dsh: Arc::new(Mutex::new(mk_dsh())),
+        sessions: Arc::new(Mutex::new(
+            queqiao::session_manager::SessionManager::new(
+                Arc::new(Mutex::new(mk_dsh())),
+                &home.join("state").join("sessions.json"),
+                "qq-chat-v2",
+                "QQ 聊天",
+                "agents",
+            )
+            .unwrap(),
+        )),
+        update_tx,
+        feedback_times: Mutex::new(std::collections::HashMap::new()),
+        slang_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
+        browser: queqiao::browser::new_browser(),
+    });
+    let r = build_router(state, "", None);
+    // 从 store 里取令牌（测试侧读文件而不是内部 API——social-v2.json 落盘）。
+    let social_text = std::fs::read_to_string(home.join("state").join("social-v2.json")).unwrap();
+    let token = serde_json::from_str::<Value>(&social_text)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/conversations/private:1/agentToken")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    assert!(!token.is_empty(), "令牌已落盘");
+    (r, token)
+}
+
+/// 带 agent 令牌发请求 → (状态码, 响应 JSON)。
+async fn fire(r: &axum::Router, req: Request<Body>) -> (StatusCode, Value) {
+    let resp = r.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+fn auth_get(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("x-agent-token", token)
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn auth_post(uri: &str, body: Value, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-agent-token", token)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// 从快照文本里取含 needle 的行的 [x1,y1,x2,y2] 中心坐标。
+fn center_of(text: &str, needle: &str) -> (i64, i64) {
+    let line = text.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("快照缺 {needle} 行：{text}"));
+    let coords = line.split(']').next().unwrap_or("").trim().trim_start_matches('[');
+    let nums: Vec<i64> = coords.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+    assert_eq!(nums.len(), 4, "坐标行：{line}");
+    ((nums[0] + nums[2]) / 2, (nums[1] + nums[3]) / 2)
+}
+
 #[test]
 fn browser_gate_chain_and_cdp_full_chain() {
     if !chromium_exists() {
         eprintln!("跳过：本机无 Chrome/Edge（专属 Chromium 资产发布后改走 browser/ 目录）");
         return;
     }
-    let home = temp_home();
+    let _home_guard = home_guard();
+    let home = temp_home("gate");
     unsafe { std::env::set_var("QUEQIAO_HOME", &home) };
 
     // 测试页：标记文字 + 可点按钮（点击后追加文字）+ 输入框。
@@ -177,68 +296,8 @@ fn browser_gate_chain_and_cdp_full_chain() {
         // 无法过门禁……所以这里换一条路：把令牌写进 social store 再重建 router。
     });
 
-    // 为 CDP 链造一个合法会话令牌：social-v2.json 里 private:<owner> 的
-    // agent_token=test-token，owner 设 1，allowConvKeys 默认即 private:1。
-    let social = SocialStore::load(&home.join("state").join("social-v2.json"), None).unwrap();
-    {
-        let mut st = social;
-        let tok = st.ensure_agent_token("private:1");
-        let _ = tok;
-        st.save();
-    }
-    let mut cfg = Config::default();
-    cfg.browser.enabled = true;
-    cfg.browser.headless = true;
-    cfg.owner_qq = Some(queqiao::config::OwnerQQ(1));
-    // 重建带 owner 的 router（复用 make_router 的形状，但注入 owner 与已存令牌）。
-    let social = SocialStore::load(&home.join("state").join("social-v2.json"), Some(1)).unwrap();
-    let (update_tx, _rx) = tokio::sync::mpsc::channel(1);
-    let mk_dsh = || {
-        queqiao_dsh::client::DshClient::new(
-            "http://127.0.0.1:1",
-            queqiao_dsh::client::ReqwestTransport::new(50),
-            queqiao_dsh::client::AuthSources {
-                launch_token: String::new(),
-                token_explicit: false,
-                secret: Box::new(|| None),
-                rediscover_token: None,
-            },
-            false,
-        )
-    };
-    let state = Arc::new(ToolApiState {
-        social: Arc::new(Mutex::new(social)),
-        onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),
-        cfg,
-        dsh: Arc::new(Mutex::new(mk_dsh())),
-        sessions: Arc::new(Mutex::new(
-            queqiao::session_manager::SessionManager::new(
-                Arc::new(Mutex::new(mk_dsh())),
-                &home.join("state").join("sessions.json"),
-                "qq-chat-v2",
-                "QQ 聊天",
-                "agents",
-            )
-            .unwrap(),
-        )),
-        update_tx,
-        feedback_times: Mutex::new(std::collections::HashMap::new()),
-        slang_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
-        browser: queqiao::browser::new_browser(),
-    });
-    let r = build_router(state, "", None);
-    // 从 store 里取令牌（测试侧读文件而不是内部 API——social-v2.json 落盘）。
-    let social_text = std::fs::read_to_string(home.join("state").join("social-v2.json")).unwrap();
-    let token = serde_json::from_str::<Value>(&social_text)
-        .ok()
-        .and_then(|v| {
-            v.pointer("/conversations/private:1/agentToken")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_default();
-    assert!(!token.is_empty(), "令牌已落盘");
+    // 为 CDP 链造一个带合法会话令牌的 router（owner=1 + private:1 预置令牌）。
+    let (r, token) = make_authorized_router(&home);
 
     let page_url = format!("file:///{}", page.display().to_string().replace('\\', "/"));
     rt.block_on(async move {
@@ -459,6 +518,170 @@ fn browser_gate_chain_and_cdp_full_chain() {
         let v: Value = serde_json::from_str(&String::from_utf8_lossy(&bytes)).unwrap();
         assert_eq!(v["value"]["loggedIn"], json!(false));
         let _ = hdr("x"); // 消除未用警告
+    });
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// 标签页治理全链：单页纪律（_blank 链接当前页打开）→ 泄漏（跨源
+/// window.open 真开新页——注入脚本对跨源放行，OAuth 类弹窗不误伤）→
+/// 预算回收（超 3 个操作前自动关最老非活跃页，活跃页保住）→
+/// browser_tabs 列出/只留当前页/最后一页保护。
+#[test]
+fn browser_tab_governance() {
+    if !chromium_exists() {
+        eprintln!("跳过：本机无 Chrome/Edge（专属 Chromium 资产发布后改走 browser/ 目录）");
+        return;
+    }
+    let _home_guard = home_guard();
+    let home = temp_home("tabs");
+    unsafe { std::env::set_var("QUEQIAO_HOME", &home) };
+
+    // 页 A：标记 + 跨源 window.open 泄漏按钮 + _blank 链接（应被改写为
+    // 当前页打开）；页 B：_blank 链接的去向（标记验证）。
+    let page_a = home.join("tab-a.html");
+    let page_b = home.join("tab-b.html");
+    let a_url = format!("file:///{}", page_a.display().to_string().replace('\\', "/"));
+    let b_url = format!("file:///{}", page_b.display().to_string().replace('\\', "/"));
+    std::fs::write(
+        &page_a,
+        format!(
+            r#"<!DOCTYPE html><html><body>
+            <h1 id="marker">TAB_PAGE_A_MARKER</h1>
+            <a id="tob" href="{b_url}" target="_blank">去页B</a>
+            <button id="leak" onclick="window.open('https://example.com')">泄漏</button>
+            </body></html>"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &page_b,
+        r#"<!DOCTYPE html><html><body><h1 id="marker">TAB_PAGE_B_MARKER</h1></body></html>"#,
+    )
+    .unwrap();
+
+    let (r, token) = make_authorized_router(&home);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        let key_q = "conversationKey=private%3A1";
+        let list_uri = format!("/api/browser/tabs?action=list&{key_q}");
+        let snap_uri = format!("/api/browser/snapshot?{key_q}");
+
+        // ① 导航到页 A，单页起步。
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/navigate",
+                json!({"conversationKey": "private:1", "url": a_url}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+
+        // ② 泄漏 3 次：跨源 window.open 每次真开新页 → 共 4 页
+        //    （每次 click 前的 reconcile 在 ≤3 时不回收）。
+        let (_, v) = fire(&r, auth_get(&snap_uri, &token)).await;
+        let text = v["value"]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("TAB_PAGE_A_MARKER"), "页 A 标记：{text}");
+        let (lx, ly) = center_of(text, "id=leak");
+        for _ in 0..3 {
+            let (code, v) = fire(
+                &r,
+                auth_post(
+                    "/api/browser/click",
+                    json!({"x": lx, "y": ly, "conversationKey": "private:1"}),
+                    &token,
+                ),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "{v}");
+        }
+        let (code, v) = fire(&r, auth_get(&list_uri, &token)).await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert_eq!(v["value"]["count"], json!(4), "3 次泄漏后 4 页：{v}");
+
+        // ③ 下一次操作（snapshot）前置回收：4 → 3，活跃页（页 A）保住。
+        let (code, _) = fire(&r, auth_get(&snap_uri, &token)).await;
+        assert_eq!(code, StatusCode::OK);
+        let (code, v) = fire(&r, auth_get(&list_uri, &token)).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v["value"]["count"], json!(3), "超预算回收后 3 页：{v}");
+        let active = v["value"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["active"] == json!(true))
+            .expect("有活跃页");
+        assert!(
+            active["url"].as_str().unwrap_or("").contains("tab-a"),
+            "回收只关非活跃页：{active}"
+        );
+
+        // ④ close 不带 index：只留活跃页。
+        let (code, v) = fire(
+            &r,
+            auth_get(&format!("/api/browser/tabs?action=close&{key_q}"), &token),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        assert!(
+            v["value"]["message"].as_str().unwrap_or("").contains("已关 2 个"),
+            "关掉 2 个泄漏页：{v}"
+        );
+        let (_, v) = fire(&r, auth_get(&list_uri, &token)).await;
+        assert_eq!(v["value"]["count"], json!(1));
+
+        // ⑤ 单页纪律：_blank 链接被改写为当前页打开——页 B 标记出现在
+        //    当前页快照，且标签页数不变。
+        let (_, v) = fire(&r, auth_get(&snap_uri, &token)).await;
+        let text = v["value"]["text"].as_str().unwrap_or_default();
+        let (tx, ty) = center_of(text, "id=tob");
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/click",
+                json!({"x": tx, "y": ty, "conversationKey": "private:1"}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let _ = fire(
+            &r,
+            auth_get(&format!("/api/browser/wait?timeoutS=8&{key_q}"), &token),
+        )
+        .await;
+        let (_, v) = fire(&r, auth_get(&snap_uri, &token)).await;
+        let text2 = v["value"]["text"].as_str().unwrap_or_default();
+        assert!(
+            text2.contains("TAB_PAGE_B_MARKER"),
+            "_blank 链接当前页导航到页 B：{text2}"
+        );
+        let (_, v) = fire(&r, auth_get(&list_uri, &token)).await;
+        assert_eq!(
+            v["value"]["count"],
+            json!(1),
+            "_blank 改写后无新标签页：{v}"
+        );
+
+        // ⑥ 最后一页保护：仅剩 1 页时 close index=0 拒绝。
+        let (code, v) = fire(
+            &r,
+            auth_get(
+                &format!("/api/browser/tabs?action=close&index=0&{key_q}"),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_GATEWAY, "{v}");
+        assert!(
+            v["error"].as_str().unwrap_or("").contains("最后"),
+            "最后一页不关：{v}"
+        );
     });
 
     let _ = std::fs::remove_dir_all(&home);

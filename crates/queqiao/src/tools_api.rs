@@ -209,6 +209,7 @@ pub fn build_router(
         .route("/api/browser/bind-status", get(browser_bind_status_ep))
         .route("/api/browser/unbind", post(browser_unbind_ep))
         .route("/api/browser/login-status", get(browser_login_status_ep))
+        .route("/api/browser/tabs", get(browser_tabs_ep))
         .route("/api/tablet/status", get(tablet_status_ep))
         .route("/api/tablet/screenshot", get(tablet_screenshot_ep))
         .route("/api/tablet/read-screen", get(tablet_read_screen_ep))
@@ -2151,6 +2152,36 @@ async fn browser_login_status_ep(
     };
     let v = state.browser.bind_status(&cfg, site, false).await;
     ok_json(v)
+}
+
+/// GET /api/browser/tabs：标签页治理。action=list 列出（index/标题/URL/
+/// 是否活跃）；action=close 关页（index 省略=只留活跃页，给 index 关那一页，
+/// 最后一页不关）。需要会话令牌（同其他控制工具）。
+async fn browser_tabs_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    let key = q.get("conversationKey").cloned().unwrap_or_default();
+    let action = q.get("action").map(String::as_str).unwrap_or("list");
+    let index = q.get("index").and_then(|v| v.parse::<usize>().ok());
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match action {
+        "list" => match state.browser.tabs(&cfg).await {
+            Ok(v) => ok_json(v),
+            Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+        },
+        "close" => match state.browser.tabs_close(&cfg, index).await {
+            Ok(msg) => ok_json(json!({ "ok": true, "message": msg })),
+            Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+        },
+        other => denied(
+            StatusCode::BAD_REQUEST,
+            &format!("无效 action：{other}（list/close）"),
+        ),
+    }
 }
 
 // ── 鸿蒙平板控制端点（Node /api/tablet/* 同语义）───────────────────────────

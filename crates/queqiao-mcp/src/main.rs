@@ -1086,6 +1086,21 @@ const TOOLS: &[ToolDef] = &[
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
+    ToolDef {
+        name: "browser_tabs",
+        description: "查看/收拾专属浏览器的标签页：action=list 列出全部标签页（序号/标题/URL/是否当前页），action=close 关标签页（不给 index=只留当前页，给 index=关那一页；最后一个标签页不会关）。系统平时自动单页打开并按预算回收，标签页明显变多时才需要手动收拾。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/tabs",
+        method: "GET",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("action", "string", false, "list=列出（默认）；close=关闭"),
+            ("index", "number", false, "要关的标签页序号（action=close 可选；不给=只留当前页）"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
 ];
 
 fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
