@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "guard"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "hooker"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "injector"
 version = "0.1.0"
 dependencies = [
