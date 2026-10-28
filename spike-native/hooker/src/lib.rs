@@ -29,7 +29,7 @@ use windows::Win32::System::ProcessStatus::{EnumProcessModulesEx, GetModuleFileN
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
 const DLL_PROCESS_ATTACH: u32 = 1;
-const TARGET_RVA: usize = 0x731EA6; // SSO 通用请求装配层（push rbp 单字节首指令）
+const TARGET_RVA: usize = 0x87FF9A; // 业务命令发送转发层（JS→napi→vtable，push rbp 单字节首指令）
 const MAX_HITS: u32 = 6;
 const SNAP_BYTES: usize = 96;
 
@@ -37,7 +37,10 @@ static HOOK_ADDR_PTR: AtomicU64 = AtomicU64::new(0); // 完整 64 位地址，VE
 static ORIG_BYTE: AtomicU32 = AtomicU32::new(0);
 static HITS: AtomicU32 = AtomicU32::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
-static PENDING_STEP: AtomicBool = AtomicBool::new(false);
+// 线程安全修复（S1-R4 事故）：放弃全局 PENDING_STEP——多线程并发断点时
+// 第二线程的单步异常会被误判丢弃导致 TF 悬空。改为无状态 RIP 判定：
+// 我们设置的单步必然落在 hook+1（首指令 push rbp 为 1 字节），
+// 其余 SINGLE_STEP 一律放行（QQ 正常代码不使用 TF）。
 
 // 命中快照缓冲（固定大小，VEH 内无分配）
 #[derive(Clone, Copy)]
@@ -84,7 +87,8 @@ extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
             // int3：RIP 指向 int3 之后一字节
             let at = ctx.Rip as usize - 1;
             if at != hook { return EXCEPTION_CONTINUE_SEARCH; }
-            let n = HITS.load(Ordering::Relaxed);
+            // 原子取槽位：并发命中各占各槽，不再竞态写同槽
+            let n = HITS.fetch_add(1, Ordering::Relaxed);
             if n < MAX_HITS {
                 let s = &mut SNAPS[n as usize];
                 s.valid = true;
@@ -101,25 +105,22 @@ extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
                         s.mem_ind_ok = read_ok(pv as *const c_void, &mut s.mem_ind);
                     }
                 }
-                HITS.store(n + 1, Ordering::Relaxed);
                 write_report();
             }
             // 摘除断点（次数满则永久；否则临时，单步后重落）
-            let keep = n + 1 < MAX_HITS;
+            let keep = n < MAX_HITS;
             let p = hook as *mut u8;
             *p = ORIG_BYTE.load(Ordering::Relaxed) as u8;
             let _ = FlushInstructionCache(
                 windows::Win32::System::Threading::GetCurrentProcess(),
                 Some(p as *const c_void), 1);
-            PENDING_STEP.store(keep, Ordering::Relaxed);
             // 回退 RIP 到原指令并置 TF 单步
             ctx.Rip = hook as u64;
             ctx.EFlags |= 0x100;
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        if code == 0x80000004u32 as i32 && PENDING_STEP.load(Ordering::Relaxed) {
-            // 单步恢复：RIP 已在原指令之后
-            PENDING_STEP.store(false, Ordering::Relaxed);
+        if code == 0x80000004u32 as i32 && ctx.Rip == hook as u64 + 1 {
+            // 单步恢复：RIP 判定（无全局状态，多线程天然安全）
             ctx.EFlags &= !0x100u32;
             let p = hook as *mut u8;
             *p = 0xCC;
