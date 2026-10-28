@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["injector", "proof"]
+members = ["injector", "proof", "recon"]
 
 # 鹊桥 native 注入路线 spike S0 工具（验证后整目录可删）。
 # 独立 workspace，不并入 QueQiao 主工作区。
