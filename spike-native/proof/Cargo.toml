@@ -1,0 +1,23 @@
+[package]
+name = "proof"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
+[profile.release]
+# 证明 DLL 保持体积与依赖最小，便于排查 loader 问题
+opt-level = "z"
+lto = true
+panic = "abort"
