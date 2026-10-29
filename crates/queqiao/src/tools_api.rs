@@ -165,7 +165,11 @@ pub fn build_router(
         .route("/api/socialV2/send-poke", post(send_poke))
         .route("/api/socialV2/react-message", post(react_message))
         .route("/api/socialV2/recall-message", post(recall_message))
+        // 双路由：MCP 相对 endpoint 统一拼 /api/socialV2/ 前缀（13b71f6 只挂了
+        // /api/images/message，MCP 拼出 socialV2 路径 404 空 body→json 解码瞬时
+        // 失败，看图工具上线起全灭；旧路径保留兼容存量调用）。
         .route("/api/images/message", get(message_images))
+        .route("/api/socialV2/images/message", get(message_images))
         .route("/api/socialV2/forward-msg", get(forward_msg))
         .route("/api/socialV2/collect-sticker", post(collect_sticker))
         .route("/api/socialV2/fetch-sticker", post(fetch_sticker))
@@ -768,27 +772,42 @@ async fn message_images(
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build();
-        urls.iter()
-            .filter_map(|(url, text)| {
-                let client = client.as_ref().ok()?;
-                let resp = client.get(url).send().ok()?;
-                let bytes = resp.bytes().ok()?;
-                let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                };
-                use base64::Engine;
-                Some(json!({
-                    "kind": "image", "mimeType": mime, "text": text,
-                    "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                }))
-            })
-            .collect::<Vec<_>>()
+        let mut out = Vec::new();
+        let mut failures = Vec::new();
+        for (url, text) in &urls {
+            let Some(client) = client.as_ref().ok() else { break };
+            // error_for_status：QQ CDN rkey 过期回 403 错误页，无状态检查时会把
+            // HTML base64 成「图片」喂给视觉模型（模型侧报图片解析错误）。
+            let fetched = client
+                .get(url)
+                .send()
+                .and_then(|r| r.error_for_status())
+                .and_then(|r| r.bytes());
+            match fetched {
+                Ok(bytes) => {
+                    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+                        "image/png"
+                    } else {
+                        "image/jpeg"
+                    };
+                    use base64::Engine;
+                    out.push(json!({
+                        "kind": "image", "mimeType": mime, "text": text,
+                        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    }));
+                }
+                Err(e) => failures.push(format!("「{text}」下载失败：{e}")),
+            }
+        }
+        (out, failures)
     })
     .await
     .unwrap_or_default();
-    images.extend(downloaded);
+    let (mut downloaded, failures) = downloaded;
+    for f in &failures {
+        note.push_str(&format!("{f}；"));
+    }
+    images.append(&mut downloaded);
     if images.is_empty() {
         return ok_json(json!({ "images": [], "note": note + "未找到图片/表情" }));
     }

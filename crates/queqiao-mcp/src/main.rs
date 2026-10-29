@@ -1748,3 +1748,106 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    /// 构造桥 router（同 queqiao/tests/tablet_api.rs 的最小装配；reqwest
+    /// blocking client 不能在 async 上下文构造/析构，须在同步测试线程里建）。
+    fn make_dsh() -> queqiao_dsh::client::DshClient<queqiao_dsh::client::ReqwestTransport> {
+        queqiao_dsh::client::DshClient::new(
+            "http://127.0.0.1:1",
+            queqiao_dsh::client::ReqwestTransport::new(50),
+            queqiao_dsh::client::AuthSources {
+                launch_token: String::new(),
+                token_explicit: false,
+                secret: Box::new(|| None),
+                rediscover_token: None,
+            },
+            false,
+        )
+    }
+
+    fn bridge_router() -> axum::Router {
+        let home = std::env::temp_dir().join(format!("queqiao-mcp-routes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let social = queqiao::social_store::SocialStore::load(
+            &home.join("state").join("social-v2.json"),
+            None,
+        )
+        .unwrap();
+        let (update_tx, _rx) = tokio::sync::mpsc::channel(1);
+        let state = Arc::new(queqiao::tools_api::ToolApiState {
+            social: Arc::new(std::sync::Mutex::new(social)),
+            onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),
+            cfg: queqiao::config::Config::default(),
+            dsh: Arc::new(std::sync::Mutex::new(make_dsh())),
+            sessions: std::sync::Arc::new(std::sync::Mutex::new(
+                queqiao::session_manager::SessionManager::new(
+                    Arc::new(std::sync::Mutex::new(make_dsh())),
+                    &home.join("state").join("sessions.json"),
+                    "qq-chat-v2",
+                    "QQ 聊天",
+                    "agents",
+                )
+                .unwrap(),
+            )),
+            update_tx,
+            feedback_times: std::sync::Mutex::new(std::collections::HashMap::new()),
+            slang_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
+            browser: queqiao::browser::new_browser(),
+        });
+        queqiao::tools_api::build_router(state, "", None)
+    }
+
+    /// 守护：TOOLS 里每个 endpoint 按 call_tool 同款规则拼 URL，桥上必须有
+    /// 路由。路径漂移时 axum 回 404 空 body，MCP 的 resp.json() 瞬时报
+    /// 「error decoding response body」且无任何线索（qq_get_message_images
+    /// 上线起全灭 5 天才发现，本测试即防复发）。缺参 400 / 门禁 403 都证明
+    /// 路由存在，只断言 ≠404。
+    #[test]
+    fn all_tool_endpoints_exist_on_bridge() {
+        let router = bridge_router();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for def in TOOLS {
+                let uri = if def.endpoint.starts_with('/') {
+                    def.endpoint.to_owned()
+                } else {
+                    format!("/api/socialV2/{}", def.endpoint)
+                };
+                let req = if def.method == "GET" {
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("{uri}?conversationKey=group:1"))
+                        .body(Body::empty())
+                        .unwrap()
+                } else {
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{\"conversationKey\":\"group:1\"}"))
+                        .unwrap()
+                };
+                let resp = router.clone().oneshot(req).await.unwrap();
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::NOT_FOUND,
+                    "{} → {uri} 在桥上无路由（404 空 body 会让 MCP 报解码失败）",
+                    def.name
+                );
+            }
+        });
+    }
+}

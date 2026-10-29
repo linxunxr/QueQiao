@@ -12,3 +12,13 @@ path = "src/main.rs"
 [dependencies]
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+
+[dev-dependencies]
+# 守护测试：遍历 TOOLS 断言每个 endpoint 在桥 build_router 有路由（防两端
+# 路径约定再漂移——images/message 曾因此 404 空 body 全灭）。
+queqiao = { path = "../queqiao" }
+queqiao-dsh = { path = "../queqiao-dsh", features = ["reqwest", "ws"] }
+queqiao-onebot = { path = "../queqiao-onebot", features = ["io"] }
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true }
