@@ -704,3 +704,214 @@ fn browser_tab_governance() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn browser_key_upload_focus_and_snapshot_layout() {
+    if !chromium_exists() {
+        eprintln!("跳过：本机无 Chrome/Edge");
+        return;
+    }
+    let _home_guard = home_guard();
+    let home = temp_home("keyupload");
+    unsafe { std::env::set_var("QUEQIAO_HOME", &home) };
+
+    // 测试页：回车标记输入框、contenteditable 自定义框（占位 span 不在
+    // input 上——模拟组件库父层交互）、file input、按钮内 span（closest
+    // 可点标注）、长填充 + fixed 底栏（快照前置验证）。
+    let page = home.join("key-upload-test.html");
+    std::fs::write(
+        &page,
+        r#"<!DOCTYPE html><html><body>
+        <h1>KEY_UPLOAD_TEST</h1>
+        <div id="edit-region" style="width:320px;height:40px;border:1px solid #ccc" contenteditable="true"><span id="ph" style="color:#999">点此输入文字</span></div>
+        <input id="inp" placeholder="输入框提示语" onkeydown="if(event.key==='Enter')document.getElementById('out').textContent='ENTERED_'+this.value">
+        <button id="btn"><span id="btn-span">按钮内文字</span></button>
+        <input type="file" id="f" onchange="document.getElementById('out2').textContent='FILE_'+this.files[0].name">
+        <div id="out"></div><div id="out2"></div>
+        <div style="height:2600px"><p>填充段落：让页面足够长，验证 fixed 底栏在截断时前置保留。</p><p>filler02</p><p>filler03</p><p>filler04</p><p>filler05</p><p>filler06</p><p>filler07</p><p>filler08</p><p>filler11</p><p>filler12</p><p>filler13</p><p>filler14</p><p>filler15</p><p>filler16</p><p>filler17</p><p>filler18</p><p>filler19</p><p>filler20</p><p>filler21</p><p>filler22</p><p>filler23</p><p>filler24</p><p>filler25</p><p>filler26</p><p>filler27</p><p>filler28</p><p>filler29</p><p>filler30</p><p>filler31</p><p>filler32</p><p>filler33</p><p>filler34</p><p>filler35</p><p>filler36</p><p>filler37</p><p>filler38</p><p>filler39</p><p>filler40</p><p>filler41</p><p>filler42</p><p>filler43</p><p>filler44</p><p>filler45</p><p>filler46</p><p>filler47</p><p>filler48</p><p>filler49</p><p>filler50</p><p>filler51</p><p>filler52</p><p>filler53</p><p>filler54</p><p>filler55</p><p>filler56</p><p>filler57</p><p>filler58</p><p>filler59</p><p>filler60</p></div>
+        <div id="fixedbar" style="position:fixed;bottom:0;left:0;width:100%;height:40px;background:#eee">FIXED_BOTTOM_BAR_评论输入区</div>
+        </body></html>"#,
+    )
+    .unwrap();
+    // 1x1 PNG（上传白名单魔数）。
+    let png = home.join("state").join("tiny.png");
+    use base64::Engine;
+    std::fs::write(
+        &png,
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap(),
+    )
+    .unwrap();
+
+    let (r, token) = make_authorized_router(&home);
+    let page_url = format!("file:///{}", page.display().to_string().replace('\\', "/"));
+    let png_path = png.display().to_string();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async move {
+        // 导航测试页。
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/navigate",
+                json!({"conversationKey": "private:1", "url": page_url}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+
+        // 快照：按钮内 span 标「可点」（closest 祖先交互）。
+        let (code, v) = fire(
+            &r,
+            auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let snap = v["value"]["text"].as_str().unwrap().to_owned();
+        assert!(snap.contains("按钮内文字"), "快照含按钮文字：{snap}");
+        let btn_line = snap.lines().find(|l| l.contains("按钮内文字")).unwrap();
+        assert!(btn_line.contains("可点"), "按钮内 span 应标可点：{btn_line}");
+
+        // ① focus 探测 + 输入：点击 input 坐标（INPUT 聚焦详情回传）。
+        let (ix, iy) = center_of(&snap, "输入框提示语");
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/type",
+                json!({"conversationKey": "private:1", "text": "abc", "x": ix, "y": iy}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let msg = v["value"]["message"].as_str().unwrap();
+        assert!(msg.contains("已聚焦"), "type 应带聚焦详情：{msg}");
+
+        // ② enter：页面 keydown Enter 标记。
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/key",
+                json!({"conversationKey": "private:1", "key": "enter"}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let (code, v) = fire(
+            &r,
+            auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
+        )
+        .await;
+        let snap = v["value"]["text"].as_str().unwrap();
+        assert!(snap.contains("ENTERED_abc"), "enter 生效：{snap}");
+
+        // ③ ctrl+a 全选后输入替换（value 变 xyz）。
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/key",
+                json!({"conversationKey": "private:1", "key": "a", "modifiers": "ctrl"}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/type",
+                json!({"conversationKey": "private:1", "text": "xyz"}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let (code, v) = fire(
+            &r,
+            auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
+        )
+        .await;
+        let snap = v["value"]["text"].as_str().unwrap();
+        assert!(snap.contains("value=\"xyz\""), "ctrl+a 替换生效：{snap}");
+
+        // ④ upload：白名单本地路径填进 file input（onchange 标记文件名）。
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/upload",
+                json!({"conversationKey": "private:1", "source": png_path}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let (code, v) = fire(
+            &r,
+            auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
+        )
+        .await;
+        let snap = v["value"]["text"].as_str().unwrap();
+        assert!(snap.contains("FILE_tiny.png"), "upload 触发 change：{snap}");
+
+        // ⑤ 白名单外路径拒绝。
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/upload",
+                json!({"conversationKey": "private:1", "source": "C:\\Windows\\win.ini"}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_GATEWAY, "白名单外拒绝：{v}");
+
+        // ⑥ contenteditable：点占位 span 坐标输入（focus 探测向祖先找可编区）。
+        let (ex, ey) = center_of(&snap, "点此输入文字");
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/type",
+                json!({"conversationKey": "private:1", "text": "你好世界", "x": ex, "y": ey}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let msg = v["value"]["message"].as_str().unwrap();
+        assert!(msg.contains("已聚焦") && msg.contains("可编辑区"), "编辑区聚焦：{msg}");
+        let (code, v) = fire(
+            &r,
+            auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
+        )
+        .await;
+        let snap = v["value"]["text"].as_str().unwrap();
+        assert!(snap.contains("你好世界"), "编辑区输入生效：{snap}");
+
+        // ⑦ 小 maxChars：fixed 底栏前置（截断时操作栏保住）。
+        let (code, v) = fire(
+            &r,
+            auth_get(
+                "/api/browser/snapshot?conversationKey=private:1&maxChars=2500",
+                &token,
+            ),
+        )
+        .await;
+        let snap = v["value"]["text"].as_str().unwrap();
+        assert!(snap.contains("已截断"), "该截断：{snap}");
+        let fixed_pos = snap.find("FIXED_BOTTOM_BAR");
+        let trunc_pos = snap.find("已截断").unwrap();
+        assert!(
+            fixed_pos.map(|p| p < trunc_pos).unwrap_or(false),
+            "fixed 底栏应在截断标记前：{snap}"
+        );
+        // fixed 行应在快照最前部（前置区块），不该排在 filler 段落之后。
+        let first_filler = snap.find("填充段落").unwrap();
+        assert!(fixed_pos.unwrap() < first_filler, "fixed 应在文档流内容前：{snap}");
+    });
+}

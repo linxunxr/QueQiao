@@ -205,6 +205,8 @@ pub fn build_router(
         .route("/api/browser/screenshot", get(browser_screenshot_ep))
         .route("/api/browser/click", post(browser_click_ep))
         .route("/api/browser/type", post(browser_type_ep))
+        .route("/api/browser/key", post(browser_key_ep))
+        .route("/api/browser/upload", post(browser_upload_ep))
         .route("/api/browser/scroll", post(browser_scroll_ep))
         .route("/api/browser/back", post(browser_back_ep))
         .route("/api/browser/wait", get(browser_wait_ep))
@@ -1986,6 +1988,80 @@ async fn browser_type_ep(
         return browser_gate(&state, &headers, &key).unwrap_err();
     };
     match state.browser.input_text(&cfg, &text, x, y).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// POST /api/browser/key：按键/组合键（enter/backspace/ctrl+a 等）。
+async fn browser_key_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key_name = body
+        .get("key")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if key_name.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "key 不能为空");
+    }
+    let modifiers: Vec<String> = body
+        .get("modifiers")
+        .and_then(Value::as_str)
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    let refs: Vec<&str> = modifiers.iter().map(String::as_str).collect();
+    match state.browser.key(&cfg, &key_name, &refs).await {
+        Ok(m) => msg_out(m),
+        Err(e) => denied(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+/// POST /api/browser/upload：把 URL（下载）或白名单内本地文件填进页面第
+/// index 个 input[type=file]。
+async fn browser_upload_ep(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let source = body
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if source.is_empty() {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            "source 不能为空（http(s) URL 或鹊桥目录内本地路径）",
+        );
+    }
+    let index = body.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let Ok(cfg) = browser_gate(&state, &headers, &key) else {
+        return browser_gate(&state, &headers, &key).unwrap_err();
+    };
+    match state.browser.upload_file(&cfg, &source, index).await {
         Ok(m) => msg_out(m),
         Err(e) => denied(StatusCode::BAD_GATEWAY, &e),
     }

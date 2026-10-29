@@ -423,6 +423,7 @@ impl Browser {
     ) -> Result<String, String> {
         let text: String = text.chars().take(2000).collect();
         self.op(cfg, async move |ws| {
+            let mut focus_note = String::new();
             if let (Some(x), Some(y)) = (x, y) {
                 for t in ["mousePressed", "mouseReleased"] {
                     ws.call(
@@ -431,9 +432,104 @@ impl Browser {
                     )
                     .await?;
                 }
+                // 注入鼠标事件的原生 focus 对部分自定义组件（受控输入/挂载式
+                // 编辑器）不生效——真机小黑盒评论框实测点击后 insertText 落
+                // 空。内置 focus 探测（同 snapshot 边界：固定脚本仅插坐标）：
+                // elementFromPoint 向上找最近可编辑元素显式 focus，保证
+                // insertText 有落点。
+                let probe = ws.evaluate(&focus_editable_js(x, y)).await;
+                focus_note = match probe.as_deref() {
+                    Ok("no-element") => "；点击处无元素".to_owned(),
+                    Ok("no-editable") => "；点击处无可编辑元素（若输入未生效，先确认坐标是否输入框）".to_owned(),
+                    Ok(other) => format!("；已聚焦 {other}"),
+                    Err(e) => format!("；focus 探测失败（{e}）"),
+                };
             }
             ws.call("Input.insertText", json!({ "text": text })).await?;
-            Ok("已输入文本".to_owned())
+            Ok(format!("已输入文本{focus_note}"))
+        })
+        .await
+    }
+
+    /// 按键/组合键（browser_key）：CDP Input.dispatchKeyEvent，keyDown+keyUp
+    /// 成对。文本产生键带 text，命令键（退格/方向/组合）走 rawKeyDown——
+    /// Puppeteer 同款语义。
+    pub async fn key(
+        &self,
+        cfg: &BrowserConfig,
+        key: &str,
+        modifiers: &[&str],
+    ) -> Result<String, String> {
+        // Chromium Input.dispatchKeyEvent modifiers 位掩码。
+        let mut mask = 0u64;
+        for m in modifiers {
+            mask |= match *m {
+                "alt" => 1,
+                "ctrl" => 2,
+                "meta" | "cmd" => 4,
+                "shift" => 8,
+                other => return Err(format!("无效修饰键：{other}（alt/ctrl/shift/meta）")),
+            };
+        }
+        let k = key.to_lowercase();
+        let (cdp_key, code, vk, text): (&str, &str, i64, Option<&str>) = match k.as_str() {
+            "enter" => ("Enter", "Enter", 13, Some("\r")),
+            "tab" => ("Tab", "Tab", 9, Some("\t")),
+            "space" => (" ", "Space", 32, Some(" ")),
+            "backspace" => ("Backspace", "Backspace", 8, None),
+            "delete" => ("Delete", "Delete", 46, None),
+            "escape" => ("Escape", "Escape", 27, None),
+            "arrowup" => ("ArrowUp", "ArrowUp", 38, None),
+            "arrowdown" => ("ArrowDown", "ArrowDown", 40, None),
+            "arrowleft" => ("ArrowLeft", "ArrowLeft", 37, None),
+            "arrowright" => ("ArrowRight", "ArrowRight", 39, None),
+            "home" => ("Home", "Home", 36, None),
+            "end" => ("End", "End", 35, None),
+            "pageup" => ("PageUp", "PageUp", 33, None),
+            "pagedown" => ("PageDown", "PageDown", 34, None),
+            "a" => ("a", "KeyA", 65, None),
+            "c" => ("c", "KeyC", 67, None),
+            "v" => ("v", "KeyV", 86, None),
+            "x" => ("x", "KeyX", 88, None),
+            other => {
+                return Err(format!(
+                    "不支持的键：{other}（enter/tab/space/backspace/delete/escape/方向键/home/end/pageup/pagedown/a/c/v/x）"
+                ))
+            }
+        };
+        self.op(cfg, async move |ws| {
+            let mut down = json!({
+                "key": cdp_key, "code": code,
+                "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk,
+                "modifiers": mask,
+            });
+            if mask == 0 {
+                if let Some(t) = text {
+                    down["type"] = json!("keyDown");
+                    down["text"] = json!(t);
+                } else {
+                    down["type"] = json!("rawKeyDown");
+                }
+            } else {
+                // 组合键（ctrl+a 等）不产生文本输入。
+                down["type"] = json!("rawKeyDown");
+            }
+            ws.call("Input.dispatchKeyEvent", down).await?;
+            ws.call(
+                "Input.dispatchKeyEvent",
+                json!({
+                    "type": "keyUp", "key": cdp_key, "code": code,
+                    "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk,
+                    "modifiers": mask,
+                }),
+            )
+            .await?;
+            let mods = if modifiers.is_empty() {
+                String::new()
+            } else {
+                format!("+{}", modifiers.join("+"))
+            };
+            Ok(format!("已按 {key}{mods}"))
         })
         .await
     }
@@ -490,6 +586,73 @@ impl Browser {
         self.op(cfg, async move |ws| {
             wait_ready(ws, timeout_s).await?;
             Ok(format!("页面已加载：{}", ws.current_url().await))
+        })
+        .await
+    }
+
+    /// 上传文件到页面 file input（browser_upload）：source 为 http(s) URL
+    /// 时先下载到 state/browser-uploads/（AI 无本地文件能力，QQ 图/表情
+    /// 库都是 URL）；为本地路径时须位于 queqiao_home 子树内（防任意磁盘
+    /// 文件被诱导外传）。CDP DOM.setFileInputFiles 对第 index 个
+    /// input[type=file] 生效（发帖窗口常不止一个，如封面/正文插图）。
+    pub async fn upload_file(
+        &self,
+        cfg: &BrowserConfig,
+        source: &str,
+        index: usize,
+    ) -> Result<String, String> {
+        let local: std::path::PathBuf =
+            if source.starts_with("http://") || source.starts_with("https://") {
+                let url = source.to_owned();
+                tokio::task::spawn_blocking(move || download_to_upload_dir(&url))
+                    .await
+                    .map_err(|e| format!("下载任务失败：{e}"))?
+                    .map_err(|e| format!("下载失败（{source}）：{e}"))?
+            } else {
+                let p = std::path::PathBuf::from(source);
+                let canon = p
+                    .canonicalize()
+                    .map_err(|e| format!("本地文件不存在：{e}"))?;
+                let home = crate::paths::queqiao_home()
+                    .canonicalize()
+                    .map_err(|e| format!("定位鹊桥目录失败：{e}"))?;
+                if !canon.starts_with(&home) {
+                    return Err(
+                        "本地路径须位于鹊桥目录内（如 state/browser-uploads/）；远程文件直接传 URL"
+                            .into(),
+                    );
+                }
+                canon
+            };
+        let idx = index;
+        let display = local.display().to_string();
+        self.op(cfg, async move |ws| {
+            let doc = ws.call("DOM.getDocument", json!({ "depth": 0 })).await?;
+            let root = doc
+                .pointer("/root/nodeId")
+                .and_then(Value::as_i64)
+                .ok_or("DOM 根缺失")?;
+            let inputs = ws
+                .call(
+                    "DOM.querySelectorAll",
+                    json!({ "nodeId": root, "selector": "input[type=file]" }),
+                )
+                .await?;
+            let node = inputs
+                .get("nodeIds")
+                .and_then(Value::as_array)
+                .and_then(|a| a.get(idx))
+                .and_then(Value::as_i64)
+                .filter(|&n| n > 0)
+                .ok_or_else(|| {
+                    format!("页面上第 {idx} 个 input[type=file] 不存在（发帖窗口可能还没打开）")
+                })?;
+            ws.call(
+                "DOM.setFileInputFiles",
+                json!({ "files": [display], "nodeId": node }),
+            )
+            .await?;
+            Ok(format!("已设置文件（第 {idx} 个文件输入框）：{display}"))
         })
         .await
     }
@@ -656,6 +819,71 @@ const SINGLE_TAB_JS: &str = r#"(() => {
   return 'ok';
 })()"#;
 
+/// 下载 URL 到 state/browser-uploads/（upload 的 URL 路径）：魔数判型白
+/// 名单（图/视频，防把错误页或任意格式传上站点）、25MB 上限、error_for_
+/// status。同步函数，调用方负责 spawn_blocking（reqwest blocking 限制）。
+fn download_to_upload_dir(url: &str) -> Result<std::path::PathBuf, String> {
+    let dir = crate::paths::queqiao_home()
+        .join("state")
+        .join("browser-uploads");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建上传缓存目录失败：{e}"))?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 25 * 1024 * 1024 {
+        return Err(format!("文件 {:.1}MB 超过 25MB 上限", bytes.len() as f64 / 1048576.0));
+    }
+    let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        "webm"
+    } else if bytes.len() > 12 && &bytes[4..8] == b"ftyp" {
+        "mp4"
+    } else {
+        return Err("不支持的文件类型（魔数不在 PNG/JPEG/GIF/WebP/WebM/MP4 白名单）".into());
+    };
+    let name = format!(
+        "{}-{}.{ext}",
+        crate::session_manager::SessionManager::now_ms(),
+        bytes.len()
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, &bytes).map_err(|e| format!("写缓存文件失败：{e}"))?;
+    Ok(path)
+}
+
+/// focus 探测脚本（input_text 点击后用——同 snapshot 边界：固定模板只插
+/// 坐标，不给模型任意 JS）：elementFromPoint 向上找最近可编辑元素显式
+/// focus。自定义受控输入组件（注入鼠标事件的原生 focus 不生效的真机案
+/// 例：小黑盒评论框）靠这一步保证 insertText 落点。
+fn focus_editable_js(x: i64, y: i64) -> String {
+    format!(
+        r#"(() => {{
+  const el = document.elementFromPoint({x}, {y});
+  if (!el) return 'no-element';
+  let t = el;
+  while (t && !(t instanceof HTMLInputElement) && !(t instanceof HTMLTextAreaElement) && !t.isContentEditable) t = t.parentElement;
+  if (!t) return 'no-editable';
+  t.focus();
+  const tag = t.tagName || 'DIV';
+  return t.isContentEditable ? tag + '[可编辑区]' : tag;
+}})()"#
+    )
+}
+
 /// DOM 压缩树脚本（browser_snapshot 内置专用——不给模型任意 JS 的边界内，
 /// 这是唯一注入的脚本）：每行 `[x1,y1,x2,y2]<标志> text=…`，坐标与
 /// Input.dispatchMouseEvent 的视口坐标系一致，可直接喂给 click。
@@ -663,11 +891,37 @@ fn snapshot_js(max_chars: usize) -> String {
     format!(
         r#"(() => {{
   const MAX = {max};
-  const lines = [];
+  const main = [];
+  const fixed = [];
   let truncated = false;
   const clip = (s, n) => [...String(s)].slice(0, n).join('');
-  const walk = (el, depth) => {{
-    if (lines.join('\n').length > MAX) {{ truncated = true; return; }}
+  // 可点判定放宽到「自身或最近交互祖先」：组件库常把点击逻辑挂父层、
+  // 子元素只承载文字（真机案例：小黑盒评论框占位 div 无任何标注，坐标
+  // 明明可点 AI 却不敢点）。事件冒泡保证点子元素坐标等价于触发祖先
+  // handler，行为正确。
+  const INTERACTIVE = 'a,button,input,textarea,select,[role=button],[onclick],[contenteditable]';
+  // fixed/sticky 操作栏（顶栏/底部评论栏）前置输出且**先于文档流消耗预
+  // 算**：它们常挂 DOM 尾部（真机案例：小黑盒帖子评论流 3 万字符，底栏
+  // 按文档序排最后，预算耗尽后根本访问不到）。两轮遍历：先全量收集
+  // fixed 根（独立预算 MAX/2，防 fixed 巨树吃光），再走文档流并跳过已输
+  // 出的子树。
+  const fixedRoots = [];
+  const scanFixed = (el) => {{
+    if (el !== document.body) {{
+      const st0 = getComputedStyle(el);
+      if (st0.position === 'fixed' || st0.position === 'sticky') {{
+        fixedRoots.push(el);
+        return; // 嵌套 fixed 只记最外层，避免重复输出
+      }}
+    }}
+    for (const c of el.children) scanFixed(c);
+  }};
+  scanFixed(document.body);
+  let fixedBudget = Math.floor(MAX / 2);
+  let mainBudget = MAX;
+  const walk = (el, depth, sink) => {{
+    if ((sink === fixed ? fixedBudget : mainBudget) <= 0) {{ truncated = true; return; }}
+    if (sink === main && fixedRoots.includes(el)) return; // 已在前置区输出
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
     const st = getComputedStyle(el);
@@ -676,8 +930,7 @@ fn snapshot_js(max_chars: usize) -> String {
     let own = '';
     for (const n of el.childNodes) if (n.nodeType === 3) own += n.textContent;
     own = own.replace(/\s+/g, ' ').trim();
-    const interactive = el.closest('a,button,input,textarea,select,[role=button],[onclick]') === el
-      || st.cursor === 'pointer';
+    const interactive = el.closest(INTERACTIVE) !== null || st.cursor === 'pointer';
     const flags = [interactive ? '可点' : '', el.isContentEditable ? '可编' : ''].filter(Boolean).join(',');
     let bits = [];
     if (own) bits.push('text="' + clip(own, 120) + '"');
@@ -688,14 +941,17 @@ fn snapshot_js(max_chars: usize) -> String {
     }}
     if (el.tagName === 'IMG' && el.alt) bits.push('alt="' + clip(el.alt, 60) + '"');
     if (bits.length || flags) {{
-      lines.push('  '.repeat(depth) + '[' + [r.x, r.y, r.x + r.width, r.y + r.height].map(v => Math.round(v)).join(',') + ']' + (flags ? ' <' + flags + '>' : '') + ' ' + bits.join(' '));
+      const line = '  '.repeat(depth) + '[' + [r.x, r.y, r.x + r.width, r.y + r.height].map(v => Math.round(v)).join(',') + ']' + (flags ? ' <' + flags + '>' : '') + ' ' + bits.join(' ');
+      sink.push(line);
+      if (sink === fixed) fixedBudget -= line.length + 1; else mainBudget -= line.length + 1;
     }}
-    for (const c of el.children) walk(c, depth + 1);
+    for (const c of el.children) walk(c, depth + 1, sink);
   }};
-  walk(document.body, 0);
-  let out = lines.join('\n');
+  for (const f of fixedRoots) walk(f, 0, fixed);
+  walk(document.body, 0, main);
+  let out = fixed.concat(main).join('\n');
   if (out.length > MAX) {{ out = out.slice(0, MAX); truncated = true; }}
-  if (truncated) out += '\n…（已截断：元素过多，可缩小关注范围）';
+  if (truncated) out += '\n…（已截断：元素过多，浮层/操作栏已前置保留，可缩小关注范围）';
   return out || '（页面无可读元素——可能是 canvas/视频页面，用 browser_screenshot 看）';
 }})()"#,
         max = max_chars

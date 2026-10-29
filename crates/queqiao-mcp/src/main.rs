@@ -1111,6 +1111,46 @@ const TOOLS: &[ToolDef] = &[
             ("agentToken", "string", true, "会话令牌"),
         ],
     },
+    ToolDef {
+        name: "browser_key",
+        description: "按键盘键（配合输入框用）：enter 回车（很多发送框回车即发）、backspace 删光标前字符（打错了用）、delete、escape 关弹窗、方向键/home/end 移动光标、ctrl+a 全选（全选后再输入即替换内容，也用于清空）。modifiers 可选，如 ctrl、shift。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/key",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            (
+                "key",
+                "string",
+                true,
+                "键名：enter/backspace/delete/escape/tab/space/arrowup/arrowdown/arrowleft/arrowright/home/end/pageup/pagedown/a/c/v/x",
+            ),
+            (
+                "modifiers",
+                "string",
+                false,
+                "修饰键，逗号分隔：ctrl/shift/alt/meta（如 key=a + modifiers=ctrl 全选）",
+            ),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
+    ToolDef {
+        name: "browser_upload",
+        description: "上传图片/视频到网页的文件选择框（发帖带图用）：source 传 http(s) 图片/视频直链（自动下载到桥缓存再填入）或鹊桥目录内的本地路径。index 选第几个文件输入框（默认 0）。先 snapshot 确认发帖窗口已打开再调。需要会话令牌；仅管理员授权的会话可用。",
+        endpoint: "/api/browser/upload",
+        method: "POST",
+        flag: None,
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::OnEnabled,
+        params: &[
+            ("source", "string", true, "http(s) 文件直链或鹊桥目录内本地路径"),
+            ("index", "number", false, "第几个 input[type=file]（默认 0）"),
+            ("conversationKey", "string", true, "会话 key"),
+            ("agentToken", "string", true, "会话令牌"),
+        ],
+    },
 ];
 
 fn tool_flag_enabled(flag: Option<&str>, tools: &Value) -> bool {
