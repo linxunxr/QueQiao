@@ -8,6 +8,8 @@
     --bg:#101418; --panel:#161c23; --panel2:#131920; --line:#262e38; --line2:#303a46;
     --fg:#e2e8ef; --dim:#9aa7b5; --dim2:#7d8b9a;
     --acc:#4da3ff; --ok:#43c878; --warn:#e8b04a; --err:#e5606b;
+    /* 圆角三档：section 级容器 --r-box、卡片/终端 --r-mid、控件与标签 --r-ctl。 */
+    --r-box:10px; --r-mid:8px; --r-ctl:6px;
   }
   * { box-sizing:border-box; }
   html { scrollbar-color:#2c3642 transparent; }
@@ -18,7 +20,7 @@
 
   header { padding:14px 24px 0; border-bottom:1px solid var(--line); background:var(--panel2); }
   header .titlerow { display:flex; align-items:baseline; gap:14px; max-width:920px; margin:0 auto; }
-  header h1 { font-size:17px; margin:0; font-weight:600; letter-spacing:.01em; }
+  header h1 { font-size:19px; margin:0; font-weight:600; letter-spacing:.01em; }
   header .ver { color:var(--dim2); font-size:12px; }
   nav { display:flex; gap:2px; margin-top:10px; max-width:920px; margin-left:auto; margin-right:auto; }
   nav button { background:transparent; color:var(--dim); border:none; border-bottom:2px solid transparent;
@@ -27,33 +29,35 @@
   nav button.active { color:var(--fg); border-bottom-color:var(--acc); }
 
   main { max-width:920px; margin:0 auto; padding:22px 24px 96px; }
-  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px 20px; margin-bottom:18px; }
-  section h2 { font-size:13.5px; margin:0 0 14px; color:var(--fg); font-weight:600; display:flex; align-items:center; gap:9px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:var(--r-box); padding:18px 20px; margin-bottom:20px; }
+  section h2 { font-size:14.5px; margin:0 0 14px; color:var(--fg); font-weight:600; display:flex; align-items:center; gap:9px; }
   section h2::before { content:""; width:3px; height:14px; border-radius:2px; background:var(--acc); flex:none; }
 
   .row { display:flex; gap:14px; flex-wrap:wrap; }
   .field { flex:1 1 220px; margin-bottom:10px; }
   .field label { display:block; font-size:12px; color:var(--dim); margin-bottom:5px; }
   .field input, .field select { width:100%; background:#0d1115; border:1px solid var(--line); color:var(--fg);
-    border-radius:6px; padding:7px 10px; font-size:13px; transition:border-color .15s; }
+    border-radius:var(--r-ctl); padding:7px 10px; font-size:13px; transition:border-color .15s; }
   .field input:hover, .field select:hover { border-color:var(--line2); }
   .field input:focus, .field select:focus { outline:none; border-color:var(--acc); }
   .hint { font-size:12px; color:var(--dim); margin-top:3px; line-height:1.55; }
   textarea { width:100%; min-height:320px; background:#0d1115; border:1px solid var(--line); color:var(--fg);
-    border-radius:8px; padding:10px 12px; font:12px/1.55 Consolas,"Microsoft YaHei",monospace; }
+    border-radius:var(--r-mid); padding:10px 12px; font:12px/1.55 Consolas,"Microsoft YaHei",monospace; }
   textarea:focus { outline:none; border-color:var(--acc); }
 
-  button { background:var(--acc); color:#07131d; border:none; border-radius:6px; padding:8px 22px;
+  button { background:var(--acc); color:#07131d; border:none; border-radius:var(--r-ctl); padding:8px 22px;
     font-size:13.5px; font-weight:600; cursor:pointer; transition:background .15s, transform .05s; }
   button:hover { background:#6cb2ff; }
   button:active { transform:scale(.98); }
   button.ghost { background:transparent; color:var(--dim); border:1px solid var(--line2); font-weight:500; transition:color .15s, border-color .15s, transform .05s; }
   button.ghost:hover { color:var(--fg); border-color:#43505e; background:rgba(77,163,255,.06); }
+  button.danger { background:#3a1418; color:var(--err); border:1px solid #6c2a30; }
+  button.danger:hover { border-color:var(--err); background:#451920; }
   button:disabled { opacity:.4; cursor:default; transform:none; }
   :focus-visible { outline:2px solid var(--acc); outline-offset:2px; border-radius:4px; }
 
   #toast { position:fixed; top:18px; left:50%; transform:translateX(-50%) translateY(-6px); padding:9px 20px;
-    border-radius:8px; font-size:13px; opacity:0; transition:opacity .2s, transform .2s; pointer-events:none; z-index:9; }
+    border-radius:var(--r-mid); font-size:13px; opacity:0; transition:opacity .2s, transform .2s; pointer-events:none; z-index:9; }
   #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
   #toast.ok { background:#12331f; color:var(--ok); border:1px solid #245c3b; }
   #toast.err { background:#3a1418; color:#ff9196; border:1px solid #6c2a30; }
@@ -61,18 +65,18 @@
   .bar { position:fixed; bottom:0; left:0; right:0; background:var(--panel2); border-top:1px solid var(--line);
     padding:12px 24px; display:flex; gap:12px; align-items:center; justify-content:center; }
 
-  .tag { display:inline-block; background:#0d1115; border:1px solid var(--line); border-radius:5px;
+  .tag { display:inline-block; background:#0d1115; border:1px solid var(--line); border-radius:var(--r-ctl);
     padding:2px 8px; margin:2px 4px 2px 0; font-size:12px; }
   .tag b { cursor:pointer; color:var(--dim2); margin-left:5px; font-weight:normal; }
   .tag b:hover { color:var(--fg); }
   .chips { display:flex; gap:8px; }
-  .chips input { flex:1; background:#0d1115; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 10px; }
+  .chips input { flex:1; background:#0d1115; border:1px solid var(--line); color:var(--fg); border-radius:var(--r-ctl); padding:6px 10px; }
   .chips input:focus { outline:none; border-color:var(--acc); }
 
   /* 组件卡片：状态语义交给颜色本身，不做发光。检测中给呼吸动画（可被减弱动效关闭）。 */
   .cards { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
   .card { flex:1 1 220px; display:flex; gap:12px; align-items:center; background:var(--panel2);
-    border:1px solid var(--line); border-radius:8px; padding:13px 16px; transition:border-color .2s; }
+    border:1px solid var(--line); border-radius:var(--r-mid); padding:13px 16px; transition:border-color .2s; }
   .card b { font-size:13px; }
   .card .hint { margin-top:1px; }
   .dotc { width:10px; height:10px; border-radius:50%; background:#5a6572; flex:none; }
@@ -82,10 +86,10 @@
   @keyframes dotpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   @media (prefers-reduced-motion: reduce) { .dotc.checking { animation:none; } #toast { transition:none; } }
 
+  /* 折叠面板标题：只留箭头指示，不加装饰条——层级信号由 section h2 独占。 */
   details summary { font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:9px;
     cursor:pointer; list-style:none; user-select:none; }
   details summary::-webkit-details-marker { display:none; }
-  details summary::before { content:""; width:3px; height:14px; border-radius:2px; background:var(--acc); flex:none; }
   details summary::after { content:""; width:7px; height:7px; border-right:1.5px solid var(--dim2);
     border-bottom:1.5px solid var(--dim2); transform:rotate(-45deg); margin-left:auto; flex:none;
     transition:transform .15s; margin-right:2px; }
@@ -96,8 +100,12 @@
   #orchMsg { flex:1; }
 
   /* 运行日志：等宽 + 中文回落，行距收紧。 */
-  #log { background:#0a0e12; border:1px solid var(--line); border-radius:8px; height:250px; overflow-y:auto;
+  #log { background:#0a0e12; border:1px solid var(--line); border-radius:var(--r-mid); height:250px; overflow-y:auto;
     padding:10px 12px; font:11.5px/1.6 Consolas,"Microsoft YaHei",monospace; color:#9fb0c0; white-space:pre-wrap; }
+
+  /* 窗口可缩得很窄：长表横向滚动兜底，列不被挤压换行。 */
+  #sessionsBody, #slangList, #costBody { overflow-x:auto; }
+  #sessionsBody table, #slangList table, #costBody table { min-width:520px; }
 
   /* 会话表：稀疏分隔（组间隔行），数字列等宽。 */
   #sessions table { width:100%; border-collapse:collapse; font-size:13px; }
@@ -116,6 +124,14 @@
   #updBar { background:var(--acc); }
 
   #migrateOut { font:11.5px/1.6 Consolas,"Microsoft YaHei",monospace; }
+
+  /* 轻量确认对话框：桌面 Tauri 里原生 confirm 样式出戏且阻塞渲染，危险操作统一走这里。 */
+  #dlg { position:fixed; inset:0; z-index:8; display:flex; align-items:center; justify-content:center; }
+  #dlg[hidden] { display:none; }
+  #dlgMask { position:absolute; inset:0; background:rgba(5,8,11,.62); }
+  #dlgBox { position:relative; background:var(--panel); border:1px solid var(--line2); border-radius:var(--r-box);
+    padding:20px 22px; width:min(380px, calc(100vw - 48px)); font-size:13.5px; line-height:1.6;
+    box-shadow:0 14px 44px rgba(0,0,0,.4); }
 </style>
 </head>
 <body>
@@ -123,6 +139,7 @@
   <div class="titlerow"><h1>鹊桥</h1><span class="ver" id="ver"></span><span style="flex:1"></span><button class="ghost mini" onclick="checkUpdate()">检查更新</button></div>
   <nav>
     <button id="tab-overview" class="active" onclick="showTab('overview')">总览</button>
+    <button id="tab-review" onclick="showTab('review')">回顾</button>
     <button id="tab-settings" onclick="showTab('settings')">设置</button>
     <button id="tab-slang" onclick="showTab('slang')">黑话</button>
   </nav>
@@ -170,31 +187,6 @@
     <h2>运行日志<span style="flex:1"></span><button class="ghost mini" onclick="$('log').textContent='';toast('日志已清屏（仅显示，文件不受影响）', true)">清屏</button></h2>
     <div id="log"></div>
   </section>
-  <section>
-    <details id="costBox">
-      <summary>花费（token 记账）<span class="sum-note" id="costSum">检测中…</span></summary>
-      <div id="costBody" class="hint" style="margin-top:14px">检测中…</div>
-    </details>
-  </section>
-
-  <section>
-    <details id="diaryBox">
-      <summary>AI 日记<span class="sum-note" id="diarySum">检测中…</span></summary>
-      <div id="diaryBody" class="hint" style="margin-top:14px">检测中…</div>
-    </details>
-  </section>
-
-  <section>
-    <details id="feedbackBox">
-      <summary>AI 反馈<span class="sum-note" id="feedbackSum">检测中…</span></summary>
-      <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
-        <button class="ghost mini" onclick="refreshFeedback()">刷新</button>
-        <button class="ghost mini" onclick="clearFeedback()">清空</button>
-        <span class="hint">AI 用 qq_report_feedback 上报的问题与建议（入库前已做敏感信息打码）</span>
-      </div>
-      <div id="feedbackBody" class="hint" style="margin-top:10px">检测中…</div>
-    </details>
-  </section>
 
   <section>
     <details id="bindBox">
@@ -226,6 +218,35 @@
         <div class="hint">带走 config、DSH 会话映射、唤醒状态、记忆、日记、表情包、黑话、人格卡等 15 项；目标同名文件默认跳过（不覆盖）。迁移后重启桥生效。</div>
         <pre id="migrateOut" style="display:none; background:#0a0e12; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:11.5px/1.6 Consolas,'Microsoft YaHei',monospace; color:#9fb0c0; white-space:pre-wrap; max-height:200px; overflow-y:auto; margin-top:8px"></pre>
       </div>
+    </details>
+  </section>
+</main>
+
+<!-- ── 回顾：低频产出面板（花费/日记/反馈）——总览只留运行监控，看 AI 干了什么来这里 ── -->
+<main id="page-review" style="display:none">
+  <section>
+    <details id="costBox" open>
+      <summary>花费（token 记账）<span class="sum-note" id="costSum">检测中…</span></summary>
+      <div id="costBody" class="hint" style="margin-top:14px">检测中…</div>
+    </details>
+  </section>
+
+  <section>
+    <details id="diaryBox" open>
+      <summary>AI 日记<span class="sum-note" id="diarySum">检测中…</span></summary>
+      <div id="diaryBody" class="hint" style="margin-top:14px">检测中…</div>
+    </details>
+  </section>
+
+  <section>
+    <details id="feedbackBox" open>
+      <summary>AI 反馈<span class="sum-note" id="feedbackSum">检测中…</span></summary>
+      <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="ghost mini" onclick="refreshFeedback()">刷新</button>
+        <button class="ghost mini" onclick="clearFeedback()">清空</button>
+        <span class="hint">AI 用 qq_report_feedback 上报的问题与建议（入库前已做敏感信息打码）</span>
+      </div>
+      <div id="feedbackBody" class="hint" style="margin-top:10px">检测中…</div>
     </details>
   </section>
 </main>
@@ -359,6 +380,16 @@
   <span class="hint" id="status"></span>
 </div>
 <div id="toast"></div>
+<div id="dlg" hidden>
+  <div id="dlgMask"></div>
+  <div id="dlgBox">
+    <div id="dlgText"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button class="ghost" id="dlgCancel">取消</button>
+      <button id="dlgOk">确认</button>
+    </div>
+  </div>
+</div>
 <script>
 const BRIDGE = localStorage.getItem('bridgeBase') || 'http://127.0.0.1:3100';
 const $ = id => document.getElementById(id);
@@ -368,13 +399,15 @@ const T = window.__TAURI__ || null;
 
 // ── 页签 ────────────────────────────────────────────────────────────────────
 function showTab(name) {
-  for (const n of ['overview', 'settings', 'slang']) {
+  for (const n of ['overview', 'review', 'settings', 'slang']) {
     $('page-' + n).style.display = n === name ? 'block' : 'none';
     $('tab-' + n).classList.toggle('active', n === name);
   }
   // 延迟一拍：初始化期 showTab 先于 bridgeOnline 的 let 声明执行（TDZ），
   // 且此刻桥态未探测；refreshSlang 自身会按 bridgeOnline 给出占位。
   if (name === 'slang') setTimeout(() => refreshSlang(), 0);
+  // 回顾页三个面板不进 tick 轮询（重渲染打断阅读），切页时补刷一次。
+  if (name === 'review') setTimeout(() => { refreshCost(); refreshDiary(); refreshFeedback(); }, 0);
   // 保存/导出是设置页动作，总览不显示（main 的 padding-bottom 也随之收紧）。
   $('settingsBar').style.display = name === 'settings' ? 'flex' : 'none';
   document.querySelectorAll('main').forEach(m => m.style.paddingBottom = name === 'settings' ? '96px' : '28px');
@@ -450,7 +483,7 @@ async function startAll() {
   }
 }
 
-async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { alert(e); } refreshComponents(); }
+async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { toast(String(e), false); } refreshComponents(); }
 
 // AI 暂停/恢复（桥侧 socialV2.paused——暂停期间拒绝 AI 一切工具调用）。
 let aiPaused = false;
@@ -618,6 +651,27 @@ function toast(msg, ok) {
   clearTimeout(toast._h);
   toast._h = setTimeout(() => t.classList.remove('show'), 3500);
 }
+
+// 轻量确认对话框（替代原生 confirm）：危险操作默认聚焦「取消」，Enter 才执行。
+let dlgRes = null;
+function ask(text, okLabel, danger) {
+  return new Promise(r => {
+    dlgRes = r;
+    $('dlgText').textContent = text;
+    $('dlgOk').textContent = okLabel || '确认';
+    $('dlgOk').classList.toggle('danger', !!danger);
+    $('dlg').hidden = false;
+    $('dlgCancel').focus();
+  });
+}
+function dlgClose(v) {
+  $('dlg').hidden = true;
+  if (dlgRes) { const r = dlgRes; dlgRes = null; r(v); }
+}
+$('dlgOk').onclick = () => dlgClose(true);
+$('dlgCancel').onclick = () => dlgClose(false);
+$('dlgMask').onclick = () => dlgClose(false);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('dlg').hidden) dlgClose(false); });
 async function save() {
   const status = document.getElementById('status');
   status.textContent = '校验中…';
@@ -875,7 +929,7 @@ async function showTurns(key) {
     const res = await r.json();
     const v = res.value || {};
     const rows = (v.turns || []).map(t => `<tr><td>${new Date(t.tMs).toLocaleString('zh-CN', { hour12: false })}</td><td>${t.model || '-'}</td><td>${t.cacheMiss + t.cacheWrite}</td><td>${t.output}</td><td>¥${t.cost.toFixed(4)}</td></tr>`).join('');
-    document.getElementById('costBody').innerHTML = `<div style="margin-bottom:6px"><a href="javascript:void 0" onclick="refreshCost()" style="color:var(--acc)">← 返回总览</a> <b>${key}</b> 近 ${v.turns.length} 回合</div>` +
+    document.getElementById('costBody').innerHTML = `<div style="margin-bottom:6px"><a href="javascript:void 0" onclick="refreshCost()" style="color:var(--acc)">← 返回汇总</a> <b>${key}</b> 近 ${v.turns.length} 回合</div>` +
       (rows ? `<table><tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>花费</th></tr>${rows}</table>` : '<span class="hint">无记录</span>');
   } catch (e) { toast('明细读取失败：' + e.message, false); }
 }
@@ -953,7 +1007,7 @@ async function refreshFeedback() {
   } catch (e) { sum.textContent = ''; body.textContent = '（反馈不可读）'; }
 }
 async function clearFeedback() {
-  if (!confirm('确认清空全部 AI 反馈记录？')) return;
+  if (!(await ask('确认清空全部 AI 反馈记录？此操作不可恢复。', '清空', true))) return;
   try {
     const r = await fetch(BRIDGE + '/api/socialV2/feedback/clear', { method: 'POST' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1195,7 +1249,7 @@ async function openProfile() {
 }
 
 async function unbindSite() {
-  if (!confirm('确认解绑小黑盒？该站登录态将被清除（其他站点不受影响）。')) return;
+  if (!(await ask('确认解绑小黑盒？该站登录态将被清除（其他站点不受影响）。', '解绑', true))) return;
   try {
     const r = await fetch(BRIDGE + '/api/browser/unbind', {
       method: 'POST', headers: { 'content-type': 'application/json' },
