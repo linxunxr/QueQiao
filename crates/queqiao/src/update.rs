@@ -59,9 +59,10 @@ pub fn check_latest(current_version: &str) -> Result<Option<ReleaseInfo>, String
     if let Ok(Some(mut info)) = check_gitee(&client, current_version) {
         // Gitee 命中后顺手查 GitHub 拿备源（查询失败不阻塞 Gitee 更新）。
         if let Ok(Some(gh)) = check_github(&client, current_version)
-            && gh.tag == info.tag {
-                info.fallback_zip_url = Some(gh.zip_url);
-            }
+            && gh.tag == info.tag
+        {
+            info.fallback_zip_url = Some(gh.zip_url);
+        }
         return Ok(Some(info));
     }
     check_github(&client, current_version)
