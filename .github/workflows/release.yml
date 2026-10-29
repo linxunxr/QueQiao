@@ -127,3 +127,29 @@ jobs:
             queqiao-browser-*-win64.zip
           # 更新日志正文（组包步骤生成；文件不存在时 action 会忽略 body_path）。
           body_path: release-body.md
+
+      # 主包镜像到 Gitee（国内下载加速）：经 gitee-sync 云函数中转（香港
+      # Region，专治 runner 直传 Gitee 跨洲超时）。只镜像主包——Gitee 单附件
+      # 上限 100MB（browser 资产 352MB 上不去）。secrets 未配置时跳过不阻塞
+      # （可选增强；GITEE_SYNC_URL/SYNC_SECRET 与 DeepSeek-Otter 仓库同款约定）。
+      - name: 同步主包到 Gitee（云函数中转，可选）
+        # 注意：step 级 if 不能引用本 step 的 env（Otter 同款教训）——判空放脚本内。
+        env:
+          GITEE_SYNC_URL: ${{ secrets.GITEE_SYNC_URL }}
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+        shell: bash
+        run: |
+          if [ -z "${GITEE_SYNC_URL}" ] || [ -z "${SYNC_SECRET}" ]; then
+            echo "未配置 GITEE_SYNC_URL/SYNC_SECRET secrets，跳过 Gitee 同步（可选增强）"
+            exit 0
+          fi
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          MAIN_ASSET="queqiao-v${VERSION}-win64.zip"
+          echo "同步 ${MAIN_ASSET} → Gitee（云函数中转）"
+          # -G --data-urlencode：secret 含 +/&/空格等字符时直拼 URL 会被网关解码变形
+          code=$(curl -s -o gitee-sync-resp.json -w "%{http_code}" --max-time 600 -G             --data-urlencode "secret=${SYNC_SECRET}"             --data-urlencode "version=${VERSION}"             --data-urlencode "gh_repo=linxunxr/QueQiao"             --data-urlencode "owner=mwcxlinxun"             --data-urlencode "repo=QueQiao"             --data-urlencode "files=${MAIN_ASSET}"             "${GITEE_SYNC_URL}")
+          cat gitee-sync-resp.json || true
+          if [ "$code" != "200" ]; then
+            echo "::warning::Gitee 同步未成功（HTTP ${code}）——不阻塞发版，GitHub 源不受影响；可手动重跑本步（云函数幂等）"
+          fi
