@@ -440,7 +440,9 @@ impl Browser {
                 let probe = ws.evaluate(&focus_editable_js(x, y)).await;
                 focus_note = match probe.as_deref() {
                     Ok("no-element") => "；点击处无元素".to_owned(),
-                    Ok("no-editable") => "；点击处无可编辑元素（若输入未生效，先确认坐标是否输入框）".to_owned(),
+                    Ok("no-editable") => {
+                        "；点击处无可编辑元素（若输入未生效，先确认坐标是否输入框）".to_owned()
+                    }
                     Ok(other) => format!("；已聚焦 {other}"),
                     Err(e) => format!("；focus 探测失败（{e}）"),
                 };
@@ -494,7 +496,7 @@ impl Browser {
             other => {
                 return Err(format!(
                     "不支持的键：{other}（enter/tab/space/backspace/delete/escape/方向键/home/end/pageup/pagedown/a/c/v/x）"
-                ))
+                ));
             }
         };
         self.op(cfg, async move |ws| {
@@ -838,7 +840,10 @@ fn download_to_upload_dir(url: &str) -> Result<std::path::PathBuf, String> {
         .and_then(|r| r.bytes())
         .map_err(|e| e.to_string())?;
     if bytes.len() > 25 * 1024 * 1024 {
-        return Err(format!("文件 {:.1}MB 超过 25MB 上限", bytes.len() as f64 / 1048576.0));
+        return Err(format!(
+            "文件 {:.1}MB 超过 25MB 上限",
+            bytes.len() as f64 / 1048576.0
+        ));
     }
     let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         "png"

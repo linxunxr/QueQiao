@@ -9,7 +9,15 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
-## [未发布]
+## [0.4.13] - 2026-10-29
+
+### 新增
+
+- **专属浏览器发帖/评论能力补全（browser_key 按键 + browser_upload 传图 + 输入 focus 自愈 + 快照操作栏前置）**：真机评估坐实 AI 在小黑盒上"能发帖但评论打不进字、带图帖发不了"——评论框是自定义受控组件（CDP 注入鼠标事件的原生 focus 不生效，insertText 落空）、缺键盘键（回车发送/退格纠错/全选替换做不了）、缺文件上传。四项补齐：①browser_key 走 Input.dispatchKeyEvent（enter/backspace/delete/escape/方向键/home/end/pageup/pagedown，modifiers 组合 ctrl+a 全选后输入即替换，也用于清空；文本键带 text、命令键 rawKeyDown，Puppeteer 同款语义）；②browser_upload 收 http(s) 图片/视频直链自动下载到桥缓存（魔数白名单 PNG/JPEG/GIF/WebP/WebM/MP4 + 25MB 上限，防错误页混入）或鹊桥目录内本地路径（canonicalize 前缀校验，防任意磁盘文件被诱导外传）→ DOM.setFileInputFiles 填进页面第 index 个文件框；③browser_type 带坐标时点击后先跑内置 focus 探测（elementFromPoint 向上找最近可编辑元素显式 focus，返回聚焦详情——仍是"固定脚本只插坐标"边界，未开放任意 JS）；④快照两修：可点判定放宽到最近交互祖先（组件库把点击挂父层，事件冒泡保证点子元素坐标行为正确），fixed/sticky 操作栏（顶栏/底部评论栏）改两轮遍历前置输出且先于文档流消耗预算（首版按文档序排队预算，DOM 尾部的底栏在预算耗尽后根本访问不到——集成测试当场抓住）。预设规则 23 补 key/upload 用法与发帖/评论操作流。
+
+### 修复
+
+- **看图工具（qq_get_message_images）上线起 404 全灭（13b71f6 引入）**：MCP 相对 endpoint 统一拼 /api/socialV2/ 前缀，桥却把看图路由挂在 /api/images/message——axum 对未匹配路由回 404 空 body，MCP 的 resp.json() 瞬时报 "error decoding response body" 毫无线索（从上线起全部调用 0 秒失败，AI 只能说"图又挂了"，五天后才定位）。修复：桥补 /api/socialV2/images/message 双路由（旧路径保留，存量 MCP 进程配新桥立即恢复）；新增守护测试遍历全部 MCP 工具按真实拼法打桥路由断言非 404（防两端路径约定再漂移）；顺带给图片下载补 error_for_status（QQ CDN rkey 过期回 403 错误页不再被 base64 成"图片"喂视觉模型，失败原因透传给 AI）。
 
 ### 变更
 

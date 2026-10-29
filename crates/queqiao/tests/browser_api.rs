@@ -775,7 +775,10 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         let snap = v["value"]["text"].as_str().unwrap().to_owned();
         assert!(snap.contains("按钮内文字"), "快照含按钮文字：{snap}");
         let btn_line = snap.lines().find(|l| l.contains("按钮内文字")).unwrap();
-        assert!(btn_line.contains("可点"), "按钮内 span 应标可点：{btn_line}");
+        assert!(
+            btn_line.contains("可点"),
+            "按钮内 span 应标可点：{btn_line}"
+        );
 
         // ① focus 探测 + 输入：点击 input 坐标（INPUT 聚焦详情回传）。
         let (ix, iy) = center_of(&snap, "输入框提示语");
@@ -803,7 +806,7 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{v}");
-        let (code, v) = fire(
+        let (_code, v) = fire(
             &r,
             auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
         )
@@ -832,7 +835,7 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{v}");
-        let (code, v) = fire(
+        let (_code, v) = fire(
             &r,
             auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
         )
@@ -851,7 +854,7 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         )
         .await;
         assert_eq!(code, StatusCode::OK, "{v}");
-        let (code, v) = fire(
+        let (_code, v) = fire(
             &r,
             auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
         )
@@ -872,7 +875,7 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         assert_eq!(code, StatusCode::BAD_GATEWAY, "白名单外拒绝：{v}");
 
         // ⑥ contenteditable：点占位 span 坐标输入（focus 探测向祖先找可编区）。
-        let (ex, ey) = center_of(&snap, "点此输入文字");
+        let (ex, ey) = center_of(snap, "点此输入文字");
         let (code, v) = fire(
             &r,
             auth_post(
@@ -884,8 +887,11 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         .await;
         assert_eq!(code, StatusCode::OK, "{v}");
         let msg = v["value"]["message"].as_str().unwrap();
-        assert!(msg.contains("已聚焦") && msg.contains("可编辑区"), "编辑区聚焦：{msg}");
-        let (code, v) = fire(
+        assert!(
+            msg.contains("已聚焦") && msg.contains("可编辑区"),
+            "编辑区聚焦：{msg}"
+        );
+        let (_code, v) = fire(
             &r,
             auth_get("/api/browser/snapshot?conversationKey=private:1", &token),
         )
@@ -894,7 +900,7 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         assert!(snap.contains("你好世界"), "编辑区输入生效：{snap}");
 
         // ⑦ 小 maxChars：fixed 底栏前置（截断时操作栏保住）。
-        let (code, v) = fire(
+        let (_code, v) = fire(
             &r,
             auth_get(
                 "/api/browser/snapshot?conversationKey=private:1&maxChars=2500",
@@ -912,6 +918,9 @@ fn browser_key_upload_focus_and_snapshot_layout() {
         );
         // fixed 行应在快照最前部（前置区块），不该排在 filler 段落之后。
         let first_filler = snap.find("填充段落").unwrap();
-        assert!(fixed_pos.unwrap() < first_filler, "fixed 应在文档流内容前：{snap}");
+        assert!(
+            fixed_pos.unwrap() < first_filler,
+            "fixed 应在文档流内容前：{snap}"
+        );
     });
 }

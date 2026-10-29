@@ -1145,8 +1145,18 @@ const TOOLS: &[ToolDef] = &[
         tablet_gate: TabletGate::None,
         browser_gate: BrowserGate::OnEnabled,
         params: &[
-            ("source", "string", true, "http(s) 文件直链或鹊桥目录内本地路径"),
-            ("index", "number", false, "第几个 input[type=file]（默认 0）"),
+            (
+                "source",
+                "string",
+                true,
+                "http(s) 文件直链或鹊桥目录内本地路径",
+            ),
+            (
+                "index",
+                "number",
+                false,
+                "第几个 input[type=file]（默认 0）",
+            ),
             ("conversationKey", "string", true, "会话 key"),
             ("agentToken", "string", true, "会话令牌"),
         ],
