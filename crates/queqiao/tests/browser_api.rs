@@ -532,6 +532,126 @@ fn browser_gate_chain_and_cdp_full_chain() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// 死会话自愈链：show 拉起有头会话 → 经 DevTools HTTP 关掉唯一页面
+/// （等价用户关掉浏览器窗口——页面 WS 断、进程随后退出）→ bind 必须
+/// 自愈（丢弃死会话重拉 / 失联页接管），而不是对已关闭的 WS 发命令。
+/// 修复前真机表现：bind 502「CDP 发送失败：Trying to work with closed
+/// connection」且重试无效（bind 不走 op 的失败丢弃路径）。
+#[test]
+fn browser_dead_session_self_heals() {
+    if !chromium_exists() {
+        eprintln!("跳过：本机无 Chrome/Edge");
+        return;
+    }
+    let _home_guard = home_guard();
+    let home = temp_home("heal");
+    unsafe { std::env::set_var("QUEQIAO_HOME", &home) };
+
+    let (r, token) = make_authorized_router(&home);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // ① show：拉起有头会话（不带 url，about:blank 即可）。
+    rt.block_on(async {
+        let (code, v) = fire(
+            &r,
+            auth_post(
+                "/api/browser/show",
+                json!({"conversationKey": "private:1"}),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "show 拉起有头会话：{v}");
+
+        // ② 会话在跑（console 面只读端点，无令牌）。
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/bind-status?site=xiaoheihe")
+            .body(Body::empty())
+            .unwrap();
+        let (code, v) = fire(&r, req).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v["value"]["running"], json!(true), "浏览器应视为在跑：{v}");
+    });
+
+    // ③ 同步段关掉唯一页面（reqwest blocking 不得嵌 tokio runtime）：
+    //    DevToolsActivePort 首行=端口 → /json/list 取 page target →
+    //    /json/close。此后页面 WS 关闭；Windows 有头 Chrome 关最后一个
+    //    页面即退出进程——两种时序（进程死/页面死进程活）修复后均自愈。
+    let port_text = std::fs::read_to_string(
+        home.join("state")
+            .join("browser-profile")
+            .join("DevToolsActivePort"),
+    )
+    .expect("会话在跑，端口文件必在");
+    let port: u16 = port_text
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse().ok())
+        .expect("DevToolsActivePort 首行是端口");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let list: Value = client
+        .get(format!("http://127.0.0.1:{port}/json/list"))
+        .send()
+        .expect("DevTools /json/list 可达")
+        .json()
+        .expect("/json/list 返回 JSON");
+    let target = list
+        .as_array()
+        .expect("target 列表")
+        .iter()
+        .find(|t| t["type"] == json!("page"))
+        .expect("有 page target")["id"]
+        .as_str()
+        .expect("target 带 id")
+        .to_owned();
+    let close = client
+        .get(format!("http://127.0.0.1:{port}/json/close/{target}"))
+        .send()
+        .expect("json/close 可达");
+    assert!(close.status().is_success(), "关页命令应成功");
+
+    // ③b 等进程死透（Windows 有头 Chrome 关最后页面即退出；真实用户
+    // 点绑定与此处同款秒级间隔）。未死透的垂死竞态走 reconcile 丢弃
+    // 会话、下一次自愈——不在这里测。最多等 5s，仍活着（未来 Chrome
+    // 行为变化）则 bind 走接管路径同样成功。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            break; // 端口已关，进程退出
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    // ④ bind：修复后自愈（进程死 → ensure 存活检查丢弃重拉），
+    //    不再报 CDP 发送失败。
+    rt.block_on(async {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/browser/bind")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"site": "xiaoheihe"}).to_string()))
+            .unwrap();
+        let (code, v) = fire(&r, req).await;
+        assert_eq!(code, StatusCode::OK, "死会话应自愈完成绑定：{v}");
+        assert!(
+            v["value"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("登录窗口"),
+            "bind 返回登录窗口就绪：{v}"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// 标签页治理全链：单页纪律（_blank 链接当前页打开）→ 泄漏（跨源
 /// window.open 真开新页——注入脚本对跨源放行，OAuth 类弹窗不误伤）→
 /// 预算回收（超 3 个操作前自动关最老非活跃页，活跃页保住）→

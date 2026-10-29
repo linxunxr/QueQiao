@@ -259,14 +259,23 @@ impl Browser {
         let want_headless = cfg.headless && !force_headful;
         if let Some(mut s) = guard.take() {
             if s.headless == want_headless {
-                *guard = Some(s);
-                return Ok(());
-            }
-            crate::logging::log(if force_headful {
-                "[browser] 切换到有头模式（登录流程）"
+                // 进程存活检查：用户手关浏览器窗口/崩溃后 child 已退出，但
+                // 会话缓存与闲置看门狗都感知不到——复用死会话会对已关闭的
+                // WS 发命令（真机：绑定报「CDP 发送失败：Trying to work
+                // with closed connection」）。已死即丢弃走重拉。
+                let alive = s.child.try_wait().map(|w| w.is_none()).unwrap_or(false);
+                if alive {
+                    *guard = Some(s);
+                    return Ok(());
+                }
+                crate::logging::log("[browser] 浏览器进程已退出，丢弃残留会话重新拉起");
             } else {
-                "[browser] 按配置切换显示模式，重启浏览器"
-            });
+                crate::logging::log(if force_headful {
+                    "[browser] 切换到有头模式（登录流程）"
+                } else {
+                    "[browser] 按配置切换显示模式，重启浏览器"
+                });
+            }
             let _ = s.child.start_kill();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), s.child.wait()).await;
         }
@@ -285,7 +294,19 @@ impl Browser {
         cfg: &BrowserConfig,
         f: impl AsyncFnOnce(&WsConn) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.ensure(cfg, false).await?;
+        self.op_with(cfg, false, f).await
+    }
+
+    /// [op] 的可配显示模式版：bind/show 登录流程强制有头（force_headful=
+    /// true），同时享有治理（页面接管）与失败丢弃的自愈语义——绑定路径
+    /// 直连 ws 的旧实现复用死会话后既不接管也不丢弃，重试无法自愈。
+    async fn op_with<T>(
+        &self,
+        cfg: &BrowserConfig,
+        force_headful: bool,
+        f: impl AsyncFnOnce(&WsConn) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.ensure(cfg, force_headful).await?;
         let mut guard = self.session.lock().await;
         let recon = match guard.as_mut() {
             Some(s) => s.reconcile().await,
@@ -761,17 +782,17 @@ impl Browser {
 
     /// 登录流程：强制有头窗口（可选直接导航到登录页）。
     pub async fn show(&self, cfg: &BrowserConfig, url: Option<&str>) -> Result<String, String> {
-        self.ensure(cfg, true).await?;
-        let guard = self.session.lock().await;
-        let s = guard.as_ref().ok_or("浏览器会话缺失")?;
-        if let Some(url) = url
-            && (url.starts_with("http://") || url.starts_with("https://"))
-        {
-            s.ws.call("Page.navigate", json!({ "url": url })).await?;
-            let _ = wait_ready(&s.ws, 10).await;
-        }
-        let _ = s.ws.call("Page.bringToFront", json!({})).await;
-        Ok("浏览器窗口已打开（有头模式）。请在窗口中完成登录/操作；登录后 cookie 自动保留在专属 profile，之后可切回无头。".to_owned())
+        self.op_with(cfg, true, async move |ws| {
+            if let Some(url) = url
+                && (url.starts_with("http://") || url.starts_with("https://"))
+            {
+                ws.call("Page.navigate", json!({ "url": url })).await?;
+                let _ = wait_ready(ws, 10).await;
+            }
+            let _ = ws.call("Page.bringToFront", json!({})).await;
+            Ok("浏览器窗口已打开（有头模式）。请在窗口中完成登录/操作；登录后 cookie 自动保留在专属 profile，之后可切回无头。".to_owned())
+        })
+        .await
     }
 }
 
@@ -1415,24 +1436,22 @@ pub fn cookies_indicate_login(cookies: &[(String, String)], keys: &[&str]) -> bo
 }
 
 impl Browser {
-    /// 绑定流程：强制有头 → 登录落地页 → 点开登录弹窗 → 窗口前置。
+    /// 绑定流程：强制有头 → 登录落地页 → 点开登录弹窗 → 窗口前置。走
+    /// [op_with] 治理路径：死会话自动重拉/失联页面接管，失败即丢弃会话
+    /// （下一次调用自愈）。
     pub async fn bind(&self, cfg: &BrowserConfig, site: &SiteDef) -> Result<String, String> {
-        self.ensure(cfg, true).await?;
-        let guard = self.session.lock().await;
-        let s = guard.as_ref().ok_or("浏览器会话缺失")?;
-        s.ws.call("Page.navigate", json!({ "url": site.login_url }))
-            .await?;
-        let _ = wait_ready(&s.ws, 15).await;
-        let _ = s.ws.evaluate(site.login_click_js).await;
-        let _ = s.ws.call("Page.bringToFront", json!({})).await;
-        drop(guard);
-        if let Some(s) = self.session.lock().await.as_mut() {
-            s.last_used = std::time::Instant::now();
-        }
-        Ok(format!(
-            "已打开 {} 登录窗口（有头模式），请在窗口中完成登录（扫码/验证码）；登录成功后此处状态自动变绿",
-            site.name
-        ))
+        self.op_with(cfg, true, async move |ws| {
+            ws.call("Page.navigate", json!({ "url": site.login_url }))
+                .await?;
+            let _ = wait_ready(ws, 15).await;
+            let _ = ws.evaluate(site.login_click_js).await;
+            let _ = ws.call("Page.bringToFront", json!({})).await;
+            Ok(format!(
+                "已打开 {} 登录窗口（有头模式），请在窗口中完成登录（扫码/验证码）；登录成功后此处状态自动变绿",
+                site.name
+            ))
+        })
+        .await
     }
 
     /// 登录态查询（不启动浏览器——浏览器没跑时返回 running:false；轮询场景
@@ -1525,24 +1544,22 @@ impl Browser {
     }
 
     /// 解绑：按 origin 清 cookie + localStorage（不碰 profile 里其他站点）。
-    /// 浏览器没跑时以当前显示模式拉起（一次性操作，可接受）。
+    /// 浏览器没跑时以当前显示模式拉起（一次性操作，可接受）。走 [op_with]
+    /// 治理路径，死会话自愈语义与其他操作一致。
     pub async fn unbind(&self, cfg: &BrowserConfig, site: &SiteDef) -> Result<String, String> {
-        self.ensure(cfg, false).await?;
-        let guard = self.session.lock().await;
-        let s = guard.as_ref().ok_or("浏览器会话缺失")?;
-        s.ws.call(
-            "Storage.clearDataForOrigin",
-            json!({ "origin": site.origin, "storageTypes": "cookies,local_storage" }),
-        )
-        .await?;
-        drop(guard);
-        if let Some(s) = self.session.lock().await.as_mut() {
-            s.last_used = std::time::Instant::now();
-        }
-        Ok(format!(
-            "已解绑 {}（该站 cookie 与本地存储已清，其他站点登录态不受影响）",
-            site.name
-        ))
+        let origin = site.origin;
+        let name = site.name;
+        self.op_with(cfg, false, async move |ws| {
+            ws.call(
+                "Storage.clearDataForOrigin",
+                json!({ "origin": origin, "storageTypes": "cookies,local_storage" }),
+            )
+            .await?;
+            Ok(format!(
+                "已解绑 {name}（该站 cookie 与本地存储已清，其他站点登录态不受影响）"
+            ))
+        })
+        .await
     }
 }
 
