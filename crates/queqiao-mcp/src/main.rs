@@ -152,13 +152,18 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "qq_memory_query",
-        description: "查看当前记忆（进行中的话题/想说未说/对群友的印象）",
+        description: "查看记忆详情（全量）：进行中的话题/想说未说/对群友的印象。唤醒提示里只有摘要与印象索引，查某类全文时传 category（印象必传）",
         endpoint: "memory",
         method: "GET",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
         browser_gate: BrowserGate::None,
-        params: &[],
+        params: &[(
+            "category",
+            "string",
+            false,
+            "activeTopic / pendingThought / memberImpression（缺省全部）",
+        )],
     },
     ToolDef {
         name: "qq_memory_remove",
@@ -1752,9 +1757,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::util::ServiceExt;
 
     /// 构造桥 router（同 queqiao/tests/tablet_api.rs 的最小装配；reqwest

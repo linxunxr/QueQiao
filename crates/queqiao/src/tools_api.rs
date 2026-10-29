@@ -775,7 +775,9 @@ async fn message_images(
         let mut out = Vec::new();
         let mut failures = Vec::new();
         for (url, text) in &urls {
-            let Some(client) = client.as_ref().ok() else { break };
+            let Some(client) = client.as_ref().ok() else {
+                break;
+            };
             // error_for_status：QQ CDN rkey 过期回 403 错误页，无状态检查时会把
             // HTML base64 成「图片」喂给视觉模型（模型侧报图片解析错误）。
             let fetched = client
@@ -4111,7 +4113,8 @@ async fn send_sticker(
     }
 }
 
-/// qq_memory_query：记忆文本块（话题/想法/印象——与注入 prompt 的形态一致）。
+/// qq_memory_query：记忆详情（全量，按类别过滤；唤醒注入只带索引——印象正文
+/// 只在这里可见，不受注入的截断限制）。
 async fn memory_list(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
     headers: HeaderMap,
@@ -4125,11 +4128,21 @@ async fn memory_list(
         Ok(k) => k,
         Err(e) => return e,
     };
+    let category = q.get("category").map(String::as_str).unwrap_or("all");
+    if !matches!(
+        category,
+        "activeTopic" | "pendingThought" | "memberImpression" | "all"
+    ) {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            "category 须为 activeTopic / pendingThought / memberImpression / all",
+        );
+    }
     let store = state.social.lock().unwrap();
     let now = crate::session_manager::SessionManager::now_ms();
     let block = store
         .conversation(&key)
-        .map(|st| crate::memory::format_memory(st, now))
+        .and_then(|st| crate::memory::format_memory_detail(st, category, now))
         .unwrap_or_default();
     ok_json(json!({ "memory": block }))
 }

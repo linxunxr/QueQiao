@@ -1660,6 +1660,14 @@ impl Executor {
                     );
                     let text =
                         format!("{time_line}{slang_block}{memory_block}{sticker_block}{text}");
+                    // 注入体量记账：攒每会话的唤醒 prompt 配比（记忆/骨架孰为大头）。
+                    queqiao::logging::log(&format!(
+                        "[prompt-size] {key} reason={reason} total={}B memory={}B sticker={}B slang={}B",
+                        text.len(),
+                        memory_block.len(),
+                        sticker_block.len(),
+                        slang_block.len()
+                    ));
                     let sessions = self.sessions.clone();
                     let key_for_task = key.clone();
                     let reason_for_log = reason.clone();
