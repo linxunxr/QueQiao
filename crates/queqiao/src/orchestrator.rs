@@ -10,10 +10,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use crate::state::ConversationState;
 use queqiao_core::action::{BridgeAction, BridgeEvent, TimerKind};
-use queqiao_core::diary::CivilTime;
-use queqiao_core::runtime::{
-    DecideRules, DiaryRules, SessionRuntime, decide, proactive_check_delay,
-};
+use queqiao_core::runtime::{DecideRules, SessionRuntime, decide, proactive_check_delay};
 use queqiao_core::triggers::TriggerRules;
 
 /// 伪定时器轮：按到期时刻排序的最小堆 + 代际去废。
@@ -93,17 +90,15 @@ pub struct Orchestrator {
     sessions: HashMap<String, SessionRuntime>,
     timers: TimerWheel,
     rules: DecideRules,
-    diary: DiaryRules,
     dirty: std::collections::HashSet<String>,
 }
 
 impl Orchestrator {
-    pub fn new(rules: DecideRules, diary: DiaryRules) -> Self {
+    pub fn new(rules: DecideRules) -> Self {
         Self {
             sessions: HashMap::new(),
             timers: TimerWheel::default(),
             rules,
-            diary,
             dirty: std::collections::HashSet::new(),
         }
     }
@@ -148,7 +143,6 @@ impl Orchestrator {
         &mut self,
         event: BridgeEvent,
         now_ms: u64,
-        now_local: CivilTime,
         rng: &mut dyn FnMut() -> f64,
     ) -> Vec<BridgeAction> {
         // 事件路由到会话（心跳类无会话归属的直接吞掉）。
@@ -167,7 +161,7 @@ impl Orchestrator {
         let Some(rt) = self.sessions.get_mut(&key) else {
             return Vec::new();
         };
-        let actions = decide(rt, &event, now_ms, now_local, &self.rules, &self.diary, rng);
+        let actions = decide(rt, &event, now_ms, &self.rules, rng);
         // 动作里的定时器指令进轮；其余透传给调用方执行。
         let mut out = Vec::with_capacity(actions.len());
         for action in actions {
@@ -191,12 +185,7 @@ impl Orchestrator {
     }
 
     /// 推进到 `now_ms`：触发所有到期定时器（每轮触发的定时器事件再进决策）。
-    pub fn advance(
-        &mut self,
-        now_ms: u64,
-        now_local: CivilTime,
-        rng: &mut dyn FnMut() -> f64,
-    ) -> Vec<BridgeAction> {
+    pub fn advance(&mut self, now_ms: u64, rng: &mut dyn FnMut() -> f64) -> Vec<BridgeAction> {
         let mut out = Vec::new();
         // 定时器触发可能再排新定时器（如退避重试），循环直到本轮无到期项。
         loop {
@@ -205,7 +194,7 @@ impl Orchestrator {
                 break;
             }
             for event in due {
-                out.extend(self.on_event(event, now_ms, now_local, rng));
+                out.extend(self.on_event(event, now_ms, rng));
             }
         }
         out
@@ -233,7 +222,6 @@ impl Orchestrator {
         rt.last_activity_at = persisted.last_incoming_at;
         rt.last_action_at = persisted.last_action_at;
         rt.no_action_count = persisted.wake_config.no_action_count;
-        rt.written_today = false; // 日记状态按日重算（bin 侧决定）
         rt.bootstrap_sent = persisted.bootstrap_sent;
         self.sessions.insert(key.to_owned(), rt);
     }
@@ -263,18 +251,6 @@ mod tests {
         }
     }
 
-    fn now_local(hour: u8) -> CivilTime {
-        CivilTime {
-            date: queqiao_core::diary::CivilDate {
-                year: 2026,
-                month: 10,
-                day: 21,
-            },
-            hour,
-            minute: 0,
-        }
-    }
-
     /// 定时器轮：到期触发、重排覆盖旧代、取消作废。
     #[test]
     fn timer_wheel_gens_and_cancel() {
@@ -290,8 +266,8 @@ mod tests {
         assert!(t.due(1000).is_empty(), "旧代作废");
         assert_eq!(t.due(5000).len(), 1, "新代触发");
         // 取消。
-        t.schedule("k", TimerKind::DiaryTick, 100, 0);
-        t.cancel("k", TimerKind::DiaryTick);
+        t.schedule("k", TimerKind::HistoryTrim, 100, 0);
+        t.cancel("k", TimerKind::HistoryTrim);
         assert!(t.due(1000).is_empty());
         assert_eq!(t.active(), 0);
     }
@@ -299,7 +275,7 @@ mod tests {
     /// 端到端决策序列：消息 → 合批 → 推进到窗口 → 发送唤醒（动作序列可断言）。
     #[test]
     fn orchestrator_end_to_end_action_sequence() {
-        let mut o = Orchestrator::new(DecideRules::default(), DiaryRules::default());
+        let mut o = Orchestrator::new(DecideRules::default());
         o.ensure_session(
             "group:4242",
             TriggerRules {
@@ -313,17 +289,15 @@ mod tests {
         let _ = o.on_event(
             BridgeEvent::MessageArrived(Box::new(msg("group:4242", "第一句", 1))),
             1000,
-            now_local(12),
             &mut rng,
         );
-        let _ = o.advance(9000, now_local(12), &mut rng);
+        let _ = o.advance(9000, &mut rng);
         let _ = o.on_event(
             BridgeEvent::TurnStarted {
                 key: "group:4242".into(),
                 session_id: "s-0".into(),
             },
             9500,
-            now_local(12),
             &mut rng,
         );
         let _ = o.on_event(
@@ -334,7 +308,6 @@ mod tests {
                 error_text: None,
             },
             9600,
-            now_local(12),
             &mut rng,
         );
 
@@ -342,14 +315,13 @@ mod tests {
         let actions = o.on_event(
             BridgeEvent::MessageArrived(Box::new(msg("group:4242", "小鲸鱼在吗", 2))),
             70_000,
-            now_local(12),
             &mut rng,
         );
         assert!(matches!(&actions[..], [BridgeAction::Log { .. }]));
         assert_eq!(o.timers().active(), 1, "合批定时器在册");
 
         // 推进到窗口外：唤醒发送 + 租约/兜底两个新定时器。
-        let actions = o.advance(78_000, now_local(12), &mut rng);
+        let actions = o.advance(78_000, &mut rng);
         assert!(actions.iter().any(
             |a| matches!(a, BridgeAction::SendPrompt { reason, .. } if reason == "keyword:小鲸鱼")
         ));
@@ -363,7 +335,6 @@ mod tests {
                 session_id: "s-1".into(),
             },
             10000,
-            now_local(12),
             &mut rng,
         );
         let actions = o.on_event(
@@ -374,7 +345,6 @@ mod tests {
                 error_text: None,
             },
             15000,
-            now_local(12),
             &mut rng,
         );
         assert!(
@@ -392,12 +362,11 @@ mod tests {
     /// 未注册会话的事件被忽略（fail-safe，不 panic）。
     #[test]
     fn unknown_session_events_are_ignored() {
-        let mut o = Orchestrator::new(DecideRules::default(), DiaryRules::default());
+        let mut o = Orchestrator::new(DecideRules::default());
         let mut rng = || 0.99;
         let actions = o.on_event(
             BridgeEvent::MessageArrived(Box::new(msg("group:999", "小鲸鱼", 1))),
             1000,
-            now_local(12),
             &mut rng,
         );
         assert!(actions.is_empty());
@@ -406,13 +375,13 @@ mod tests {
     /// 主动检查环：全量排程 → 到期触发（不命中也自重排）→ 环常驻。
     #[test]
     fn proactive_check_loop_sustains() {
-        let mut o = Orchestrator::new(DecideRules::default(), DiaryRules::default());
+        let mut o = Orchestrator::new(DecideRules::default());
         o.ensure_session("group:4242", TriggerRules::default());
         let mut rng = || 0.99; // 概率永不命中，纯验环
         o.schedule_proactive_checks(0, &mut rng);
         assert_eq!(o.timers().active(), 1);
         // 到期：不唤醒（rng 0.99 ≥ 0.3）但重排，环仍在册。
-        let actions = o.advance(90 * 60_000, now_local(12), &mut rng);
+        let actions = o.advance(90 * 60_000, &mut rng);
         assert!(actions.is_empty(), "未命中无真实动作");
         assert_eq!(o.timers().active(), 1, "触发后自重排，检查环常驻");
     }
@@ -427,7 +396,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut o = Orchestrator::new(rules, DiaryRules::default());
+        let mut o = Orchestrator::new(rules);
         o.ensure_session("group:4242", TriggerRules::default());
         let mut rng = || 0.99;
         o.schedule_proactive_checks(0, &mut rng);
@@ -437,7 +406,7 @@ mod tests {
     /// 从持久状态恢复：wake_times/bootstrap 画像正确。
     #[test]
     fn hydrate_from_persisted() {
-        let mut o = Orchestrator::new(DecideRules::default(), DiaryRules::default());
+        let mut o = Orchestrator::new(DecideRules::default());
         let persisted = ConversationState {
             wake_times: vec![111, 222],
             bootstrap_sent: true,

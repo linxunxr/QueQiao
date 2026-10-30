@@ -92,7 +92,8 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 }
 
 /// 前一天（民用日期减一天；Node 版以绝对毫秒减 24h 实现，无夏令时时区下等价）。
-fn prev_day(d: CivilDate) -> CivilDate {
+/// bin 的 write-diary 端点用它做「凌晨 0~4 点归昨天」的日期回退。
+pub fn prev_day(d: CivilDate) -> CivilDate {
     if d.day > 1 {
         CivilDate {
             day: d.day - 1,

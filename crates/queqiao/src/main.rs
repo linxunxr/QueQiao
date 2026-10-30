@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use queqiao_core::action::{BridgeAction, BridgeEvent};
 use queqiao_core::diary::CivilTime;
-use queqiao_core::runtime::{DecideRules, DiaryRules};
+use queqiao_core::runtime::DecideRules;
 use queqiao_core::triggers::TriggerRules;
 use queqiao_dsh::client::{AuthSources, DshClient, ReqwestTransport};
 use queqiao_dsh::port::{discover_dsh_base_url, encoded_port_scan_command};
@@ -934,32 +934,23 @@ async fn run(setup: Setup) {
     });
 
     // ── 决策循环：事件 + 定时器推进 → 动作 ───────────────────────────────────
-    let mut orchestrator = Orchestrator::new(
-        DecideRules {
-            batch_window_ms: cfg.social_v2.wake.batch_window_ms,
-            max_wake_per_minute: cfg.social_v2.wake.max_wake_per_minute,
-            max_wake_per_hour: cfg.social_v2.wake.max_wake_per_hour,
-            no_action_limit: cfg.social_v2.wake.no_action_limit,
-            turn_lease_ms: 30 * 60_000,
-            pending_fallback_ms: 35 * 60_000,
-            history_trim_cooldown_ms: 10 * 60_000,
-            history_trim_resend_ms: 3_000,
-            proactive: queqiao_core::runtime::ProactiveRules {
-                enabled: cfg.social_v2.proactive.enabled,
-                check_min_ms: cfg.social_v2.proactive.check_interval_min_ms,
-                check_max_ms: cfg.social_v2.proactive.check_interval_max_ms,
-                idle_threshold_ms: cfg.social_v2.proactive.idle_threshold_ms,
-                probability: cfg.social_v2.proactive.probability,
-            },
+    let mut orchestrator = Orchestrator::new(DecideRules {
+        batch_window_ms: cfg.social_v2.wake.batch_window_ms,
+        max_wake_per_minute: cfg.social_v2.wake.max_wake_per_minute,
+        max_wake_per_hour: cfg.social_v2.wake.max_wake_per_hour,
+        no_action_limit: cfg.social_v2.wake.no_action_limit,
+        turn_lease_ms: 30 * 60_000,
+        pending_fallback_ms: 35 * 60_000,
+        history_trim_cooldown_ms: 10 * 60_000,
+        history_trim_resend_ms: 3_000,
+        proactive: queqiao_core::runtime::ProactiveRules {
+            enabled: cfg.social_v2.proactive.enabled,
+            check_min_ms: cfg.social_v2.proactive.check_interval_min_ms,
+            check_max_ms: cfg.social_v2.proactive.check_interval_max_ms,
+            idle_threshold_ms: cfg.social_v2.proactive.idle_threshold_ms,
+            probability: cfg.social_v2.proactive.probability,
         },
-        DiaryRules {
-            enabled: cfg.social_v2.diary.enabled,
-            hour: cfg.social_v2.diary.hour,
-            not_before_hour: cfg.social_v2.diary.not_before_hour,
-            quiet_ms: cfg.social_v2.diary.quiet_ms,
-            retry_cooldown_ms: 3_600_000,
-        },
-    );
+    });
     // 白名单里的会话预注册（生产形状：allow 列表）；deny 黑名单一票否决
     // （同 allow+deny 冲突时 deny 生效——Node allowed() 语义）。
     for group in &cfg.allow.groups {
@@ -1083,6 +1074,9 @@ async fn run(setup: Setup) {
     // 自动更新通道：启动异步检测与控制台「检查更新」按钮共用（oneshot
     // 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic）。
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
+    // 当前日记回合（写入日期 + 唤醒素材块）：主循环触发时置、write-diary
+    // 提交成功后清；Executor 与工具端点共享（Node diaryPendingDate 语义）。
+    let diary_pending = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
@@ -1100,6 +1094,7 @@ async fn run(setup: Setup) {
             slang_busy: slang_busy.clone(),
             slang_research_tx: slang_research_tx.clone(),
             browser: browser_arc.clone(),
+            diary_pending: diary_pending.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
@@ -1184,6 +1179,12 @@ async fn run(setup: Setup) {
         ConfigFile::load(&queqiao::paths::config_path()).expect("config 重新加载失败")
     });
     let mut last_tick = now_ms();
+    // 日记调度状态（Node scheduleDiaryV2：60s 一拍轮询 + 启动补写一次性检查；
+    // last_tried_at 是跨会话全局冷却锚点，与 core 判定同生命周期）。
+    let boot_ms = now_ms();
+    let mut diary_last_poll = 0u64;
+    let mut diary_last_tried_at = 0u64;
+    let mut diary_catchup_done = false;
     let executor = Executor {
         sessions: sessions_arc.clone(),
         reconnect: reconnect.clone(),
@@ -1195,6 +1196,7 @@ async fn run(setup: Setup) {
         },
         sticker: cfg.social_v2.sticker.clone(),
         slang: cfg.slang.clone(),
+        diary_pending: diary_pending.clone(),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -1240,9 +1242,9 @@ async fn run(setup: Setup) {
                     )
                     .await;
                 }
-                let actions = orchestrator.on_event(event, now, now_local(), &mut rng);
+                let actions = orchestrator.on_event(event, now, &mut rng);
                 executor.execute(actions, now).await;
-                let tick_actions = orchestrator.advance(now_ms(), now_local(), &mut rng);
+                let tick_actions = orchestrator.advance(now_ms(), &mut rng);
                 executor.execute(tick_actions, now_ms()).await;
                 sync_dirty(&orchestrator, &social_arc);
             }
@@ -1277,7 +1279,7 @@ async fn run(setup: Setup) {
                     .and_then(|envelope| bridge_mux_envelope(&executor.sessions, envelope))
                 {
                     let now = now_ms();
-                    let actions = orchestrator.on_event(event, now, now_local(), &mut rng);
+                    let actions = orchestrator.on_event(event, now, &mut rng);
                     executor.execute(actions, now).await;
                 }
             }
@@ -1385,9 +1387,132 @@ async fn run(setup: Setup) {
             }
             _ = timeout => {
                 let now = now_ms();
-                let actions = orchestrator.advance(now, now_local(), &mut rng);
+                let actions = orchestrator.advance(now, &mut rng);
                 executor.execute(actions, now).await;
                 sync_dirty(&orchestrator, &social_arc);
+                // ── 日记三路径调度（Node scheduleDiaryV2：60s 轮询 + 启动补写）──
+                // core 的 diary 纯函数回答「该不该写」，节奏、宿主挑选与投递在
+                // 这里编排（跨会话全局状态，不挂单会话运行时）。
+                if now.saturating_sub(diary_last_poll) >= queqiao_core::runtime::DIARY_TICK_MS {
+                    diary_last_poll = now;
+                    let dcfg = config_file.config().social_v2.diary.clone();
+                    let paused = social_arc.lock().map(|s| s.paused()).unwrap_or(false);
+                    if dcfg.enabled && !paused {
+                        let entries = queqiao_core::diary::parse_diary(
+                            &std::fs::read_to_string(queqiao::paths::diary_path())
+                                .unwrap_or_default(),
+                        );
+                        let now_l = now_local();
+                        let today_key = queqiao::diary_sched::today_diary_key(now_l);
+                        let mut fire: Option<(String, &str)> = None;
+                        // 启动补写（一次性，启动 10 分钟后——DSH/SnowLuma 就绪缓冲）：
+                        // 昨晚关机错过定点、今早补昨天。
+                        if !diary_catchup_done && now.saturating_sub(boot_ms) >= 10 * 60_000 {
+                            diary_catchup_done = true;
+                            let count = social_arc
+                                .lock()
+                                .map(|s| {
+                                    queqiao::diary_sched::activity_count_since(
+                                        &s,
+                                        now.saturating_sub(48 * 3_600_000),
+                                    )
+                                })
+                                .unwrap_or(0);
+                            match queqiao_core::diary::diary_catchup_decision(
+                                now_l.date,
+                                count,
+                                &entries,
+                            ) {
+                                queqiao_core::diary::DiaryCatchup::Yesterday { date } => {
+                                    fire = Some((date, "catchup"));
+                                }
+                                queqiao_core::diary::DiaryCatchup::None => {
+                                    queqiao::logging::log("日记：无需补写（昨天无活动或已写过）");
+                                }
+                            }
+                        }
+                        if fire.is_none() {
+                            // 常规三路径之二：23 点定点 / 18 点后安静满 quiet_ms 提前。
+                            let input = queqiao_core::diary::DiaryTickInput {
+                                now_ms: now,
+                                now_local: now_l,
+                                last_activity_at: social_arc
+                                    .lock()
+                                    .map(|s| queqiao::diary_sched::global_last_activity(&s))
+                                    .unwrap_or(0),
+                                written_today: entries.iter().any(|e| e.date == today_key),
+                                last_tried_at: diary_last_tried_at,
+                                retry_cooldown_ms: 3_600_000,
+                                hour: dcfg.hour,
+                                not_before_hour: dcfg.not_before_hour,
+                                quiet_ms: dcfg.quiet_ms,
+                            };
+                            if let queqiao_core::diary::DiaryTickDecision::Write(mode) =
+                                queqiao_core::diary::diary_tick_decision(&input)
+                            {
+                                let label = match mode {
+                                    queqiao_core::diary::DiaryTickMode::Scheduled => "scheduled",
+                                    queqiao_core::diary::DiaryTickMode::Quiet => "quiet",
+                                };
+                                fire = Some((today_key.clone(), label));
+                            }
+                        }
+                        if let Some((date_key, label)) = fire {
+                            // 无论后面成败先记尝试（冷却防宿主繁忙时每分钟重撞）。
+                            diary_last_tried_at = now;
+                            let keys = orchestrator.session_keys();
+                            let host = social_arc
+                                .lock()
+                                .ok()
+                                .and_then(|s| queqiao::diary_sched::pick_diary_host(&s, &keys, now));
+                            match host {
+                                None => {
+                                    queqiao::logging::log("日记：没有任何会话活动，跳过");
+                                }
+                                Some(host)
+                                    if orchestrator
+                                        .session(&host)
+                                        .is_some_and(|rt| rt.is_busy()) =>
+                                {
+                                    queqiao::logging::log(&format!(
+                                        "日记：宿主会话 {host} 繁忙，稍后再试"
+                                    ));
+                                }
+                                Some(host) => {
+                                    let material = social_arc
+                                        .lock()
+                                        .ok()
+                                        .map(|s| {
+                                            queqiao::diary_sched::build_diary_material(
+                                                &s,
+                                                &keys,
+                                                &entries,
+                                                Some(&date_key),
+                                                &today_key,
+                                                now,
+                                                now_l,
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                    *diary_pending.lock().unwrap() =
+                                        Some((date_key.clone(), material));
+                                    queqiao::logging::log(&format!(
+                                        "日记触发（{label}，宿主 {host}，目标 {date_key}）"
+                                    ));
+                                    executor
+                                        .execute(
+                                            vec![BridgeAction::SendPrompt {
+                                                key: host,
+                                                reason: format!("diary:{label}"),
+                                            }],
+                                            now,
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
                 // 配置热更：UI 保存 → mtime 变化 → 重载进 ConsoleState（坏配置保留旧值）。
                 if now.saturating_sub(last_tick) > 5_000 {
                     last_tick = now;
@@ -1484,6 +1609,8 @@ struct Executor {
     wake_cfg: WakePromptConfig,
     sticker: queqiao::config::StickerConfig,
     slang: queqiao::config::SlangConfig,
+    /// 日记回合素材（diary:* 唤醒时从锁定态取出拼进 prompt）。
+    diary_pending: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -1658,8 +1785,21 @@ impl Executor {
 ",
                         now_local_str(now)
                     );
-                    let text =
-                        format!("{time_line}{slang_block}{memory_block}{sticker_block}{text}");
+                    // 日记素材块（diary:* 唤醒专属：各会话当天动静 + 近期日记
+                    // 锚点 + 补写/常规指引——Node diary prompt 素材段语义；
+                    // 触发时随日期锁定一并写入，此处仅拼接）。
+                    let diary_block = if reason.starts_with("diary") {
+                        self.diary_pending
+                            .lock()
+                            .ok()
+                            .and_then(|p| p.as_ref().map(|(_, m)| m.clone()))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let text = format!(
+                        "{time_line}{slang_block}{memory_block}{sticker_block}{text}{diary_block}"
+                    );
                     // 注入体量记账：攒每会话的唤醒 prompt 配比（记忆/骨架孰为大头）。
                     queqiao::logging::log(&format!(
                         "[prompt-size] {key} reason={reason} total={}B memory={}B sticker={}B slang={}B",

@@ -39,6 +39,9 @@ pub struct ToolApiState {
     pub browser: Arc<crate::browser::Browser>,
     /// 手动送研究通道（ids 空 = 全部候选；主循环消费派发研究任务）。
     pub slang_research_tx: tokio::sync::mpsc::UnboundedSender<Vec<String>>,
+    /// 当前日记回合（桥锁定的写入日期 + 唤醒素材块）：日记触发时置、
+    /// write-diary 成功提交后清（Node diaryPendingDate 语义，模型无法指定日期）。
+    pub diary_pending: Arc<Mutex<Option<(String, String)>>>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -1110,8 +1113,12 @@ async fn set_sticker_remark(
     ok_json(json!({ "ok": true, "stickerId": id }))
 }
 
-/// qq_write_diary：提交今日日记（每天一次；格式与 Node 版 diary.jsonl 一致：
-/// {date, content, key} 逐行）。
+/// qq_write_diary：提交日记（每天一次；格式与 Node 版 diary.jsonl 一致：
+/// {date, content, key, createdAt} 逐行）。
+///
+/// 写入日期由桥锁定（Node diaryPendingDate 语义，模型无法指定）：日记触发
+/// 回锁「补写=昨天 / 常规=当前日记日」；无锁定的手动提交按当前日记日
+/// （凌晨 0~4 点归昨天——与触发判定同基准）。
 async fn write_diary(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
     headers: HeaderMap,
@@ -1129,24 +1136,44 @@ async fn write_diary(
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let chars = content.chars().count();
-    if chars < 10 {
+    if content.chars().count() < 10 {
         return denied(StatusCode::BAD_REQUEST, "日记太短（至少 10 字）");
     }
-    let today = local_date_today();
+    let max_chars = state.cfg.social_v2.diary.max_chars.max(200);
+    if content.chars().count() > max_chars {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            &format!("日记太长（上限 {max_chars} 字）"),
+        );
+    }
+    let day = state
+        .diary_pending
+        .lock()
+        .ok()
+        .and_then(|p| p.as_ref().map(|(d, _)| d.clone()))
+        .unwrap_or_else(local_diary_day_today);
     let file = crate::paths::queqiao_home()
         .join("state")
         .join("diary.jsonl");
-    if let Ok(text) = std::fs::read_to_string(&file) {
-        let today_line = format!("\"date\":\"{today}\"");
-        if text.contains(&today_line) {
-            return denied(
-                StatusCode::CONFLICT,
-                &format!("今天（{today}）的日记已提交过，每天只能写一篇"),
-            );
+    let entries =
+        queqiao_core::diary::parse_diary(&std::fs::read_to_string(&file).unwrap_or_default());
+    let now_ms = crate::session_manager::SessionManager::now_ms();
+    let entry = match queqiao_core::diary::build_diary_entry(&entries, &day, content, &key, now_ms)
+    {
+        Ok(e) => e,
+        Err(err @ queqiao_core::diary::DiaryAppendError::AlreadyWritten { .. }) => {
+            return denied(StatusCode::CONFLICT, &err.to_string());
         }
-    }
-    let line = json!({ "date": today, "content": content, "key": key });
+        Err(err @ queqiao_core::diary::DiaryAppendError::Empty) => {
+            return denied(StatusCode::BAD_REQUEST, &err.to_string());
+        }
+    };
+    let line = json!({
+        "date": entry.date,
+        "content": entry.content,
+        "key": entry.key,
+        "createdAt": entry.created_at,
+    });
     use std::io::Write;
     let mut f = match std::fs::OpenOptions::new()
         .create(true)
@@ -1167,14 +1194,19 @@ async fn write_diary(
             &format!("写日记失败：{e}"),
         );
     }
-    ok_json(json!({ "ok": true, "date": today, "chars": chars }))
+    // 提交成功才清当前回合锁定（失败保留，模型重试仍按锁定日期）。
+    if let Ok(mut p) = state.diary_pending.lock() {
+        *p = None;
+    }
+    ok_json(json!({ "ok": true, "date": entry.date, "chars": entry.content.chars().count() }))
 }
 
-/// 本地日期（YYYY-MM-DD；桥本地时区——与唤醒/日记窗口判定同基准）。
-fn local_date_today() -> String {
+/// 本地民用时刻（日期键 + 小时；桥本地时区——与唤醒/日记窗口判定同基准）。
+fn local_civil_now() -> (String, u8) {
     let secs = crate::session_manager::SessionManager::now_ms() / 1000;
     let local = secs + 8 * 3600; // Asia/Shanghai 固定偏移（now_local 同款约定）
     let days = local / 86400;
+    let hour = ((local % 86400) / 3600) as u8;
     // 1970-01-01 起的 civil 日期换算（Howard Hinnant 算法简版）。
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
@@ -1186,7 +1218,28 @@ fn local_date_today() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
+    (format!("{y:04}-{m:02}-{d:02}"), hour)
+}
+
+/// 当前日记日键（凌晨 0~4 点归昨天——diary.rs current_diary_day 同款语义；
+/// 无桥锁定时的手动提交兜底）。
+fn local_diary_day_today() -> String {
+    let (today, hour) = local_civil_now();
+    if hour >= 4 {
+        return today;
+    }
+    let parse = |s: &str| -> Option<queqiao_core::diary::CivilDate> {
+        let mut it = s.split('-');
+        Some(queqiao_core::diary::CivilDate {
+            year: it.next()?.parse().ok()?,
+            month: it.next()?.parse().ok()?,
+            day: it.next()?.parse().ok()?,
+        })
+    };
+    parse(&today)
+        .map(queqiao_core::diary::prev_day)
+        .map(queqiao_core::diary::diary_date_key)
+        .unwrap_or(today)
 }
 
 /// qq_get_diary：读最近 N 天日记（默认 7）。

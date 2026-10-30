@@ -1,14 +1,13 @@
 //! 运行时会话状态与主决策函数（busy 四条件 / 回合租约 / 暂存兜底 / 退配额 /
-//! noAction 重置 / 日记与主动检查——迁移红线的运行时组装，规格 §五全链）。
+//! noAction 重置 / 主动检查——迁移红线的运行时组装，规格 §五全链；
+//! 日记调度不走本模块：三路径判定是跨会话全局语义，由 bin 主循环直调
+//! [`crate::diary`] 纯函数）。
 //!
 //! 分层：`SessionRuntime` 持有单会话的运行时态（**不落盘**）与持久字段镜像
 //! （wake_times 等，bin 与 ConversationState 双向同步）；[`decide`] 把
 //! [`BridgeEvent`] 变换为 [`BridgeAction`] 序列，IO 全在 bin 解释执行。
 
 use crate::action::{BridgeAction, BridgeEvent, IncomingMessage, TimerKind};
-use crate::diary::{
-    CivilTime, DiaryTickDecision, DiaryTickInput, DiaryTickMode, diary_tick_decision,
-};
 use crate::rate::{rate_limited, refund_time};
 use crate::schedule::{WakeSchedule, defer_wake, schedule_wake};
 use crate::triggers::{TriggerRules, evaluate_trigger};
@@ -40,8 +39,6 @@ pub struct SessionRuntime {
     pub last_activity_at: u64,
     pub last_action_at: u64,
     pub no_action_count: u32,
-    pub written_today: bool,
-    pub last_diary_try_at: u64,
     pub bootstrap_sent: bool,
     pub wake: TriggerRules,
     // ── 运行时（绝不落盘，重启即清）──
@@ -67,8 +64,6 @@ impl SessionRuntime {
             last_activity_at: 0,
             last_action_at: 0,
             no_action_count: 0,
-            written_today: false,
-            last_diary_try_at: 0,
             bootstrap_sent: false,
             wake,
             seq: 0,
@@ -180,7 +175,7 @@ impl Default for DiaryRules {
     }
 }
 
-pub const DIARY_KEY: &str = "diary";
+/// 日记轮询周期（bin 主循环 60s 一拍，判定用 [`crate::diary`] 纯函数）。
 pub const DIARY_TICK_MS: u64 = 60_000;
 
 /// 内部：真正发送唤醒（频率判定 + 记账 + 动作）。
@@ -245,23 +240,18 @@ fn defer_wake_with_fallback(
 
 /// 主决策函数：事件 + 状态 → 动作序列（bin 解释执行）。
 ///
-/// `rng` 提供 `[0,1)` 随机数（probability 档与主动检查用）；`now_local` 是
-/// 本地民用时间（日记判定用，bin 换算）。
+/// `rng` 提供 `[0,1)` 随机数（probability 档与主动检查用）。
 pub fn decide(
     rt: &mut SessionRuntime,
     event: &BridgeEvent,
     now_ms: u64,
-    now_local: CivilTime,
     rules: &DecideRules,
-    diary: &DiaryRules,
     rng: &mut dyn FnMut() -> f64,
 ) -> Vec<BridgeAction> {
     match event {
         BridgeEvent::MessageArrived(msg) => on_message(rt, msg, now_ms, rules, rng),
         BridgeEvent::PokeArrived { .. } => on_poke(rt, now_ms, rules),
-        BridgeEvent::TimerFired { timer, .. } => {
-            on_timer(rt, *timer, now_ms, now_local, rules, diary, rng)
-        }
+        BridgeEvent::TimerFired { timer, .. } => on_timer(rt, *timer, now_ms, rules, rng),
         BridgeEvent::TurnStarted { session_id, .. } => {
             rt.prompt_in_flight = false;
             if rt.turn.is_none() {
@@ -375,9 +365,7 @@ fn on_timer(
     rt: &mut SessionRuntime,
     timer: TimerKind,
     now_ms: u64,
-    now_local: CivilTime,
     rules: &DecideRules,
-    diary: &DiaryRules,
     rng: &mut dyn FnMut() -> f64,
 ) -> Vec<BridgeAction> {
     match timer {
@@ -412,39 +400,6 @@ fn on_timer(
         // 413 退役重投：绕频率判定（失败回合已退配额），直接重发唤醒。
         TimerKind::HistoryTrim => force_wake(rt, "history-trim", now_ms, rules),
         TimerKind::AgentRetry => force_wake(rt, "agent-retry", now_ms, rules),
-        TimerKind::DiaryTick => {
-            // 日记三路径判定（定点 / 安静提前 / 冷却）。
-            let input = DiaryTickInput {
-                now_ms,
-                now_local,
-                last_activity_at: rt.last_activity_at,
-                written_today: rt.written_today,
-                last_tried_at: rt.last_diary_try_at,
-                retry_cooldown_ms: diary.retry_cooldown_ms,
-                hour: diary.hour,
-                not_before_hour: diary.not_before_hour,
-                quiet_ms: diary.quiet_ms,
-            };
-            match diary_tick_decision(&input) {
-                DiaryTickDecision::Write(mode) => {
-                    rt.last_diary_try_at = now_ms;
-                    let label = match mode {
-                        DiaryTickMode::Scheduled => "scheduled",
-                        DiaryTickMode::Quiet => "quiet",
-                    };
-                    vec![
-                        BridgeAction::SendPrompt {
-                            key: DIARY_KEY.to_owned(),
-                            reason: format!("diary:{label}"),
-                        },
-                        BridgeAction::Log {
-                            message: format!("日记触发（{label}）"),
-                        },
-                    ]
-                }
-                DiaryTickDecision::Skip => Vec::new(),
-            }
-        }
         TimerKind::ProactiveCheck => {
             // 主动检查（Node scheduleProactiveCheckV2 回调语义）：群安静达阈值、
             // 随机命中且不繁忙才唤醒；无论命中与否都按区间随机重排下一次，
@@ -693,25 +648,8 @@ mod tests {
 
     fn decide1(rt: &mut SessionRuntime, event: &BridgeEvent, now_ms: u64) -> Vec<BridgeAction> {
         let rules = DecideRules::default();
-        let diary = DiaryRules::default();
         let mut rng = || 0.99;
-        decide(
-            rt,
-            event,
-            now_ms,
-            crate::diary::CivilTime {
-                date: crate::diary::CivilDate {
-                    year: 2026,
-                    month: 10,
-                    day: 21,
-                },
-                hour: 12,
-                minute: 0,
-            },
-            &rules,
-            &diary,
-            &mut rng,
-        )
+        decide(rt, event, now_ms, &rules, &mut rng)
     }
 
     /// 消息 → 合批窗口 → 到点发送：完整链（含频率记账与租约/兜底定时器）。
@@ -995,52 +933,6 @@ mod tests {
         assert_eq!(rt.wake_times, [1000], "不记账");
     }
 
-    /// 日记定点触发（红线六：定点 23 点路径）。
-    #[test]
-    fn diary_scheduled_path() {
-        let mut rt = runtime();
-        let rules = DecideRules::default();
-        let diary = DiaryRules::default();
-        let mut rng = || 0.99;
-        let at_23 = crate::diary::CivilTime {
-            date: crate::diary::CivilDate {
-                year: 2026,
-                month: 10,
-                day: 21,
-            },
-            hour: 23,
-            minute: 1,
-        };
-        let actions = decide(
-            &mut rt,
-            &BridgeEvent::TimerFired {
-                key: "group:4242".to_owned(),
-                timer: TimerKind::DiaryTick,
-            },
-            1_792_570_860_000,
-            at_23,
-            &rules,
-            &diary,
-            &mut rng,
-        );
-        assert!(actions.iter().any(|a| matches!(a, BridgeAction::SendPrompt { key, reason } if key == "diary" && reason.starts_with("diary:"))));
-        assert_eq!(rt.last_diary_try_at, 1_792_570_860_000);
-        // 冷却期内再触发 → Skip。
-        let actions = decide(
-            &mut rt,
-            &BridgeEvent::TimerFired {
-                key: "group:4242".to_owned(),
-                timer: TimerKind::DiaryTick,
-            },
-            1_792_570_860_000 + 60_000,
-            at_23,
-            &rules,
-            &diary,
-            &mut rng,
-        );
-        assert!(actions.is_empty());
-    }
-
     /// 自己的回显不触发（防自激励）。
     #[test]
     fn self_echo_does_not_trigger() {
@@ -1063,18 +955,8 @@ mod history_trim_tests {
     }
     fn decide1(rt: &mut SessionRuntime, event: &BridgeEvent, now_ms: u64) -> Vec<BridgeAction> {
         let rules = DecideRules::default();
-        let diary = DiaryRules::default();
-        let now_local = crate::diary::CivilTime {
-            date: crate::diary::CivilDate {
-                year: 2026,
-                month: 10,
-                day: 21,
-            },
-            hour: 12,
-            minute: 0,
-        };
         let mut rng = || 0.99;
-        decide(rt, event, now_ms, now_local, &rules, &diary, &mut rng)
+        decide(rt, event, now_ms, &rules, &mut rng)
     }
     fn err_turn(text: &str) -> BridgeEvent {
         BridgeEvent::TurnEnded {
@@ -1184,18 +1066,8 @@ mod agent_retry_tests {
     }
     fn decide1(rt: &mut SessionRuntime, event: &BridgeEvent, now_ms: u64) -> Vec<BridgeAction> {
         let rules = DecideRules::default();
-        let diary = DiaryRules::default();
-        let now_local = crate::diary::CivilTime {
-            date: crate::diary::CivilDate {
-                year: 2026,
-                month: 10,
-                day: 21,
-            },
-            hour: 12,
-            minute: 0,
-        };
         let mut rng = || 0.99;
-        decide(rt, event, now_ms, now_local, &rules, &diary, &mut rng)
+        decide(rt, event, now_ms, &rules, &mut rng)
     }
 
     /// 503 → 8s 重投定时器；第二次 20s；用尽后错误亮群友并清零。
@@ -1286,15 +1158,6 @@ mod proactive_tests {
         now_ms: u64,
         rng_val: f64,
     ) -> Vec<BridgeAction> {
-        let now_local = crate::diary::CivilTime {
-            date: crate::diary::CivilDate {
-                year: 2026,
-                month: 10,
-                day: 21,
-            },
-            hour: 12,
-            minute: 0,
-        };
         let mut rng = move || rng_val;
         decide(
             rt,
@@ -1303,9 +1166,7 @@ mod proactive_tests {
                 timer: TimerKind::ProactiveCheck,
             },
             now_ms,
-            now_local,
             rules,
-            &DiaryRules::default(),
             &mut rng,
         )
     }

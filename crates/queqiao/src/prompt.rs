@@ -97,8 +97,10 @@ pub fn build_wake_prompt(ctx: &PromptContext, reason: &str) -> String {
             // keyword:xxx / atMention / private / question / speaker / anyMessage /
             // probability / diary 等：通用唤醒尾段。
             if other.starts_with("diary") {
+                // 素材与指引在投递层拼接的【日记素材】段（Node diary prompt 的
+                // digests/anchors/补写文案——diary_sched::build_diary_material）。
                 format!(
-                    "{base}【日记时间】按你的角色与近期经历写一篇今天的日记（qq_write_diary）。写完照常设置唤醒条件。"
+                    "{base}【日记时间】按消息末尾【日记素材】段的动静与指引写日记并提交（qq_write_diary；写入日期由桥锁定，不用你指定）。写完照常设置唤醒条件。"
                 )
             } else {
                 format!(

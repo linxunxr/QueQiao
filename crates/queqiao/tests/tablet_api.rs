@@ -40,6 +40,7 @@ fn make_router(home: &std::path::Path, tablet_enabled: bool) -> axum::Router {
     let mut cfg = Config::default();
     cfg.tablet.enabled = tablet_enabled;
     let state = Arc::new(ToolApiState {
+        diary_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
         social: Arc::new(Mutex::new(social)),
         onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),
         cfg,

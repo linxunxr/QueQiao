@@ -1839,6 +1839,7 @@ mod tests {
         .unwrap();
         let (update_tx, _rx) = tokio::sync::mpsc::channel(1);
         let state = Arc::new(queqiao::tools_api::ToolApiState {
+            diary_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
             social: Arc::new(std::sync::Mutex::new(social)),
             onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),
             cfg: queqiao::config::Config::default(),
