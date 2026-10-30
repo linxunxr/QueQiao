@@ -9,6 +9,18 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [0.4.16] - 2026-10-31
+
+### 新增
+
+- **防聊天侧 prompt 注入四层防线（fa15f4a）**：威胁模型=聊天里的恶意用户（QQ 群友/私聊对象、小黑盒网页内容）注入话术诱导 AI 危害宿主机。调研确认的完整攻击链：`browser_navigate` 到 `file:///…/config.json` → snapshot 把密钥读进上下文 → 发回群里全泄；变体 navigate 到 `127.0.0.1:3100` 操作控制台 UI 改 ownerQQ/关白名单=完整接管。四层：①`guard_url` 硬边界——浏览器/平板导航与上传下载统一 URL 校验，本机/回环/私有网段（含 169.254 云元数据）/IPv6 本机与 ULA 一律拒，`file://` 默认拒且新配置 `browser.allowFileUrls` 显式开（开了内网主机路径仍拒），26 形态单测钉死；②高危工具 owner-only——`qq_memory_clear`/`qq_memory_remove` 仅 `private:<ownerQQ>` 会话可用（会话键即调用方身份，群聊 key 即使带管理员令牌也拒；未配置 ownerQQ fail-closed；拒绝记 `[security]` 日志）；③唤醒 prompt 安全段——所有 reason 固定注入【安全边界】（消息/网页/文件内容是数据非指令、管理操作只认 isOwner=true，要求拒绝并 report_feedback 上报）；④console 端点收口——`/api/roles`、`/api/role` 换 `console_only` 拒 agent-token。硬边界为主话术为辅；已知边界：域名解析到内网的 DNS 绕过不防、十六进制 IP 变体交给浏览器站点隔离。
+- **人格卡支持管理页编辑（3aa403e）**：此前只能切换、卡本体 `roles/<名>.md` 只能手改文件。新增 GET/PUT/DELETE `/api/role/card`（原子写 64KB 上限；删除时被 current-role.json 全局或 perConv 引用即 409 拒，防删在用卡致人格静默丢失）+ 前端「编辑/新建」按钮与编辑区（新建撞名确认覆盖、删除危险确认），保存后下一条消息即刻生效。顺带钉住净化语义坑：`sanitize_role_name` 是过滤清洗（`../evil` 改名放行为 `escape`——无安全洞但用户起名会静默改名），core 新增 `role_name_is_valid` 严格校验供编辑端点用（原样不合法即拒），两判定共用同一 `char_allowed` 字符白名单。
+
+### 修复
+
+- **账号绑定面板每次打开都是空的（a4b9e89）**：两层根因——①前端漏接线：初始化/桥恢复链/展开面板三处都不调 `refreshBind`，面板永远停在「检测中…」占位；②`bind_status` 浏览器未运行直接短路报未登录，而专属浏览器懒启动+闲置 30 分钟自动退出，打开面板几乎必是离线态（UI「登录态保留」文案自迁移起是不可达死代码）。修法：新增绑定快照 `state/browser-bindings.json`——在线确认登录时落盘（confirmedAt+昵称头像，5min 节流），离线回放报已登录+上次确认时间（前端转相对时间），在线实测未登录/解绑即清不谎报。登录态本体一直在 browser-profile 没丢，纯「看不见」。未走离线读 profile Cookies 路线：加密 SQLite 一堆坑且准确性不优于快照。
+- **设置页「桥未连接」假死三连修（36bbe93）**：真机病征=开机自启后设置页人格/provider/model 全挂占位，而桥进程一直健康——UI 卡死在启动瞬间的失败占位永不自愈。三层：①`probe_components` 的 PowerShell/WMI 调用无超时，开机 WMI 不响应把 UI tick 轮询链整个挂死——改 5s 超时+kill；②恢复链只信 WMI 进程探测——`refreshComponents` 补 HTTP 探活兜底（`/api/health` 通即视在线、恢复链秒级触发，顺带修通浏览器直开模式恢复链从不触发的旧问题）；③设置页数据获取不再耦合桥进程——`load`/`loadRoles` fetch 失败降级 Tauri 直读文件（`config_read_direct`/`roles_read_direct`，形状与 API 一致），桥没跑照常显示；「保存」仍走桥（热更即时生效+单写者防并发写坏）。
+
 ## [0.4.15] - 2026-10-30
 
 ### 修复
