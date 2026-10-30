@@ -1,0 +1,47 @@
+# Gitee 镜像补传：发版后同步步失败/镜像滞后时单独重触发，不重跑构建。
+# 云函数幂等（附件已存在跳过）；secrets 未配置则跳过（与 release.yml 同款约定）。
+# 注意：dispatch 用 --ref main（云函数自己按参数去 GitHub 拉资产，不依赖本仓库代码）。
+name: Resync Gitee
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要同步的 tag（如 v0.4.13）'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  resync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 触发 gitee-sync 云函数中转
+        env:
+          GITEE_SYNC_URL: ${{ secrets.GITEE_SYNC_URL }}
+          SYNC_SECRET: ${{ secrets.SYNC_SECRET }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          if [ -z "${GITEE_SYNC_URL}" ] || [ -z "${SYNC_SECRET}" ]; then
+            echo "::error::未配置 GITEE_SYNC_URL/SYNC_SECRET secrets，无法触发云函数中转"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          MAIN_ASSET="queqiao-v${VERSION}-win64.zip"
+          echo "同步 ${MAIN_ASSET} → Gitee（云函数中转）"
+          # -G --data-urlencode：secret 含 +/&/空格等字符时直拼 URL 会被网关解码变形
+          code=$(curl -s -o gitee-sync-resp.json -w "%{http_code}" --max-time 600 -G \
+            --data-urlencode "secret=${SYNC_SECRET}" \
+            --data-urlencode "version=${VERSION}" \
+            --data-urlencode "gh_repo=linxunxr/QueQiao" \
+            --data-urlencode "owner=mwcxlinxun" \
+            --data-urlencode "repo=QueQiao" \
+            --data-urlencode "files=${MAIN_ASSET}" \
+            "${GITEE_SYNC_URL}")
+          cat gitee-sync-resp.json || true
+          if [ "$code" != "200" ]; then
+            echo "::error::Gitee 同步失败（HTTP ${code}）——镜像 tag 未同步到时等待后重跑（云函数幂等）"
+            exit 1
+          fi
