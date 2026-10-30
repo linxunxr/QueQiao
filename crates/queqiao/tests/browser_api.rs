@@ -656,6 +656,72 @@ fn browser_dead_session_self_heals() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// 绑定快照离线回放：浏览器未运行时 bind-status 按快照报「已登录」，
+/// 无快照才报「未运行」空态。绑定面板打开时浏览器几乎总已闲置退出
+/// （懒启动 + idle_close_min 默认 30 分钟）——修复前该场景永远空态，
+/// 已绑定账号不可见（面板「每次打开都是空的」）。无需 Chrome：纯
+/// HTTP 层验证，CI 全平台可跑。
+#[test]
+fn browser_bind_status_offline_snapshot() {
+    let _home_guard = home_guard();
+    let home = temp_home("bind-off");
+    unsafe { std::env::set_var("QUEQIAO_HOME", &home) };
+
+    let (r, _token) = make_authorized_router(&home);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // ① 无快照 + 浏览器未跑：原空态（未运行 + hint）。
+    rt.block_on(async {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/bind-status?site=xiaoheihe")
+            .body(Body::empty())
+            .unwrap();
+        let (code, v) = fire(&r, req).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v["value"]["running"], json!(false));
+        assert_eq!(v["value"]["loggedIn"], json!(false), "无快照不谎报：{v}");
+        assert!(v["value"]["hint"].as_str().unwrap_or_default().contains("未运行"));
+    });
+
+    // ② 写快照（等价上次在线确认登录）→ 离线回放：已登录 + 展示字段
+    //    + confirmedAt（前端转「上次确认 X 分钟前」）。
+    std::fs::write(
+        home.join("state").join("browser-bindings.json"),
+        serde_json::to_string(&json!({
+            "xiaoheihe": {
+                "loggedIn": true, "nickname": "鹊桥用户", "level": "5",
+                "confirmedAt": 1730000000
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    rt.block_on(async {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/browser/bind-status?site=xiaoheihe")
+            .body(Body::empty())
+            .unwrap();
+        let (code, v) = fire(&r, req).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v["value"]["running"], json!(false));
+        assert_eq!(v["value"]["loggedIn"], json!(true), "离线回放快照登录态：{v}");
+        assert_eq!(v["value"]["nickname"], json!("鹊桥用户"));
+        assert_eq!(v["value"]["level"], json!("5"));
+        assert_eq!(v["value"]["confirmedAt"], json!(1730000000));
+        assert!(
+            v["value"]["hint"].is_null(),
+            "已登录不带未登录 hint：{v}"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// 标签页治理全链：单页纪律（_blank 链接当前页打开）→ 泄漏（跨源
 /// window.open 真开新页——注入脚本对跨源放行，OAuth 类弹窗不误伤）→
 /// 预算回收（超 3 个操作前自动关最老非活跃页，活跃页保住）→

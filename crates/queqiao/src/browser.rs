@@ -1428,6 +1428,65 @@ pub fn find_site(id: &str) -> Option<&'static SiteDef> {
     SITES.iter().find(|s| s.id == id)
 }
 
+// ── 绑定快照（state/browser-bindings.json）──────────────────────────────────
+// 登录态判定只走 CDP 实时查询，浏览器进程退出后无从离线判定（profile 里
+// 的 Cookies 是加密 SQLite，且离线读文件同样感知不到服务端 session 过期
+// ——准确性不优于快照）。快照 = 「上次浏览器在线时会话 cookie 仍有效」：
+// 在线确认登录时落盘（confirmedAt + 昵称等展示字段），离线回放给绑定面板
+// 显示「登录态保留」；在线实测未登录/解绑即清——不谎报。
+
+fn bindings_path() -> PathBuf {
+    crate::paths::state_dir().join("browser-bindings.json")
+}
+
+/// unix 秒（快照时间戳；无 SystemTime 时 0——前端按「时间未知」处理）。
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 读站点快照（文件缺失/损坏/非对象一律 None——快照只是显示增强，不挡路）。
+fn read_binding_snapshot_at(path: &std::path::Path, site: &str) -> Option<Value> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Value>(&txt)
+        .ok()?
+        .get(site)
+        .cloned()
+}
+
+/// 合并写站点快照（其他站点保留；既有文件损坏当空重写）。
+fn write_binding_snapshot_at(path: &std::path::Path, site: &str, snap: &Value) {
+    let mut all: Value = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    if !all.is_object() {
+        all = json!({});
+    }
+    all[site] = snap.clone();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default());
+}
+
+/// 清站点快照（无文件/无该站点时幂等）。
+fn clear_binding_snapshot_at(path: &std::path::Path, site: &str) {
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut all) = serde_json::from_str::<Value>(&txt) else {
+        return;
+    };
+    if let Some(o) = all.as_object_mut() {
+        if o.remove(site).is_some() {
+            let _ = std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default());
+        }
+    }
+}
+
 /// 登录态判定（纯函数）：任一会话 cookie 名存在且值非空。
 pub fn cookies_indicate_login(cookies: &[(String, String)], keys: &[&str]) -> bool {
     cookies
@@ -1462,8 +1521,22 @@ impl Browser {
         let running = self.session.lock().await.is_some();
         out["running"] = json!(running);
         if !running {
-            out["loggedIn"] = json!(false);
-            out["hint"] = json!("浏览器未运行——点「绑定/登录」拉起登录窗口");
+            // 离线回放快照：绑定面板打开时浏览器几乎总已闲置退出（懒启动 +
+            // idle_close_min），只报「未运行」等于永远看不见已绑定的账号。
+            if let Some(snap) = read_binding_snapshot_at(&bindings_path(), site.id)
+                && snap.get("loggedIn").and_then(Value::as_bool) == Some(true)
+            {
+                out["loggedIn"] = json!(true);
+                for k in ["nickname", "avatar", "level"] {
+                    if let Some(v) = snap.get(k).filter(|v| !v.is_null()) {
+                        out[k] = v.clone();
+                    }
+                }
+                out["confirmedAt"] = snap.get("confirmedAt").cloned().unwrap_or(json!(0));
+            } else {
+                out["loggedIn"] = json!(false);
+                out["hint"] = json!("浏览器未运行——点「绑定/登录」拉起登录窗口");
+            }
             return out;
         }
         let guard = self.session.lock().await;
@@ -1497,6 +1570,21 @@ impl Browser {
         drop(guard);
         let logged_in = cookies_indicate_login(&cookies, site.session_cookie_any);
         out["loggedIn"] = json!(logged_in);
+        if logged_in {
+            // 回填快照里的展示字段：本次未刮取（scrape=false，含 AI 侧
+            // login-status 高频查询）时 UI 也能显示上次的昵称/头像。
+            let old = read_binding_snapshot_at(&bindings_path(), site.id);
+            for k in ["nickname", "avatar", "level"] {
+                if out.get(k).map_or(true, Value::is_null)
+                    && let Some(v) = old
+                        .as_ref()
+                        .and_then(|o| o.get(k))
+                        .filter(|v| !v.is_null())
+                {
+                    out[k] = v.clone();
+                }
+            }
+        }
         if logged_in
             && scrape
             && let Some(s) = self.session.lock().await.as_ref()
@@ -1537,8 +1625,34 @@ impl Browser {
                     }
                 }
             }
-        } else {
+        } else if !logged_in {
+            // 只在未登录时给 hint：logged_in && !scrape 也落进这个 else，
+            // 此时提示「未检测到会话」与 loggedIn:true 自相矛盾。
             out["hint"] = json!("未检测到会话 cookie——未登录或已失效，点「绑定/登录」重新扫码");
+        }
+        // 快照落盘/清除：在线实测即权威——登录确认刷新 confirmedAt（及
+        // 本次刮到的展示字段），未登录即清（cookie 真没了，离线不得谎报）。
+        if logged_in {
+            let now = now_unix();
+            let old = read_binding_snapshot_at(&bindings_path(), site.id);
+            let mut snap = old.clone().unwrap_or(json!({}));
+            let old_confirmed = snap.get("confirmedAt").and_then(Value::as_u64).unwrap_or(0);
+            let mut changed = false;
+            for k in ["nickname", "avatar", "level"] {
+                if let Some(v) = out.get(k).filter(|v| !v.is_null()) {
+                    changed |= snap.get(k) != Some(v);
+                    snap[k] = v.clone();
+                }
+            }
+            snap["loggedIn"] = json!(true);
+            // 节流：展示字段未变且上次确认 <5min 内不重复写盘（AI 侧
+            // login-status 也会高频触发本函数）。
+            if changed || old_confirmed + 300 < now {
+                snap["confirmedAt"] = json!(now);
+                write_binding_snapshot_at(&bindings_path(), site.id, &snap);
+            }
+        } else {
+            clear_binding_snapshot_at(&bindings_path(), site.id);
         }
         out
     }
@@ -1549,17 +1663,25 @@ impl Browser {
     pub async fn unbind(&self, cfg: &BrowserConfig, site: &SiteDef) -> Result<String, String> {
         let origin = site.origin;
         let name = site.name;
-        self.op_with(cfg, false, async move |ws| {
-            ws.call(
-                "Storage.clearDataForOrigin",
-                json!({ "origin": origin, "storageTypes": "cookies,local_storage" }),
-            )
-            .await?;
-            Ok(format!(
-                "已解绑 {name}（该站 cookie 与本地存储已清，其他站点登录态不受影响）"
-            ))
-        })
-        .await
+        let site_id = site.id;
+        let r = self
+            .op_with(cfg, false, async move |ws| {
+                ws.call(
+                    "Storage.clearDataForOrigin",
+                    json!({ "origin": origin, "storageTypes": "cookies,local_storage" }),
+                )
+                .await?;
+                Ok(format!(
+                    "已解绑 {name}（该站 cookie 与本地存储已清，其他站点登录态不受影响）"
+                ))
+            })
+            .await;
+        if r.is_ok() {
+            // cookie 已清，快照同步清——否则浏览器未运行期间离线回放会
+            // 谎报「登录态保留」。
+            clear_binding_snapshot_at(&bindings_path(), site_id);
+        }
+        r
     }
 }
 
@@ -1604,5 +1726,93 @@ mod bind_tests {
             keys
         ));
         assert!(!cookies_indicate_login(&[], keys));
+    }
+
+    /// 独立临时文件路径（单测互不踩踏；不用 QUEQIAO_HOME——并行测试下
+    /// 环境变量会互相覆盖）。
+    fn snap_file(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("queqiao-bind-snap-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("browser-bindings.json")
+    }
+
+    /// 快照读写往返：合并写保留其他站点，clear 只删目标，损坏文件容错。
+    #[test]
+    fn snapshot_roundtrip_and_clear() {
+        let path = snap_file("roundtrip");
+        write_binding_snapshot_at(
+            &path,
+            "xiaoheihe",
+            &json!({ "loggedIn": true, "nickname": "鹊桥用户", "confirmedAt": 100 }),
+        );
+        // 另一站点合并写：xiaoheihe 不丢。
+        write_binding_snapshot_at(&path, "other", &json!({ "loggedIn": true }));
+        let v = read_binding_snapshot_at(&path, "xiaoheihe").expect("读到快照");
+        assert_eq!(v["nickname"], json!("鹊桥用户"));
+        assert!(read_binding_snapshot_at(&path, "other").is_some());
+
+        clear_binding_snapshot_at(&path, "xiaoheihe");
+        assert!(read_binding_snapshot_at(&path, "xiaoheihe").is_none());
+        assert!(
+            read_binding_snapshot_at(&path, "other").is_some(),
+            "清目标站点不动其他站点"
+        );
+        // 幂等：再清一次不报错。
+        clear_binding_snapshot_at(&path, "xiaoheihe");
+
+        // 损坏文件/缺文件：读 None、写覆盖重建。
+        std::fs::write(&path, "not-json{{{").unwrap();
+        assert!(read_binding_snapshot_at(&path, "xiaoheihe").is_none());
+        write_binding_snapshot_at(&path, "xiaoheihe", &json!({ "loggedIn": true }));
+        assert!(read_binding_snapshot_at(&path, "xiaoheihe").is_some());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 离线回放：浏览器未运行时按快照报「已登录」，无快照才报未运行。
+    /// 这是绑定面板「每次打开都是空的」的修复核心——面板打开时浏览器
+    /// 几乎总已闲置退出，快照让已绑定账号仍然可见。
+    #[tokio::test]
+    async fn offline_status_replays_snapshot() {
+        let dir = std::env::temp_dir().join(format!("queqiao-bind-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        unsafe { std::env::set_var("QUEQIAO_HOME", &dir) };
+
+        let b = new_browser();
+        let site = find_site("xiaoheihe").unwrap();
+        let cfg = BrowserConfig::default();
+
+        // 无快照：原行为（未运行 hint）。
+        let v = b.bind_status(&cfg, site, false).await;
+        assert_eq!(v["running"], json!(false));
+        assert_eq!(v["loggedIn"], json!(false));
+        assert!(v["hint"].as_str().unwrap().contains("未运行"));
+
+        // 有快照：离线回放登录态 + 展示字段 + confirmedAt。
+        write_binding_snapshot_at(
+            &bindings_path(),
+            "xiaoheihe",
+            &json!({ "loggedIn": true, "nickname": "鹊桥用户", "level": "5",
+                     "confirmedAt": 1730000000 }),
+        );
+        let v = b.bind_status(&cfg, site, false).await;
+        assert_eq!(v["running"], json!(false));
+        assert_eq!(v["loggedIn"], json!(true), "离线回放快照登录态：{v}");
+        assert_eq!(v["nickname"], json!("鹊桥用户"));
+        assert_eq!(v["level"], json!("5"));
+        assert_eq!(v["confirmedAt"], json!(1730000000));
+
+        // loggedIn:false 的快照不回放（防清 cookie 后残留旧快照谎报）。
+        write_binding_snapshot_at(
+            &bindings_path(),
+            "xiaoheihe",
+            &json!({ "loggedIn": false }),
+        );
+        let v = b.bind_status(&cfg, site, false).await;
+        assert_eq!(v["loggedIn"], json!(false));
+
+        unsafe { std::env::remove_var("QUEQIAO_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

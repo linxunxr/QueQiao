@@ -902,6 +902,7 @@ document.getElementById('page-settings').addEventListener('input', () => {
   if (!st.textContent.includes('未保存')) st.textContent = '有未保存的更改 · ' + st.textContent;
 });
 loadCatalog();
+refreshBind(); // 绑定面板初始刷新：桥未起时先占位，tick 探测到桥上线后由恢复链重刷
 (async () => { await load(); fillModels(); })();
 (async function tick() {
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
@@ -1188,6 +1189,17 @@ async function saveSlangConfig() {
 
 // ── 账号绑定（/api/browser/bind*）：绑定=有头窗口扫码，状态轮询自动变绿 ──
 let bindPolling = null;
+// 上次确认时间（unix 秒 → 中文相对时间）：离线快照的 confirmedAt 用。
+function relTime(sec) {
+  const d = Math.floor(Date.now() / 1000) - sec;
+  if (d < 0) return '刚刚';
+  if (d < 60) return '刚刚';
+  if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+  if (d < 172800) return '昨天';
+  const dt = new Date(sec * 1000);
+  return (dt.getMonth() + 1) + '-' + String(dt.getDate()).padStart(2, '0');
+}
 async function refreshBind(scrape) {
   const sum = $('bindSum'), state = $('bindState');
   if (!bridgeOnline) { sum.textContent = ''; state.textContent = '桥未运行——启动后可绑定账号'; return; }
@@ -1207,7 +1219,9 @@ async function refreshBind(scrape) {
       profileBtn.style.display = 'none';
     } else {
       sum.textContent = '已登录';
-      state.textContent = v.running ? '登录态有效' : '登录态保留（浏览器未运行）';
+      // 浏览器未运行时走后端离线快照：附「上次确认」时间让快照新旧可辨。
+      const last = v.confirmedAt ? '，上次确认 ' + relTime(v.confirmedAt) : '';
+      state.textContent = v.running ? '登录态有效' : '登录态保留（浏览器未运行' + last + '）';
       if (v.avatar) { av.src = v.avatar; av.style.display = 'inline-block'; } else { av.style.display = 'none'; }
       nick.textContent = v.nickname || '';
       lv.textContent = v.level ? 'Lv.' + v.level : '';
@@ -1261,6 +1275,9 @@ async function unbindSite() {
     refreshBind();
   } catch (e) { toast('解绑失败：' + e.message, false); }
 }
+// 展开绑定面板即刷新：登录态是时变的（闲置退出/cookie 过期），展开时
+// 拿一次实时状态，而不是停留在上次打开的旧文案。
+$('bindBox').addEventListener('toggle', () => { if ($('bindBox').open) refreshBind(); });
 
 async function refreshCost() {
   const body = $('costBody');
@@ -1291,7 +1308,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); } refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); refreshBind(); } refreshSessions(); }); }
 });
 </script>
 </body>
