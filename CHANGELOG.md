@@ -9,6 +9,14 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [0.4.15] - 2026-10-30
+
+### 修复
+
+- **日记断更 8 天——Rust 版迁移漏接调度环，补齐 Node 版三路径全链（8d9c2be）**：真机定位 10-23 晚生产由 Node 切 Rust 后再无日记——core 有判定纯函数但 bin 从未接线：无 60s 轮询、无启动补写、无宿主挑选，`diary:*` 唤醒永不发生。对齐 Node scheduleDiaryV2 全链：主循环 60s 一拍（定点/安静提前；跨会话全局 lastActivity、60min 冷却）+ 启动 10min 后一次性补写昨天 + 宿主挑选（48h 最活跃在册会话）+ 唤醒素材块（各会话当天动静摘要 + 近 3 篇日记锚点 + 补写/常规文案区分）+ 写入日期桥锁定（补写=昨天、凌晨 0~4 点归昨天，模型无法指定日期——补写回合不再写歪成今天）。顺带清理 core 不可达的 DiaryTick 死分支与 written_today 等字段；write_diary 端点改走 core build_diary_entry 统一截断/trim/同日拒契约。
+- **三处同款「core 有、触发源无」迁移漏接线——回复检查唤醒/有限潜水闹钟/错误亮群友（5fdeec6）**：日记断更排查的系统性复查（对照 Node 全部定时器 vs Rust 接线）又抓三个：①replyCheck 零触发——AI 发完话就潜水，自己挑起的话题没人 @ 永远接不上；②set_wake_config 的有限潜水闹钟（SleepUntil）只落盘从不排定时器（core 消费分支自迁移起是死代码）——「潜水 N 小时后叫我」永不响；③agent 出错重试耗尽时的错误提示动作只有 println 占位——出错时 AI 静默消失、群友无感知。三处全接线：发送端点统一回执点报 ReplyCheck（问句 ×1.5、15s 内连发 ≥3 条 ×1.3 自适应延迟，unbounded mpsc 转交主循环排程）；set_wake_config 报 WakeConfig 主循环重排/取消闹钟，且比 Node 更稳一步——启动时恢复未过期的持久闹钟（Node 重启即丢）；唤醒接管时取消在排的 ReplyCheck/SleepUntil 防旧闹钟补刀；Executor 补 OneBot 通道真实投递错误提示。已知未动：paused 时消息触发唤醒不挡（Node 统一挡，Rust 仅 proactive 挡）——影响面另议。
+- **工具 schema 两类非法结构致智谱 400 [1210]，GLM-5.3-Flash 自 v0.4.13 起真机全量降级 MiniMax（13c223d）**：`input_schema()` 无条件把公共参数（conversationKey/agentToken）chain 进每个工具，与 browser/tablet 等工具手写的同名参数叠加——33 个工具的 required 数组出现重复元素；另有 `qq_sticker_note.tags` 自造 `type:"json"`（JSON Schema 无此类型；且模型按 json 传字符串时桥端 as_array() 解析不出、tags 静默丢失——本条顺带修复）。智谱是唯一严格校验 tools schema 的上游（required 唯一性 + type 合法性），违规直接 1210；MiniMax/DeepSeek 宽松放行，故 omniroute 高可用组合第一位的 GLM 全量挂、顺位降级 MiniMax（10-25 起累计 2300+ 次降级，单日峰值 1063；DSH 会话创建时快照工具 schema，旧会话全部中招、此后新会话才带毒——这也是故障按会话 100% 聚类的原因）。修复：chain 前过滤已手写的公共参数（一处覆盖 33 工具）+ tags 改 array（桥端本按字符串数组解析，零兼容成本）；新增守护测试 `tool_schemas_are_valid_json_schema`（required 唯一 + type 合法，防再犯）。真机验证：生产 config 56 工具 3/3 过、门禁全开 60 工具过。**升级后需退役重建 DSH 会话**——旧会话快照的毒 schema 不随 MCP 更新自愈。
+
 ## [0.4.14] - 2026-10-30
 
 ### 新增
