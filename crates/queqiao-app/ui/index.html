@@ -431,6 +431,14 @@ if (!T) document.getElementById('page-overview').insertAdjacentHTML('afterbegin'
 async function refreshComponents() {
   let st = { dsh: false, snowluma: false, snowlumaHttp: false, bridge: false };
   try { st = await T.core.invoke('components_status'); } catch (e) { /* 非 Tauri 环境保持默认 */ }
+  // HTTP 探活兜底：进程探测失败/未就绪（开机 WMI 竞态、探测超时）时，
+  // 桥 HTTP 可能已可应答——直接打 /api/health，通即视在线，恢复链
+  // （数据重拉）即刻触发，不等 WMI 恢复。网络不可达才维持 false。
+  // 浏览器直开模式（无 Tauri）此前 bridgeOnline 恒 false、恢复链从不
+  // 触发——这一兜底顺带打通。
+  if (!st.bridge) {
+    try { await fetch(BRIDGE + '/api/health', { signal: AbortSignal.timeout(2500) }); st.bridge = true; } catch (e) { }
+  }
   setCard('dsh', st.dsh, st.dsh ? '运行中' : '未运行（一键启动可代劳）');
   const slOk = st.snowluma && st.snowlumaHttp;
   setCard('sl', slOk, slOk ? '运行中 · OneBot 就绪' : (st.snowluma ? '运行中 · OneBot 未就绪（登录 QQ 并开启 OneBot）' : '未运行（一键启动可代为拉起）'));
@@ -595,11 +603,26 @@ async function load() {
   let raw;
   try { const r = await fetch(BRIDGE + '/api/config'); raw = await r.json(); }
   catch (e) {
-    document.getElementById('status').textContent = '桥未连接——启动桥后自动加载配置';
-    return;
+    // 桥 HTTP 不可达 → Tauri 直读 config.json（同一份文件——设置页的
+    // 数据源本就不必依赖桥进程在线）。浏览器直开模式（无 Tauri）保持
+    // 原占位。「保存」仍走桥 API（热更即时生效 + 单写者）。
+    if (T) {
+      try {
+        raw = await T.core.invoke('config_read_direct');
+        document.getElementById('status').textContent = '桥未运行——直读 config.json（启动桥后可保存）';
+      } catch (e2) {
+        document.getElementById('status').textContent = '桥未连接——启动桥后自动加载配置';
+        return;
+      }
+    } else {
+      document.getElementById('status').textContent = '桥未连接——启动桥后自动加载配置';
+      return;
+    }
   }
   cfg = raw;
-  document.getElementById('ver').textContent = 'queqiao ' + (cfg._version || '');
+  // _version 是桥 API 附加键；直读没有——Tauri 模式版本号已由 app_version
+  // invoke 填过，这里只在有值时覆盖（避免刷成空版本）。
+  if (cfg._version) document.getElementById('ver').textContent = 'queqiao ' + cfg._version;
   const v = (id, val) => { const el = document.getElementById(id); if (el !== null) el.value = val ?? ''; };
   v('f-ownerQQ', cfg.ownerQQ);
   v('f-slHome', cfg.snowluma && cfg.snowluma.homeDir);
@@ -776,8 +799,10 @@ async function loadCatalog() {
     if ([...p.options].some(o => o.value === curP)) p.value = curP;
     fillModels();
   } catch (e) {
-    p.innerHTML = '<option value="">（桥未连接）</option>';
-    m.innerHTML = '<option value="">（桥未连接）</option>';
+    // 提供方/模型目录来自桥对 DSH 的探测——无法像 config/roles 那样
+    // 直读本地文件兜底，占位文案说清「启动桥后可列」。
+    p.innerHTML = '<option value="">（桥未运行——启动后列出提供方）</option>';
+    m.innerHTML = '<option value="">（桥未运行——启动后列出模型）</option>';
   }
 }
 function fillModels() {
@@ -806,7 +831,19 @@ async function loadRoles() {
     const cur = (v.current && v.current.role) || '';
     const sel = document.getElementById('f-role');
     sel.innerHTML = (v.roles || []).map(n => `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`).join('') || '<option value="">（roles/ 下没有 .md 卡片）</option>';
-  } catch (e) { document.getElementById('f-role').innerHTML = '<option value="">（桥未连接）</option>'; }
+  } catch (e) {
+    // 桥离线 → Tauri 直读（返回形状与 API 一致，UI 无感）；无 Tauri 保持占位。
+    if (T) {
+      try {
+        const v = await T.core.invoke('roles_read_direct');
+        const cur = (v.current && v.current.role) || '';
+        const sel = document.getElementById('f-role');
+        sel.innerHTML = (v.roles || []).map(n => `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`).join('') || '<option value="">（roles/ 下没有 .md 卡片）</option>';
+        return;
+      } catch (e2) { }
+    }
+    document.getElementById('f-role').innerHTML = '<option value="">（桥未连接）</option>';
+  }
 }
 async function switchRole() {
   const role = document.getElementById('f-role').value;

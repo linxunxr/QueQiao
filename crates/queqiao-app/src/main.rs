@@ -284,6 +284,41 @@ fn fallback_http_urls(snowluma_dir: &str) -> Vec<String> {
 
 /// 一条 PowerShell 查三态：DSH 进程 / SnowLuma 进程 / queqiao.exe 进程。
 /// 输出 "dsh|snowluma|bridge"（True/False）。
+/// PowerShell 探测调用（带超时 + kill）：开机初期 WMI 可能长时间不响应，
+/// 无界的 `output()` 会把 spawn_blocking 卡死、UI tick 轮询链挂断——
+/// 界面停在启动时的占位再也不刷新（2026-10-31 真机踩过）。超时 kill
+/// 子进程（不留积压），返回 None 按全 unknown 处理。
+fn run_powershell_with_timeout(script: &str, secs: u64) -> Option<String> {
+    use std::process::Stdio;
+    let mut child = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => return None,
+        }
+    }
+    // 脚本不读 stdin；stdout 已 piped，wait_with_output 收满。
+    let out = child.wait_with_output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
     let esc = snowluma_dir.replace('\'', "''");
     let script = format!(
@@ -293,13 +328,9 @@ fn probe_components(snowluma_dir: &str) -> (bool, bool, bool) {
          $b = [bool]($procs | Where-Object {{ $_.Name -eq 'queqiao.exe' }}); \
          \"$d|$s|$b\""
     );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW——GUI 进程 spawn 控制台程序不闪终端窗
-        .output();
-    let text = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => return (false, false, false),
+    let text = match run_powershell_with_timeout(&script, 5) {
+        Some(t) => t,
+        None => return (false, false, false),
     };
     let mut it = text.split('|').map(|t| t.trim() == "True");
     let dsh = it.next().unwrap_or(false);
@@ -358,7 +389,9 @@ fn find_dsh_exe() -> Option<std::path::PathBuf> {
 }
 
 /// 组件三态查询。async + spawn_blocking：WMI 进程枚举在系统忙时可达秒级，
-/// 同步命令占主线程会让 UI 周期性冻结（实测体感"时不时卡住"）。
+/// 同步命令占主线程会让 UI 周期性冻结（实测体感"时不时卡住"）。WMI
+/// 卡死防护在 probe_components 内部（PowerShell 5s 超时 + kill）——
+/// 开机初期 WMI 不响应不再挂断 UI 轮询链（2026-10-31 真机踩过）。
 #[tauri::command]
 async fn components_status(
     state: tauri::State<'_, BridgeState>,
@@ -390,6 +423,50 @@ async fn components_status(
     // 桥：本壳 child 或系统进程任一在跑即运行（手动直跑 queqiao.exe 也算）。
     st["bridge"] = serde_json::json!(child_running || st["bridgeProc"].as_bool().unwrap_or(false));
     Ok(st)
+}
+
+/// 桥离线时设置页直读 config.json（数据源与桥 API 同一份文件；桥在线时
+/// UI 走 API——本命令只在桥 fetch 失败后兜底，避免双路径常态并行）。
+/// 「写」仍走桥 API：保存后 mtime 热更即时生效，且保持单写者。
+#[tauri::command]
+fn config_read_direct(state: tauri::State<'_, BridgeState>) -> Result<serde_json::Value, String> {
+    read_config_json(&state.home)
+}
+
+/// config.json 直读（纯函数，command 的壳下测试用）。
+fn read_config_json(home: &std::path::Path) -> Result<serde_json::Value, String> {
+    let text =
+        std::fs::read_to_string(home.join("config.json")).map_err(|e| format!("读 config.json 失败：{e}"))?;
+    serde_json::from_str(text.trim_start_matches('\u{FEFF}'))
+        .map_err(|e| format!("config.json 非法 JSON：{e}"))
+}
+
+/// 桥离线时人格下拉直读：roles/*.md 文件名 + current-role.json——返回
+/// 形状与 GET /api/roles 完全一致（UI 降级路径无感）。
+#[tauri::command]
+fn roles_read_direct(state: tauri::State<'_, BridgeState>) -> Result<serde_json::Value, String> {
+    read_roles_snapshot(&state.home)
+}
+
+/// 人格卡直读（纯函数；净化白名单与桥端 roles_list 同源）。
+fn read_roles_snapshot(home: &std::path::Path) -> Result<serde_json::Value, String> {
+    let mut cards: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(home.join("roles")) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(stem) = name.strip_suffix(".md")
+                && queqiao::role_card_store::sanitize_output_name(stem)
+            {
+                cards.push(stem.to_owned());
+            }
+        }
+    }
+    cards.sort();
+    let current: serde_json::Value = std::fs::read_to_string(home.join("state").join("current-role.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or(serde_json::Value::Null);
+    Ok(serde_json::json!({ "roles": cards, "current": current }))
 }
 
 #[tauri::command]
@@ -623,6 +700,8 @@ fn main() {
             bridge_stop,
             app_version,
             components_status,
+            config_read_direct,
+            roles_read_direct,
             start_dsh,
             open_snowluma_dir,
             migrate_from_node,
@@ -817,5 +896,54 @@ mod probe_fp_tests {
             src.contains("$_.Name -ne 'powershell.exe' -and $_.CommandLine -like"),
             "snowluma 进程匹配必须排除 powershell（防探测自匹配假阳）"
         );
+    }
+}
+
+#[cfg(test)]
+mod direct_read_tests {
+    use super::*;
+
+    fn tmp_home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("qq-app-direct-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("roles")).unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        dir
+    }
+
+    /// 桥离线直读：config.json（含 BOM 容错）与人格卡快照（净化白名单
+    /// 同桥端）形状与 API 一致——设置页降级路径的数据契约。
+    #[test]
+    fn direct_reads_match_api_shape() {
+        let home = tmp_home("shape");
+        std::fs::write(home.join("config.json"), "\u{FEFF}{\"ownerQQ\": 10001}").unwrap();
+        std::fs::write(home.join("roles").join("小鲸鱼.md"), "# 卡").unwrap();
+        std::fs::write(home.join("roles").join("notes.txt"), "非卡").unwrap(); // 非 .md 忽略
+        std::fs::write(
+            home.join("state").join("current-role.json"),
+            r#"{"role": "小鲸鱼", "perConv": {}}"#,
+        )
+        .unwrap();
+
+        let cfg = read_config_json(&home).unwrap();
+        assert_eq!(cfg["ownerQQ"], serde_json::json!(10001), "BOM 剥离后可解析");
+
+        let v = read_roles_snapshot(&home).unwrap();
+        assert_eq!(v["roles"], serde_json::json!(["小鲸鱼"]));
+        assert_eq!(v["current"]["role"], serde_json::json!("小鲸鱼"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 文件缺失/损坏：明确报错（UI 占位兜底），不 panic。
+    #[test]
+    fn direct_reads_fail_cleanly() {
+        let home = tmp_home("fail");
+        assert!(read_config_json(&home).is_err(), "config 缺失报错");
+        // current-role 缺失不算错：current=null（与桥端一致）。
+        std::fs::write(home.join("config.json"), "{}").unwrap();
+        let v = read_roles_snapshot(&home).unwrap();
+        assert_eq!(v["roles"], serde_json::json!([]));
+        assert!(v["current"].is_null());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
