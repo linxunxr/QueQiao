@@ -276,6 +276,10 @@ pub fn build_router(
         .route("/api/session/reset", post(session_reset))
         .route("/api/roles", get(roles_list))
         .route("/api/role", post(role_switch))
+        .route(
+            "/api/role/card",
+            get(role_card_get).put(role_card_put).delete(role_card_del),
+        )
         .route("/api/socialV2/sticker-sync", post(sticker_sync))
         .route("/api/tokens/series", get(tokens_series))
         .route("/api/tokens/turns", get(tokens_turns))
@@ -3270,6 +3274,104 @@ async fn role_switch(
         );
     }
     ok_json(json!({ "switched": true, "role": role }))
+}
+
+// ── 人格卡编辑（console 面）────────────────────────────────────────────────
+// 卡 = roles/<名>.md 纯文本；注入无缓存（role_card_store 每条消息重读
+// 文件），保存即生效，无需重启。
+
+/// 角色名净化（拼 roles/<名>.md 路径前的白名单；None = 非法名）。
+/// 用严格校验而非 sanitize 的过滤清洗：编辑是用户起名场景，「a/b」
+/// 被静默改名为「ab」会造成落盘名与输入不一致。
+fn role_name_ok(name: &str) -> Option<String> {
+    let n = name.trim();
+    queqiao_core::role_card::role_name_is_valid(n).then(|| n.to_owned())
+}
+
+/// GET /api/role/card?name=…：读卡内容。
+async fn role_card_get(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let Some(name) = role_name_ok(q.get("name").map(String::as_str).unwrap_or_default()) else {
+        return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
+    };
+    let path = crate::paths::queqiao_home().join("roles").join(format!("{name}.md"));
+    match std::fs::read_to_string(&path) {
+        Ok(content) => ok_json(json!({ "name": name, "content": content })),
+        Err(_) => denied(StatusCode::NOT_FOUND, &format!("roles/{name}.md 不存在")),
+    }
+}
+
+/// PUT /api/role/card {name, content}：新建或覆盖（原子写）。重名覆盖是
+/// 编辑语义；新建防误覆盖由前端判断（roles 列表已有）。
+async fn role_card_put(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let Some(name) = role_name_ok(body.get("name").and_then(Value::as_str).unwrap_or_default())
+    else {
+        return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
+    };
+    let content = body.get("content").and_then(Value::as_str).unwrap_or_default();
+    if content.len() > 64 * 1024 {
+        return denied(StatusCode::BAD_REQUEST, "人格卡超 64KB——检查是否贴错内容");
+    }
+    let path = crate::paths::queqiao_home().join("roles").join(format!("{name}.md"));
+    match crate::state::atomic_write_json(&path, content) {
+        Ok(()) => ok_json(json!({ "saved": true, "name": name, "bytes": content.len() })),
+        Err(e) => denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写 roles/{name}.md 失败：{e}"),
+        ),
+    }
+}
+
+/// DELETE /api/role/card?name=…：删除。被 current-role.json 引用（全局或
+/// perConv 任一）时 409 拒绝——删掉在用卡会让该会话人格静默丢失。
+async fn role_card_del(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let Some(name) = role_name_ok(q.get("name").map(String::as_str).unwrap_or_default()) else {
+        return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
+    };
+    let home = crate::paths::queqiao_home();
+    let path = home.join("roles").join(format!("{name}.md"));
+    if !path.exists() {
+        return denied(StatusCode::NOT_FOUND, &format!("roles/{name}.md 不存在"));
+    }
+    if let Ok(raw) = std::fs::read_to_string(home.join("state").join("current-role.json"))
+        && let Ok(cur) = serde_json::from_str::<Value>(raw.trim_start_matches('\u{feff}'))
+    {
+        let used_global = cur.get("role").and_then(Value::as_str) == Some(name.as_str());
+        let used_conv = cur
+            .get("perConv")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.values().any(|v| v.as_str() == Some(name.as_str())));
+        if used_global || used_conv {
+            return denied(
+                StatusCode::CONFLICT,
+                &format!("{name} 正在使用中（全局或 perConv 引用）——先切换人格再删除"),
+            );
+        }
+    }
+    match std::fs::remove_file(&path) {
+        Ok(()) => ok_json(json!({ "deleted": true, "name": name })),
+        Err(e) => denied(StatusCode::INTERNAL_SERVER_ERROR, &format!("删除失败：{e}")),
+    }
 }
 
 /// DSH 模型目录（控制台换模型下拉用；session.modelCatalog 回落 session.models）。

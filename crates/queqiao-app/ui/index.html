@@ -281,7 +281,16 @@
         <select id="f-role"><option value="">（加载中…）</option></select>
         <div class="hint">切换后下一条消息注入即刻生效（无需重启）</div></div>
       <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="switchRole()">切换人格</button></div>
+      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="editRole()">编辑</button></div>
+      <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="newRole()">新建</button></div>
     </div>
+  </section>
+
+  <section id="roleEditBox" style="display:none">
+    <h2>编辑人格卡 <span class="hint" id="roleEditName"></span></h2>
+    <div class="field" id="roleNameField" style="display:none"><label>人格名（中文/字母/数字/横线）</label><input type="text" id="re-name"></div>
+    <div class="field"><label>人格卡内容（Markdown；保存后下一条消息即刻生效，无需重启）</label><textarea id="re-content" spellcheck="false"></textarea></div>
+    <div style="display:flex;gap:8px"><button onclick="saveRoleCard()">保存</button><button class="ghost" id="re-del" onclick="delRoleCard()">删除</button><button class="ghost" onclick="hideRoleEdit()">取消</button></div>
   </section>
 
   <section>
@@ -808,6 +817,74 @@ async function switchRole() {
     if (res.ok) { toast('已切换为 ' + role + '（下一条消息生效）', true); loadRoles(); }
     else { toast(res.error || '切换失败', false); }
   } catch (e) { toast('切换失败：' + e.message, false); }
+}
+
+// ── 人格卡编辑（/api/role/card）：卡 = roles/<名>.md，注入无缓存保存即生效 ──
+let roleEditExisting = false; // 编辑已有卡（名称固定）vs 新建
+async function editRole() {
+  const role = $('f-role').value;
+  if (!role) { toast('先选择一个人格', false); return; }
+  try {
+    const r = await fetch(BRIDGE + '/api/role/card?name=' + encodeURIComponent(role));
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    roleEditExisting = true;
+    $('roleEditName').textContent = '（' + role + '）';
+    $('roleNameField').style.display = 'none';
+    $('re-name').value = role;
+    $('re-content').value = res.value.content || '';
+    $('re-del').style.display = '';
+    $('roleEditBox').style.display = 'block';
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  } catch (e) { toast('读取失败：' + e.message, false); }
+}
+function newRole() {
+  roleEditExisting = false;
+  $('roleEditName').textContent = '（新人格）';
+  $('roleNameField').style.display = '';
+  $('re-name').value = '';
+  $('re-content').value = '';
+  $('re-del').style.display = 'none';
+  $('roleEditBox').style.display = 'block';
+  window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+function hideRoleEdit() { $('roleEditBox').style.display = 'none'; }
+async function saveRoleCard() {
+  const name = $('re-name').value.trim();
+  if (!name) { toast('人格名不能为空', false); return; }
+  if (!roleEditExisting) {
+    // 新建撞名 → 后端 PUT 是覆盖语义，前端先确认（编辑已有卡本身就是覆盖，不问）。
+    try {
+      const r = await fetch(BRIDGE + '/api/roles');
+      const res = await r.json();
+      if ((res.value.roles || []).includes(name)
+        && !(await ask('已存在同名人格卡「' + name + '」，覆盖它？', '覆盖', true))) return;
+    } catch (e) { /* 列表拉不到就交给后端覆盖 */ }
+  }
+  try {
+    const r = await fetch(BRIDGE + '/api/role/card', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, content: $('re-content').value })
+    });
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    toast('已保存 ' + name + '（下一条消息生效）', true);
+    hideRoleEdit();
+    loadRoles();
+  } catch (e) { toast('保存失败：' + e.message, false); }
+}
+async function delRoleCard() {
+  const name = $('re-name').value.trim();
+  if (!name || !roleEditExisting) return;
+  if (!(await ask('确认删除人格卡「' + name + '」？文件将从 roles/ 目录移除。', '删除', true))) return;
+  try {
+    const r = await fetch(BRIDGE + '/api/role/card?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    toast('已删除 ' + name, true);
+    hideRoleEdit();
+    loadRoles();
+  } catch (e) { toast('删除失败：' + e.message, false); }
 }
 
 let pendingRel = null;

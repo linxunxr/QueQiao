@@ -14,20 +14,23 @@ use regex::Regex;
 /// 人格名净化：仅保留字母/数字/下划线/中文/横线（Node sanitizeRoleName 同款）。
 /// 返回 None 表示含路径穿越或为空——调用方必须拒绝读取。
 pub fn sanitize_role_name(name: &str) -> Option<String> {
-    let cleaned: String = name
-        .chars()
-        .filter(|c| {
-            c.is_ascii_alphanumeric()
-                || *c == '_'
-                || *c == '-'
-                || ('\u{4e00}'..='\u{9fff}').contains(c)
-        })
-        .collect();
+    let cleaned: String = name.chars().filter(|c| char_allowed(*c)).collect();
     if cleaned.is_empty() || cleaned.contains("..") {
         None
     } else {
         Some(cleaned)
     }
+}
+
+fn char_allowed(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-' || ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+/// 名字是否**原样**合法（区别于 [sanitize_role_name] 的过滤清洗）：
+/// 编辑/新建人格卡的用户起名场景用——非法字符直接判不合法，避免
+/// 「a/b」被静默清洗落盘成「ab」、与用户输入不一致。
+pub fn role_name_is_valid(name: &str) -> bool {
+    !name.is_empty() && !name.contains("..") && name.chars().all(char_allowed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +304,20 @@ mod tests {
         // Node 语义：'.' 不在白名单，净化即消除穿越（'..' 检查在 Node 恒假，防御写法）。
         assert_eq!(sanitize_role_name("../escape"), Some("escape".into()));
         assert_eq!(sanitize_role_name("///"), None, "净化后为空必须拒绝");
+    }
+
+    /// 严格校验与过滤清洗的语义分界：清洗把非法字符剥掉改名放行，
+    /// 校验原样不合法即拒——编辑/新建人格卡（用户起名）用后者，防
+    /// 「a/b」静默落盘成「ab」。
+    #[test]
+    fn role_name_is_valid_rejects_instead_of_renaming() {
+        assert!(role_name_is_valid("小鲸鱼"));
+        assert!(role_name_is_valid("blue-whale_2"));
+        assert!(!role_name_is_valid("../escape"), "含非法字符即拒（清洗会改名放行）");
+        assert!(!role_name_is_valid("a/b"));
+        assert!(!role_name_is_valid("a..b"), "显式穿越模式");
+        assert!(!role_name_is_valid(""));
+        assert!(!role_name_is_valid("！！！"));
     }
 
     #[test]
