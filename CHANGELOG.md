@@ -9,6 +9,17 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [0.4.14] - 2026-10-30
+
+### 新增
+
+- **国内双源更新（Gitee 镜像优先 + GitHub 回落，主包经 gitee-sync 云函数中转）**：更新器查询改 Gitee 镜像优先——源选择语义上"仅 Gitee 明确报有新版才采用"（镜像可能落后或未配置，Gitee 说没新版不可信，一律再问 GitHub），Gitee 命中后顺手查 GitHub 同 tag 资产作备源。下载重试链升级为主源 3 次失败自动换备源再 3 次（下载失败不回退是 tauri-plugin-updater 的硬伤，同类项目真机事故教训——Gitee 附件同步滞后时更新不再失败）。发版链路同步自动化：release.yml 末尾新增云函数中转步（GitHub Release 主包 → 香港 Region 云函数下载 → Gitee 发行版附件 + CHANGELOG 正文透传，secrets 未配置则跳过不阻塞发版）；只镜像主包——Gitee 单附件上限 100MB，browser 352MB 资产不镜像。另附 `resync-gitee.yml` 补传 workflow：发版后同步失败或镜像 tag 滞后时单独重触发（17 秒级，不重跑 8 分钟构建；云函数幂等，附件已存在跳过）。
+- **`resync-gitee` 触发口令不对齐时的显式报错**：与 release.yml 的静默跳过不同，手动补传是显式意图，secrets 缺配置直接 error 让人看见。
+
+### 修复
+
+- **专属浏览器死会话致账号绑定失败且重试无效（4f6cba4）**：绑定拉起有头 Chrome 后手动关窗，Session 缓存残留（闲置看门狗未到点、感知不到进程死），再点「绑定/登录」对已关闭 WS 发 Page.navigate 报 "CDP 发送失败：Trying to work with closed connection"，且 bind 不走 op() 的失败丢弃路径、重试也无效。修复：ensure() 复用会话前补 child.try_wait() 存活检查（死即丢弃重拉，一处覆盖全部非 op 路径）；bind/show/unbind 改走 op_with（参数化自 op()），获得 reconcile 页面接管与失败丢弃的自愈语义。集成测试新增死会话自愈链（json/close 关唯一页 → 等进程退出 → bind 自动重拉）。
+
 ## [0.4.13] - 2026-10-29
 
 ### 新增
