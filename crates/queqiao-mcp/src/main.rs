@@ -283,7 +283,11 @@ const TOOLS: &[ToolDef] = &[
         params: &[
             ("stickerId", "string", true, "表情 id/md5/URL 任一"),
             ("note", "string", false, "你的理解（如：被戳中时用）"),
-            ("tags", "json", false, "标签数组（如 [\"开心\", \"接梗\"]）"),
+            // type 必须是合法 JSON Schema 类型：自造的 "json" 会被智谱
+            // 严格校验拒成 400 [1210]（且模型按 json 传字符串时桥端
+            // as_array() 解析不出，tags 静默丢失）。桥端本就按字符串
+            // 数组解析。
+            ("tags", "array", false, "标签数组（如 [\"开心\", \"接梗\"]）"),
         ],
     },
     ToolDef {
@@ -1218,7 +1222,17 @@ fn load_section(section: &str) -> Value {
 fn input_schema(def: &ToolDef) -> Value {
     let mut props = serde_json::Map::new();
     let mut required = Vec::new();
-    for (name, ty, req, desc) in def.params.iter().chain([&KEY_PARAM, &TOKEN_PARAM]) {
+    // 公共参数已被 params 手写的工具（browser/tablet 等带更精确的会话 key
+    // 描述）不再追加：props 同名覆盖无害，但 required 会叠加出重复元素——
+    // 智谱等上游严格校验 required 唯一性，重复即 400 [1210]（2026-10-25 起
+    // 真机 GLM 全量降级 MiniMax 事故根因之一）。
+    let common = [KEY_PARAM, TOKEN_PARAM];
+    let handwritten = |n: &str| def.params.iter().any(|p| p.0 == n);
+    for (name, ty, req, desc) in def
+        .params
+        .iter()
+        .chain(common.iter().filter(|p| !handwritten(p.0)))
+    {
         props.insert(name.to_string(), json!({ "type": ty, "description": desc }));
         if *req {
             required.push(name.to_string());
@@ -1862,6 +1876,36 @@ mod tests {
             browser: queqiao::browser::new_browser(),
         });
         queqiao::tools_api::build_router(state, "", None)
+    }
+
+    /// 守护：每个工具生成的 input schema 必须是合法 JSON Schema——智谱
+    /// 等上游严格校验 tools：required 数组元素重复、或 type 用了自造值
+    /// （如 "json"）都直接 400 [1210]（2026-10-25 起真机 GLM 全量降级
+    /// MiniMax，v0.4.13 引入的毒 schema 六天才定位，本测试即防复发）。
+    #[test]
+    fn tool_schemas_are_valid_json_schema() {
+        const LEGAL_TYPES: [&str; 7] =
+            ["string", "number", "integer", "boolean", "object", "array", "null"];
+        for def in TOOLS {
+            let schema = input_schema(def);
+            let mut seen = std::collections::HashSet::new();
+            for r in schema["required"].as_array().unwrap() {
+                assert!(
+                    seen.insert(r.as_str().unwrap()),
+                    "{}: required 数组元素重复（{}）——严格校验的上游直接 400 [1210]",
+                    def.name,
+                    r
+                );
+            }
+            for (name, prop) in schema["properties"].as_object().unwrap() {
+                let ty = prop["type"].as_str().unwrap();
+                assert!(
+                    LEGAL_TYPES.contains(&ty),
+                    "{}.{name}: 非法 type「{ty}」——JSON Schema 无此类型",
+                    def.name
+                );
+            }
+        }
     }
 
     /// 守护：TOOLS 里每个 endpoint 按 call_tool 同款规则拼 URL，桥上必须有
