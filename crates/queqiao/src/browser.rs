@@ -370,12 +370,7 @@ impl Browser {
     /// 导航到 URL（等 load 完成再返回）。
     pub async fn navigate(&self, cfg: &BrowserConfig, url: &str) -> Result<String, String> {
         let url = url.trim().to_owned();
-        if !url.starts_with("http://")
-            && !url.starts_with("https://")
-            && !url.starts_with("file://")
-        {
-            return Err(format!("仅允许 http/https/file 网址（收到 {url}）"));
-        }
+        guard_url(&url, cfg.allow_file_urls)?;
         self.op(cfg, async move |ws| {
             ws.call("Page.navigate", json!({ "url": url })).await?;
             wait_ready(ws, 15).await?;
@@ -782,10 +777,11 @@ impl Browser {
 
     /// 登录流程：强制有头窗口（可选直接导航到登录页）。
     pub async fn show(&self, cfg: &BrowserConfig, url: Option<&str>) -> Result<String, String> {
+        if let Some(url) = url {
+            guard_url(url.trim(), cfg.allow_file_urls)?;
+        }
         self.op_with(cfg, true, async move |ws| {
-            if let Some(url) = url
-                && (url.starts_with("http://") || url.starts_with("https://"))
-            {
+            if let Some(url) = url {
                 ws.call("Page.navigate", json!({ "url": url })).await?;
                 let _ = wait_ready(ws, 10).await;
             }
@@ -794,6 +790,90 @@ impl Browser {
         })
         .await
     }
+}
+
+/// 导航/下载目标 URL 防护（防注入硬边界）：默认仅放行公网 http(s)；
+/// 本机/内网/链路本地地址一律拒绝，file:// 需 `allow_file_urls` 显式开。
+/// 防的是聊天侧 prompt 注入诱导 AI 读本地文件（`file:///…/config.json`
+/// 经快照把密钥发进群里）或操作本机/内网服务（127.0.0.1 桥控制台、
+/// 路由器管理页）。边界：按字面量判段（域名解析到内网 IP 的绕过不防
+/// ——需要攻击者控制 DNS，成本远高于直接给地址）；十六进制/十进制
+/// IP 变体（0x7f.0.0.1）不展开解析，浏览器侧还有一道站点隔离。
+pub fn guard_url(url: &str, allow_file: bool) -> Result<(), String> {
+    let u = url.trim();
+    let (scheme, rest) = u
+        .split_once("://")
+        .ok_or_else(|| format!("仅允许 http/https 网址（收到 {u}）"))?;
+    match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => {}
+        "file" if allow_file => {
+            // file://authority/path 的 authority 指向主机（网络位置）时按
+            // 同款规则拒；常见 file:///path（空 authority，本机路径）放行。
+            let host = rest.split(['/', '\\']).next().unwrap_or_default();
+            if !host.is_empty() {
+                check_host(&host.to_ascii_lowercase())?;
+            }
+            return Ok(());
+        }
+        _ => return Err(format!("仅允许 http/https 网址（收到 {u}）")),
+    }
+    // authority = host[:port]，host 到首个 / ? # 截止。
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit_once(':').map_or(authority, |(h, _)| h);
+    check_host(&host.to_ascii_lowercase())
+}
+
+/// 主机名黑名单：localhost 系 / IPv6 本机与私网 / IPv4 私有段与回环。
+fn check_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("网址缺主机名".into());
+    }
+    if host.starts_with('[') {
+        // URL 形态的 IPv6：[::1] / [fe80::…] / [fc… fd…]（本机/链路本地/ULA）。
+        let inner = host.trim_matches(|c| c == '[' || c == ']');
+        let blocked = inner == "::1"
+            || inner.starts_with("fe80")
+            || inner.starts_with("fc")
+            || inner.starts_with("fd");
+        if blocked {
+            return Err("不允许访问本机/内网地址".into());
+        }
+        return Ok(());
+    }
+    if host == "localhost" || host.ends_with(".localhost") {
+        return Err("不允许访问本机地址".into());
+    }
+    if let Some(o) = parse_dotted_v4(host)
+        && is_local_v4(o)
+    {
+        return Err("不允许访问本机/内网地址".into());
+    }
+    Ok(())
+}
+
+/// 四段点分十进制 IPv4（其他形态不识别——非 IP 按域名放行）。
+fn parse_dotted_v4(host: &str) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    for (i, p) in parts.iter().enumerate() {
+        if p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        out[i] = p.parse().ok()?;
+    }
+    Some(out)
+}
+
+fn is_local_v4(ip: [u8; 4]) -> bool {
+    ip[0] == 127                                     // 127/8 回环
+        || ip[0] == 10                               // 10/8
+        || (ip[0] == 172 && (16..=31).contains(&ip[1])) // 172.16/12
+        || (ip[0] == 192 && ip[1] == 168)            // 192.168/16
+        || (ip[0] == 169 && ip[1] == 254)            // 169.254/16 链路本地
+        || ip == [0, 0, 0, 0]
 }
 
 /// 等 document.readyState=complete（轮询；超时不报错——SPA 常驻 loading）。
@@ -846,6 +926,9 @@ const SINGLE_TAB_JS: &str = r#"(() => {
 /// 名单（图/视频，防把错误页或任意格式传上站点）、25MB 上限、error_for_
 /// status。同步函数，调用方负责 spawn_blocking（reqwest blocking 限制）。
 fn download_to_upload_dir(url: &str) -> Result<std::path::PathBuf, String> {
+    // 上传下载只认公网 http(s)：file:// 没有正常上传场景，本机/内网
+    // 同导航规则封禁（防注入把本地文件搬进上传缓存再外发）。
+    guard_url(url, false)?;
     let dir = crate::paths::queqiao_home()
         .join("state")
         .join("browser-uploads");
@@ -1290,6 +1373,48 @@ async fn http_req_local(port: u16, method: &str, path: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// URL 硬边界（防注入）：公网 http(s) 放行；file:// 需开关且内网
+    /// 主机仍拒；本机/内网/链路本地一律拒。这是「群友诱导 AI 读
+    /// config.json 外泄」攻击链的桥层断点，行为用例钉死。
+    #[test]
+    fn guard_url_blocks_local_and_private() {
+        // 公网（含端口/路径/IPv4 公网字面量）放行。
+        for ok in [
+            "https://www.xiaoheihe.cn/",
+            "http://example.com:8080/a?b=1#f",
+            "https://8.8.8.8/dns",
+            "http://172.32.1.1/", // 172.16-31 才是私网，32 段是公网
+        ] {
+            assert!(guard_url(ok, false).is_ok(), "应放行：{ok}");
+        }
+        // 本机/内网/链路本地：无论 file 开关一律拒。
+        for blocked in [
+            "http://127.0.0.1:3100/api/config",
+            "https://localhost/",
+            "http://sub.localhost/",
+            "http://[::1]:8080/",
+            "http://[fe80::1]/",
+            "http://[fc00::1]/",
+            "http://10.1.2.3/",
+            "http://172.16.0.1/",
+            "http://172.31.255.255/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/", // 云元数据端点
+            "http://0.0.0.0/",
+        ] {
+            assert!(guard_url(blocked, false).is_err(), "应拒绝：{blocked}");
+            assert!(guard_url(blocked, true).is_err(), "开 file 也不放内网：{blocked}");
+        }
+        // file://：默认拒；开关开后本机路径放行、内网主机仍拒。
+        assert!(guard_url("file:///D:/work/config.json", false).is_err());
+        assert!(guard_url("file:///D:/work/config.json", true).is_ok());
+        assert!(guard_url("file://192.168.1.1/share/doc", true).is_err());
+        // 非 http(s) scheme 与畸形 URL 拒。
+        for bad in ["javascript:alert(1)", "ftp://x/", "not-a-url", "http://"] {
+            assert!(guard_url(bad, false).is_err(), "应拒绝：{bad}");
+        }
+    }
 
     #[test]
     fn snapshot_script_shape() {

@@ -404,9 +404,10 @@ pub fn input_text(
 
 pub fn open_url(cfg: &TabletConfig, url: &str) -> Result<String, String> {
     let url = url.trim();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(format!("仅允许 http/https 网址（收到 {url}）"));
-    }
+    // 同浏览器导航硬边界（browser::guard_url）：平板 WebView 的 file://
+    // 无正常用途（本机路径读取面），本机/内网一律拒——file 开关不给
+    // 平板留（浏览器侧的 allowFileUrls 不适用于此）。
+    crate::browser::guard_url(url, false)?;
     let quoted = shell_quote(url);
     with_device(cfg, |dev| {
         let out = dev.shell(&["aa", "start", "-U", &quoted], 20_000)?;

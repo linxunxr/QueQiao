@@ -116,6 +116,36 @@ impl ToolApiState {
         }
         Ok(key)
     }
+
+    /// 管理级工具门禁（authorize 之上再加一层）：仅管理员本人的私聊会话
+    /// （private:<ownerQQ>）可用——会话键本身就是调用方身份，非管理员
+    /// 私聊与群聊一律拒；未配置 ownerQQ 时 fail-closed（整体不可用）。
+    /// 防聊天侧 prompt 注入诱导 AI 执行破坏性操作（清空/删除记忆等）：
+    /// 群友说「把记忆全删了」骗不过这一层——硬边界在桥，不在模型。
+    fn authorize_owner(
+        &self,
+        headers: &HeaderMap,
+        query_key: &str,
+        tool_flag: bool,
+    ) -> Result<String, (StatusCode, Json<Value>)> {
+        let key = self.authorize(headers, query_key, tool_flag)?;
+        let Some(owner) = self.cfg.owner_qq.as_ref().map(|o| o.0) else {
+            return Err(denied(
+                StatusCode::FORBIDDEN,
+                "未配置 ownerQQ——管理级工具不可用（fail-closed）",
+            ));
+        };
+        if key != format!("private:{owner}") {
+            crate::logging::log(&format!(
+                "[security] 管理级工具被非管理员会话调用并拒绝：{key}"
+            ));
+            return Err(denied(
+                StatusCode::FORBIDDEN,
+                "管理级操作仅限管理员私聊会话",
+            ));
+        }
+        Ok(key)
+    }
 }
 
 type ApiResult = (StatusCode, Json<Value>);
@@ -3174,14 +3204,8 @@ async fn roles_list(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
     headers: HeaderMap,
 ) -> ApiResult {
-    if !state.cfg.console_token.is_empty() {
-        let auth = headers
-            .get("x-console-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        if auth != state.cfg.console_token {
-            return denied(StatusCode::UNAUTHORIZED, "console token required");
-        }
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
     }
     let home = crate::paths::queqiao_home();
     let mut cards: Vec<String> = Vec::new();
@@ -3210,14 +3234,8 @@ async fn role_switch(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    if !state.cfg.console_token.is_empty() {
-        let auth = headers
-            .get("x-console-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        if auth != state.cfg.console_token {
-            return denied(StatusCode::UNAUTHORIZED, "console token required");
-        }
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
     }
     let role = body
         .get("role")
@@ -4401,7 +4419,8 @@ async fn memory_remove(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.memory) {
+    // 删除记忆是破坏性管理操作：owner-only（防注入，同 memory_clear）。
+    let key = match state.authorize_owner(&headers, &key, state.cfg.social_v2.tools.memory) {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -4435,7 +4454,8 @@ async fn memory_clear(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.memory) {
+    // 清空是破坏性管理操作（AI 全部长期记忆）：owner-only（防注入）。
+    let key = match state.authorize_owner(&headers, &key, state.cfg.social_v2.tools.memory) {
         Ok(k) => k,
         Err(e) => return e,
     };

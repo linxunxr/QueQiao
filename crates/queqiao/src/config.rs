@@ -208,6 +208,10 @@ pub struct BrowserConfig {
     pub executable_path: String,
     pub idle_close_min: u64,
     pub max_screenshot_bytes: u64,
+    /// 允许 file:// 导航（默认 false——防聊天侧注入诱导 AI 读本地文件
+    /// 外泄；确需 AI 查本地文档时显式开启）。本机/内网地址无论开关
+    /// 都拒绝（browser::guard_url 硬边界）。
+    pub allow_file_urls: bool,
 }
 
 impl Default for BrowserConfig {
@@ -219,6 +223,7 @@ impl Default for BrowserConfig {
             executable_path: String::new(),
             idle_close_min: 30,
             max_screenshot_bytes: 4_000_000,
+            allow_file_urls: false,
         }
     }
 }

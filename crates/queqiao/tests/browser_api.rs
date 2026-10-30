@@ -143,7 +143,13 @@ fn make_authorized_router(home: &std::path::Path) -> (axum::Router, String) {
     let mut cfg = Config::default();
     cfg.browser.enabled = true;
     cfg.browser.headless = true;
+    // 测试页用 file:// 导航（本地 HTML fixture）——生产默认 false，
+    // 这里显式开（guard_url 的 file 封禁另有专门测试钉住）。
+    cfg.browser.allow_file_urls = true;
     cfg.owner_qq = Some(queqiao::config::OwnerQQ(1));
+    // 会话白名单：authorize 链（qq_* 工具）要查；browser_gate 链不查。
+    // private:1=管理员（owner=1）、private:2=非管理员（owner-only 测试用）。
+    cfg.allow.private = vec![1, 2];
     let social = SocialStore::load(&home.join("state").join("social-v2.json"), Some(1)).unwrap();
     let (update_tx, _rx) = tokio::sync::mpsc::channel(1);
     let mk_dsh = || {
@@ -245,6 +251,75 @@ fn center_of(text: &str, needle: &str) -> (i64, i64) {
         .collect();
     assert_eq!(nums.len(), 4, "坐标行：{line}");
     ((nums[0] + nums[2]) / 2, (nums[1] + nums[3]) / 2)
+}
+
+/// 管理级工具 owner-only 门禁（防注入）：memory-clear/remove 仅
+/// private:<ownerQQ> 会话可用——群聊 key 一律拒（即使令牌是管理员的，
+/// 操作目标不是管理员私聊也不行），非管理员私聊拒。无需 Chrome。
+#[test]
+fn memory_owner_only_gate() {
+    let _home_guard = home_guard();
+    let home = temp_home("mem-gate");
+    unsafe { std::env::set_var("QUEQIAO_HOME", &home) };
+
+    // 额外造 private:2 的令牌（非管理员私聊）：owner=1（make_authorized_router）。
+    {
+        let mut st = SocialStore::load(&home.join("state").join("social-v2.json"), None).unwrap();
+        let _ = st.ensure_agent_token("private:2");
+        st.save();
+    }
+    let (r, owner_token) = make_authorized_router(&home);
+    let other_token = {
+        let text = std::fs::read_to_string(home.join("state").join("social-v2.json")).unwrap();
+        serde_json::from_str::<Value>(&text)
+            .unwrap()
+            .pointer("/conversations/private:2/agentToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    assert!(!other_token.is_empty(), "private:2 令牌已落盘");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let clear = |key: &str, token: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/socialV2/memory-clear")
+                .header("content-type", "application/json")
+                .header("x-agent-token", token)
+                .body(Body::from(json!({ "conversationKey": key }).to_string()))
+                .unwrap()
+        };
+        // 群聊 key：即使带管理员令牌也拒（管理操作不出管理员私聊）。
+        let (code, v) = fire(&r, clear("group:100", &owner_token)).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "群聊拒管理操作：{v}");
+        // 非管理员私聊：自己的令牌也拒。
+        let (code, v) = fire(&r, clear("private:2", &other_token)).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "非管理员私聊拒：{v}");
+        // 管理员私聊 + 管理员令牌：放行（200，清自己的记忆）。
+        let (code, v) = fire(&r, clear("private:1", &owner_token)).await;
+        assert_eq!(code, StatusCode::OK, "管理员私聊放行：{v}");
+
+        // memory-remove 同款门禁（一次即可，不再放行成功路径）。
+        let rm = Request::builder()
+            .method("POST")
+            .uri("/api/socialV2/memory-remove")
+            .header("content-type", "application/json")
+            .header("x-agent-token", &other_token)
+            .body(Body::from(
+                json!({ "conversationKey": "private:2", "category": "all", "content": "x" })
+                    .to_string(),
+            ))
+            .unwrap();
+        let (code, _) = fire(&r, rm).await;
+        assert_eq!(code, StatusCode::FORBIDDEN);
+    });
+
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
