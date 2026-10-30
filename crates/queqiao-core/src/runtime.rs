@@ -218,6 +218,17 @@ fn fire_wake(
             timer: TimerKind::PendingWakeFallback,
             delay_ms: rules.pending_fallback_ms,
         },
+        // 真实唤醒接管：取消在排的回复检查与有限潜水定时器（Node
+        // sendWakePromptV2 投递路径同款——被消息唤醒后 AI 会重新设置唤醒
+        // 配置，旧闹钟与 30s 后的回复检查都成了多余的「补一刀」）。
+        BridgeAction::CancelTimer {
+            key: rt.key.clone(),
+            timer: TimerKind::ReplyCheck,
+        },
+        BridgeAction::CancelTimer {
+            key: rt.key.clone(),
+            timer: TimerKind::SleepUntil,
+        },
         BridgeAction::Log {
             message: format!("[{}] 唤醒（{}）", rt.key, reason),
         },
@@ -396,7 +407,23 @@ fn on_timer(
             Vec::new()
         }
         TimerKind::PendingWakeFallback => on_fallback(rt, now_ms, rules),
-        TimerKind::SleepUntil => fire_wake(rt, "timeout", now_ms, rules),
+        // 有限潜水到期（AI 自设的闹钟）：busy 则暂存由兜底补发（对齐 Node
+        // sendWakePromptV2 的繁忙分支——旧实现 busy 时直接 fire 会双发 prompt）。
+        TimerKind::SleepUntil => {
+            if rt.is_busy() {
+                defer_wake_with_fallback(rt, "timeout", rules)
+            } else {
+                fire_wake(rt, "timeout", now_ms, rules)
+            }
+        }
+        // 回复检查（AI 发消息成功后回看有没有人接话）：同款繁忙暂存语义。
+        TimerKind::ReplyCheck => {
+            if rt.is_busy() {
+                defer_wake_with_fallback(rt, "replyCheck", rules)
+            } else {
+                fire_wake(rt, "replyCheck", now_ms, rules)
+            }
+        }
         // 413 退役重投：绕频率判定（失败回合已退配额），直接重发唤醒。
         TimerKind::HistoryTrim => force_wake(rt, "history-trim", now_ms, rules),
         TimerKind::AgentRetry => force_wake(rt, "agent-retry", now_ms, rules),
@@ -942,6 +969,80 @@ mod tests {
         let actions = decide1(&mut rt, &BridgeEvent::MessageArrived(Box::new(m)), 1000);
         assert!(actions.is_empty());
         assert!(rt.pending_timer.is_none());
+    }
+
+    /// 回复检查到点：不繁忙时唤醒（reason=replyCheck）。
+    #[test]
+    fn reply_check_fires_when_idle() {
+        let mut rt = runtime();
+        let actions = decide1(
+            &mut rt,
+            &BridgeEvent::TimerFired {
+                key: "group:4242".to_owned(),
+                timer: TimerKind::ReplyCheck,
+            },
+            1000,
+        );
+        assert!(actions.iter().any(
+            |a| matches!(a, BridgeAction::SendPrompt { reason, .. } if reason == "replyCheck")
+        ));
+    }
+
+    /// 回复检查/有限潜水到点撞上繁忙：暂存唤醒（兜底定时器补发），不双发 prompt。
+    #[test]
+    fn reply_check_and_sleep_defer_when_busy() {
+        for timer in [TimerKind::ReplyCheck, TimerKind::SleepUntil] {
+            let mut rt = runtime();
+            rt.prompt_in_flight = true;
+            let actions = decide1(
+                &mut rt,
+                &BridgeEvent::TimerFired {
+                    key: "group:4242".to_owned(),
+                    timer,
+                },
+                1000,
+            );
+            assert!(
+                actions
+                    .iter()
+                    .all(|a| matches!(a, BridgeAction::ScheduleTimer { .. })),
+                "繁忙时只排兜底，不直接唤醒：{timer:?}"
+            );
+            assert!(!rt.pending_queue.is_empty(), "唤醒原因已暂存");
+        }
+    }
+
+    /// 真实唤醒接管：fire_wake 取消在排的回复检查与有限潜水定时器（Node
+    /// sendWakePromptV2 投递路径同款）。
+    #[test]
+    fn fire_wake_cancels_reply_check_and_sleep() {
+        let mut rt = runtime();
+        rt.bootstrap_sent = true;
+        let _ = decide1(
+            &mut rt,
+            &BridgeEvent::MessageArrived(Box::new(msg("小鲸鱼在吗"))),
+            1000,
+        );
+        let actions = decide1(
+            &mut rt,
+            &BridgeEvent::TimerFired {
+                key: "group:4242".to_owned(),
+                timer: TimerKind::BatchWindow,
+            },
+            9000,
+        );
+        assert!(actions.iter().any(
+            |a| matches!(a, BridgeAction::SendPrompt { reason, .. } if reason.starts_with("keyword"))
+        ));
+        for kind in [TimerKind::ReplyCheck, TimerKind::SleepUntil] {
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    BridgeAction::CancelTimer { timer, .. } if *timer == kind
+                )),
+                "唤醒接管应取消 {kind:?}"
+            );
+        }
     }
 }
 

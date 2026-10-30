@@ -8,10 +8,55 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
+use crate::social_store::SocialStore;
 use crate::state::ConversationState;
 use queqiao_core::action::{BridgeAction, BridgeEvent, TimerKind};
 use queqiao_core::runtime::{DecideRules, SessionRuntime, decide, proactive_check_delay};
 use queqiao_core::triggers::TriggerRules;
+
+/// 工具端点 → 主循环的调度请求（tools_api 无 Orchestrator 访问权，经
+/// unbounded mpsc 转交主循环排定时器；Node 版这些定时器直接挂在工具
+/// handler 里，Rust 的定时器轮在主循环所以走通道）。
+#[derive(Debug, Clone)]
+pub enum SchedReq {
+    /// AI 发消息成功 → 安排回复检查唤醒（已排不重置——连发时窗口从首条起算）。
+    ReplyCheck { key: String },
+    /// 唤醒配置变更 → 取消回复检查 + 重排/取消有限潜水闹钟（sleep_until 为
+    /// 落盘后的最终值，含 infinite/active 联动清理的结果）。
+    WakeConfig {
+        key: String,
+        sleep_until: Option<u64>,
+    },
+    /// AI 进入主动等待（qq_wait_for_messages）→ 取消回复检查（避免等待结束
+    /// 后 30s 又补一刀唤醒）。
+    WaitStarted { key: String },
+}
+
+/// 回复检查延迟（Node scheduleReplyCheckV2：基数 autoReplyCheckMs、下限 1s；
+/// 15s 内自发消息含问句 ×1.5、连发 ≥3 条 ×1.3——抛出问题等回复的耐心更长）。
+pub fn reply_check_delay(social: &SocialStore, key: &str, base_ms: u64, now_ms: u64) -> u64 {
+    let mut delay = base_ms.max(1000);
+    let Some(st) = social.conversation(key) else {
+        return delay;
+    };
+    let recent_self: Vec<&str> = st
+        .recent_messages
+        .iter()
+        .filter(|m| m.is_self && now_ms.saturating_sub(m.time) < 15_000)
+        .map(|m| m.text.as_str())
+        .collect();
+    const QUESTION_CHARS: &str = "?？吗呢怎么有没有能不能";
+    if recent_self
+        .iter()
+        .any(|t| t.chars().any(|c| QUESTION_CHARS.contains(c)))
+    {
+        delay = delay * 3 / 2;
+    }
+    if recent_self.len() >= 3 {
+        delay = delay * 13 / 10;
+    }
+    delay
+}
 
 /// 伪定时器轮：按到期时刻排序的最小堆 + 代际去废。
 #[derive(Debug, Default)]
@@ -49,6 +94,11 @@ impl TimerWheel {
     /// 取消（作废对应代的定时器；堆里的陈旧项在 `due` 时惰性清理）。
     pub fn cancel(&mut self, key: &str, kind: TimerKind) {
         self.gens.remove(&(key.to_owned(), kind));
+    }
+
+    /// 同 (key, kind) 是否有在排定时器（「已排不重置」判定用）。
+    pub fn contains(&self, key: &str, kind: TimerKind) -> bool {
+        self.gens.contains_key(&(key.to_owned(), kind))
     }
 
     /// 取出所有到期且未作废的定时器事件（陈旧项顺带丢弃）。
@@ -136,6 +186,36 @@ impl Orchestrator {
         let delay = proactive_check_delay(&self.rules.proactive, rng);
         self.timers
             .schedule(key, TimerKind::ProactiveCheck, delay, now_ms);
+    }
+
+    /// 排回复检查（AI 发消息成功后回看有没有人接话——Node
+    /// scheduleReplyCheckV2「已排在排则不重置」：连发多条时窗口从首条起算，
+    /// 延迟系数由 [`reply_check_delay`] 按连发/问句自适应）。
+    pub fn schedule_reply_check(&mut self, key: &str, delay_ms: u64, now_ms: u64) {
+        if self.timers.contains(key, TimerKind::ReplyCheck) {
+            return;
+        }
+        self.timers
+            .schedule(key, TimerKind::ReplyCheck, delay_ms, now_ms);
+    }
+
+    /// 有限潜水定时器：`Some(until)` 覆盖排（到点 timeout 唤醒），`None` 取消
+    ///（AI 切无限潜水/主动模式时清闹钟——Node set-wake-config 的 sleepUntil
+    /// 联动清理）。
+    pub fn set_sleep_timer(&mut self, key: &str, sleep_until: Option<u64>, now_ms: u64) {
+        match sleep_until {
+            Some(until) => {
+                let delay = until.saturating_sub(now_ms);
+                self.timers
+                    .schedule(key, TimerKind::SleepUntil, delay, now_ms);
+            }
+            None => self.timers.cancel(key, TimerKind::SleepUntil),
+        }
+    }
+
+    /// 取消单会话单类定时器（bin 的调度请求通道用）。
+    pub fn cancel_timer(&mut self, key: &str, kind: TimerKind) {
+        self.timers.cancel(key, kind);
     }
 
     /// 喂一条事件，返回决策动作序列（并驱动内部定时器轮询）。
@@ -419,5 +499,60 @@ mod tests {
         assert_eq!(rt.wake_times, [111, 222]);
         assert!(rt.bootstrap_sent);
         assert_eq!(rt.last_action_at, 333);
+    }
+
+    /// 回复检查：已排不重置（连发不刷新窗口）；set_sleep_timer 排/取消。
+    #[test]
+    fn reply_check_and_sleep_timer_scheduling() {
+        let mut o = Orchestrator::new(DecideRules::default());
+        o.ensure_session("group:4242", TriggerRules::default());
+        o.schedule_reply_check("group:4242", 30_000, 0);
+        assert_eq!(o.timers().active(), 1);
+        // 已排在排 → 不重置（延迟仍从首条消息起算）。
+        o.schedule_reply_check("group:4242", 60_000, 10_000);
+        assert_eq!(o.timers().active(), 1);
+        // 有限潜水：覆盖排（到期即 delay=0 也可）与取消。
+        o.set_sleep_timer("group:4242", Some(120_000), 0);
+        o.set_sleep_timer("group:4242", Some(180_000), 0); // 覆盖
+        assert_eq!(o.timers().active(), 2);
+        o.set_sleep_timer("group:4242", None, 0);
+        assert_eq!(o.timers().active(), 1, "sleep 取消后只剩 replyCheck");
+        // 到点：SleepUntil 已取消不触发，replyCheck 触发 replyCheck 唤醒。
+        let mut rng = || 0.99;
+        let actions = o.advance(200_000, &mut rng);
+        assert!(actions.iter().any(
+            |a| matches!(a, BridgeAction::SendPrompt { reason, .. } if reason == "replyCheck")
+        ));
+    }
+
+    /// 回复检查延迟：问句 ×1.5、15s 内连发 ≥3 条 ×1.3、无会话用基数。
+    #[test]
+    fn reply_check_delay_adapts() {
+        let dir = std::env::temp_dir().join(format!("queqiao-rc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = SocialStore::load(&dir.join("social-v2.json"), None).unwrap();
+        let now = 1_000_000u64;
+        let mk = |text: &str, is_self: bool| queqiao_core::action::IncomingMessage {
+            key: "group:4242".into(),
+            seq: 0,
+            message_id: "m".into(),
+            sender: "我".into(),
+            user_id: "1".into(),
+            text: text.into(),
+            is_self,
+            at_me: false,
+            reply_to_me: false,
+            time_ms: 0,
+        };
+        s.append_message("group:4242", &mk("在吗", true), now - 1000);
+        assert_eq!(reply_check_delay(&s, "group:4242", 30_000, now), 45_000);
+        s.append_message("group:4242", &mk("第二句", true), now - 2000);
+        s.append_message("group:4242", &mk("第三句", true), now - 3000);
+        // 问句 + 连发 ≥3：30000 ×1.5 ×1.3 = 58500。
+        assert_eq!(reply_check_delay(&s, "group:4242", 30_000, now), 58_500);
+        // 无会话/无近期自发消息：基数（下限 1s）。
+        assert_eq!(reply_check_delay(&s, "group:none", 30_000, now), 30_000);
+        assert_eq!(reply_check_delay(&s, "group:4242", 0, now + 60_000), 1_000);
     }
 }

@@ -1077,6 +1077,10 @@ async fn run(setup: Setup) {
     // 当前日记回合（写入日期 + 唤醒素材块）：主循环触发时置、write-diary
     // 提交成功后清；Executor 与工具端点共享（Node diaryPendingDate 语义）。
     let diary_pending = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+    // 调度请求通道：发送端点/唤醒配置 → 主循环排定时器（回复检查、有限
+    // 潜水闹钟、主动等待取消——定时器轮在主循环，工具端点经通道转交）。
+    let (sched_tx, mut sched_rx) =
+        tokio::sync::mpsc::unbounded_channel::<queqiao::orchestrator::SchedReq>();
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
@@ -1095,6 +1099,7 @@ async fn run(setup: Setup) {
             slang_research_tx: slang_research_tx.clone(),
             browser: browser_arc.clone(),
             diary_pending: diary_pending.clone(),
+            sched_tx: sched_tx.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
@@ -1174,6 +1179,32 @@ async fn run(setup: Setup) {
         cfg.social_v2.proactive.check_interval_max_ms / 60_000,
         cfg.social_v2.proactive.probability
     ));
+    // 有限潜水闹钟启动恢复：持久 wake_config.sleep_until 未过期的在册会话
+    // 重排 SleepUntil（Node 仅新建会话时重排、重启即丢闹钟——AI 设的「N 小时
+    // 后叫我」随桥重启蒸发；此处补上）。已过期的跳过：几小时前的旧闹钟再响
+    // 只会莫名其妙，群里有动静自然走触发器。
+    {
+        let now = now_ms();
+        let keys = orchestrator.session_keys();
+        let mut restored = 0u32;
+        for key in keys {
+            let until = social_arc
+                .lock()
+                .ok()
+                .and_then(|s| {
+                    s.conversation(&key)
+                        .and_then(|st| st.wake_config.sleep_until)
+                })
+                .filter(|u| *u > now);
+            if let Some(until) = until {
+                orchestrator.set_sleep_timer(&key, Some(until), now);
+                restored += 1;
+            }
+        }
+        if restored > 0 {
+            queqiao::logging::log(&format!("已恢复 {restored} 个有限潜水闹钟"));
+        }
+    }
     let mut pending_update: Option<std::path::PathBuf> = None;
     let mut config_file = ConfigFile::load(&queqiao::paths::config_path()).unwrap_or_else(|_| {
         ConfigFile::load(&queqiao::paths::config_path()).expect("config 重新加载失败")
@@ -1197,6 +1228,7 @@ async fn run(setup: Setup) {
         sticker: cfg.social_v2.sticker.clone(),
         slang: cfg.slang.clone(),
         diary_pending: diary_pending.clone(),
+        onebot: onebot_http.clone(),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -1384,6 +1416,62 @@ async fn run(setup: Setup) {
                     )
                     .await;
                 });
+            }
+            maybe_sched = sched_rx.recv() => {
+                // 工具端点的调度请求：回复检查 / 有限潜水闹钟 / 主动等待取消。
+                // （这些端点无 Orchestrator 访问权，Node 版直接在 handler 里挂
+                // 定时器，Rust 的定时器轮在这里所以经通道转交。）
+                let Some(req) = maybe_sched else { continue };
+                let now = now_ms();
+                match req {
+                    queqiao::orchestrator::SchedReq::ReplyCheck { key } => {
+                        let keys = orchestrator.session_keys();
+                        if !keys.contains(&key) {
+                            // 动态注册会话首报：补注册后定时器才有归属。
+                            orchestrator.ensure_session(
+                                &key,
+                                queqiao_core::triggers::TriggerRules {
+                                    keywords: config_file
+                                        .config()
+                                        .social_v2
+                                        .wake
+                                        .recommended_keywords
+                                        .clone(),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        let base = config_file.config().social_v2.auto_reply_check_ms;
+                        let delay = social_arc
+                            .lock()
+                            .map(|s| {
+                                queqiao::orchestrator::reply_check_delay(&s, &key, base, now)
+                            })
+                            .unwrap_or(base.max(1000));
+                        orchestrator.schedule_reply_check(&key, delay, now);
+                    }
+                    queqiao::orchestrator::SchedReq::WakeConfig { key, sleep_until } => {
+                        // AI 已主动设置新配置：取消回复检查（Node 5114），
+                        // 并按落盘后的最终值重排/取消有限潜水闹钟（5115）。
+                        orchestrator.cancel_timer(&key, queqiao_core::action::TimerKind::ReplyCheck);
+                        orchestrator.set_sleep_timer(&key, sleep_until, now);
+                        match sleep_until {
+                            Some(until) => {
+                                let remain = until.saturating_sub(now) / 1000;
+                                queqiao::logging::log(&format!(
+                                    "已设置有限潜水定时器 {key}，剩余 {remain}s"
+                                ));
+                            }
+                            None => {
+                                queqiao::logging::log(&format!("已取消有限潜水定时器 {key}"));
+                            }
+                        }
+                    }
+                    queqiao::orchestrator::SchedReq::WaitStarted { key } => {
+                        // AI 正在主动等待：取消回复检查避免等待结束后又补一刀。
+                        orchestrator.cancel_timer(&key, queqiao_core::action::TimerKind::ReplyCheck);
+                    }
+                }
             }
             _ = timeout => {
                 let now = now_ms();
@@ -1611,6 +1699,9 @@ struct Executor {
     slang: queqiao::config::SlangConfig,
     /// 日记回合素材（diary:* 唤醒时从锁定态取出拼进 prompt）。
     diary_pending: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    /// 错误亮群友的出站通道（core 在 agent 回合失败且重试耗尽时产出
+    /// SendMessage——此前只有 println 占位，群友对出错无感知）。
+    onebot: OneBotHttpClient,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -1840,11 +1931,45 @@ impl Executor {
                         reconnect.notify_one();
                     }
                 }
-                BridgeAction::SendMessage { key, text, .. } => {
-                    println!(
-                        "[{now}] SendMessage {key}: {}",
-                        text.chars().take(50).collect::<String>()
-                    );
+                BridgeAction::SendMessage {
+                    key,
+                    text,
+                    reply_to,
+                } => {
+                    // 错误亮群友（Node 同款）：agent 出错且重试耗尽时的最后
+                    // 兜底提示，让群友知道 AI 这会儿哑了——静默消失最伤信任。
+                    let mut segments = vec![queqiao_onebot::segment::text(&text)];
+                    if let Some(id) = reply_to {
+                        segments.insert(0, queqiao_onebot::segment::reply(id));
+                    }
+                    let message = queqiao_onebot::segment::message(&segments);
+                    let onebot = self.onebot.clone();
+                    let key_for_task = key.clone();
+                    let text_brief: String = text.chars().take(50).collect();
+                    let send = move || {
+                        if let Some(group) = key_for_task.strip_prefix("group:") {
+                            onebot.send_group_msg(group.parse().unwrap_or(0), &message)
+                        } else if let Some(user) = key_for_task.strip_prefix("private:") {
+                            onebot.send_private_msg(user.parse().unwrap_or(0), &message)
+                        } else {
+                            Err(queqiao_onebot::client::OneBotError::Transport(format!(
+                                "未知会话键：{key_for_task}"
+                            )))
+                        }
+                    };
+                    let result = tokio::task::spawn_blocking(send).await.unwrap_or_else(|e| {
+                        Err(queqiao_onebot::client::OneBotError::Transport(
+                            e.to_string(),
+                        ))
+                    });
+                    match result {
+                        Ok(message_id) => queqiao::logging::log(&format!(
+                            "[{now}] 错误提示已发送 {key}（{message_id}）：{text_brief}"
+                        )),
+                        Err(e) => queqiao::logging::log(&format!(
+                            "[{now}] 错误提示发送失败 {key}：{e}（原文：{text_brief}）"
+                        )),
+                    }
                 }
                 BridgeAction::RefundWakeTime { key, at } => {
                     println!("[{now}] RefundWakeTime {key} @{at}");

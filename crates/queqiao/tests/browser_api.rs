@@ -45,6 +45,7 @@ fn make_router(home: &std::path::Path, browser_enabled: bool) -> axum::Router {
     cfg.browser.enabled = browser_enabled;
     cfg.browser.headless = true; // 测试无头
     let state = Arc::new(ToolApiState {
+        sched_tx: tokio::sync::mpsc::unbounded_channel::<queqiao::orchestrator::SchedReq>().0,
         diary_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
         social: Arc::new(Mutex::new(social)),
         onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),
@@ -159,6 +160,7 @@ fn make_authorized_router(home: &std::path::Path) -> (axum::Router, String) {
         )
     };
     let state = Arc::new(ToolApiState {
+        sched_tx: tokio::sync::mpsc::unbounded_channel::<queqiao::orchestrator::SchedReq>().0,
         diary_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
         social: Arc::new(Mutex::new(social)),
         onebot: queqiao_onebot::client::OneBotHttpClient::new("http://127.0.0.1:1", "", 50),

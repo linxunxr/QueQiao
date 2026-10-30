@@ -38,6 +38,9 @@ pub enum TimerKind {
     PendingWakeFallback,
     /// 有限潜水到期（sleepUntil）。
     SleepUntil,
+    /// 回复检查（AI 发消息成功后 30s 量级回看有没有人接话——Node
+    /// scheduleReplyCheckV2；由 bin 经 Orchestrator 排程）。
+    ReplyCheck,
     /// 主动检查（30~90min 随机间隔）。
     ProactiveCheck,
     /// 历史超限退役后的重投（默认 3s；到点绕频率判定直接重发唤醒——

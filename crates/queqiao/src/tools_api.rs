@@ -42,6 +42,10 @@ pub struct ToolApiState {
     /// 当前日记回合（桥锁定的写入日期 + 唤醒素材块）：日记触发时置、
     /// write-diary 成功提交后清（Node diaryPendingDate 语义，模型无法指定日期）。
     pub diary_pending: Arc<Mutex<Option<(String, String)>>>,
+    /// 调度请求通道（发送端点/唤醒配置 → 主循环排定时器）：回复检查、
+    /// 有限潜水闹钟与主动等待取消（Node 版这些定时器直接挂工具 handler，
+    /// Rust 的定时器轮在主循环所以经通道转交）。
+    pub sched_tx: tokio::sync::mpsc::UnboundedSender<crate::orchestrator::SchedReq>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -425,9 +429,15 @@ async fn send_message(
 }
 
 /// 发送/互动成功后的记账（lastActionAt 推进——noAction 判定的动作信号；
-/// 仅发言类同时推进 lastAiReplyAt）。
+/// 仅发言类同时推进 lastAiReplyAt）。发言类同时安排回复检查唤醒——AI 发完
+/// 话 30s 量级回看有没有人接话（Node 4 个发送工具点统一 scheduleReplyCheckV2）。
 fn mark_reply_action(state: &ToolApiState, key: &str) {
     mark_action(state, key, true);
+    let _ = state
+        .sched_tx
+        .send(crate::orchestrator::SchedReq::ReplyCheck {
+            key: key.to_owned(),
+        });
 }
 fn mark_action(state: &ToolApiState, key: &str, is_reply: bool) {
     let mut store = state.social.lock().unwrap();
@@ -1586,6 +1596,9 @@ async fn wait_messages(
         Err(e) => return e,
     };
     let purpose_reply = q.get("purpose").map(String::as_str) == Some("reply");
+    let _ = state
+        .sched_tx
+        .send(crate::orchestrator::SchedReq::WaitStarted { key: key.clone() });
     let timeout_ms: u64 = q
         .get("timeoutMs")
         .and_then(|t| t.parse().ok())
@@ -2881,7 +2894,39 @@ async fn set_wake_config(
         st.wake_config.confirmed_at = Some(crate::session_manager::SessionManager::now_ms());
         st.wake_config.confirmed_by = Some("set_wake_config".to_owned());
         st.last_action_at = crate::session_manager::SessionManager::now_ms();
+        // 有限潜水闹钟联动（Node set-wake-config 同款）：active 强制无限；无限清
+        // 闹钟；「有限却没给时间」给推荐随机时长，并按 sleepMin/MaxMs 夹逼——
+        // 否则留下「无定时器无触发条件」的静默态（AI 永远不被唤醒）。
+        if st.wake_config.mode == "active" {
+            st.wake_config.infinite = true;
+        }
+        if !st.wake_config.infinite && st.wake_config.sleep_until.is_none() {
+            let now = crate::session_manager::SessionManager::now_ms();
+            let min = state.cfg.social_v2.wake.recommended_sleep_min_ms;
+            let max = state.cfg.social_v2.wake.recommended_sleep_max_ms.max(min);
+            // now 的毫秒低位作伪随机源（推荐值本就是模糊时长，无需密码学质量）。
+            let r = (now % 1_000) as f64 / 1_000.0;
+            let until = now + min + (r * (max - min) as f64) as u64;
+            st.wake_config.sleep_until = Some(until);
+        }
+        let wake = st.wake_config.clone();
+        let sleep_until = if wake.infinite {
+            None
+        } else {
+            wake.sleep_until
+        };
+        if wake.infinite {
+            st.wake_config.sleep_until = None;
+        }
         store.save();
+        // 报主循环：取消回复检查（AI 已主动设置新配置——Node 5114）并按最终值
+        // 重排/取消有限潜水定时器。
+        let _ = state
+            .sched_tx
+            .send(crate::orchestrator::SchedReq::WakeConfig {
+                key: key.clone(),
+                sleep_until,
+            });
     }
     ok_json(json!({ "updated": true }))
 }
@@ -4236,6 +4281,9 @@ async fn send_sticker(
                 st.last_ai_reply_at = now;
                 store.save();
             }
+            let _ = state
+                .sched_tx
+                .send(crate::orchestrator::SchedReq::ReplyCheck { key: key.clone() });
             ok_json(json!({ "messageId": message_id, "sticker": entry.desc }))
         }
         Err(e) => denied(StatusCode::BAD_GATEWAY, &format!("OneBot 发送失败：{e}")),
