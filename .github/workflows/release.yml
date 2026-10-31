@@ -54,6 +54,10 @@ jobs:
           # preset 随包分发（安装器部署到 ~/.dsh/agent-presets）。
           New-Item -ItemType Directory -Force -Path "$Stage/dsh/agent-presets" | Out-Null
           Copy-Item dsh/agent-presets/* "$Stage/dsh/agent-presets/" -Recurse
+          # web-search-safe（联网搜索 MCP，零依赖 Node 脚本）随包分发——
+          # 安装器迁入安装目录并注册两档 cordis.patch.yml。
+          New-Item -ItemType Directory -Force -Path "$Stage/mcp" | Out-Null
+          Copy-Item mcp/* "$Stage/mcp/" -Recurse
           Copy-Item LICENSE $Stage
           Copy-Item THIRD_PARTY_NOTICES.md $Stage
           Copy-Item migrate-from-node.ps1 $Stage
@@ -68,6 +72,8 @@ jobs:
              登录目标 QQ 并开启 OneBot 服务；使用者须遵守 SnowLuma EULA/LICENSE。
           2. DeepSeek Harness（DSH）——已安装并初始化（~/.dsh 存在）。
           3. config.json——参照仓库 README「快速上手」准备，放到 exe 同目录。
+          4. Node.js（可选）——联网搜索（web-search-safe MCP）需要 node 在 PATH：
+             没有则该条目自动跳过，其余功能不受影响；装好后重跑 install.ps1 可补上。
 
           全新安装：解压后双击 install.bat（引导安装 DSH/SnowLuma、部署 preset、
           生成 config、注册 MCP；也可命令行 install.ps1，参数见脚本头部）

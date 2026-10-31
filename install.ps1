@@ -307,14 +307,28 @@ if (Test-Path $cfgPath) {
 
 # MCP 注册（web + desktop 两档都写——DSH 桌面版读 desktop、CLI 读 web，
 # 漏写 desktop 时 AI 会话挂不到 queqiao-mcp，2026-10-25 真机总根因）。
-# 幂等三步：清 queqiao/qq-bridge 托管块 → 清无标记的 Node 版 snowluma 两块
-# （保留用户自配的 web-search-safe 等）→ 追加新托管块。
+# 幂等三步：清 queqiao/qq-bridge 托管块 → 清无标记的 Node 版旧注册
+# （snowluma 两块 + web-search-safe——后者 v0.4.19 起由本脚本托管，
+# 指向 qq-bridge 仓库的旧条目一并回收）→ 追加新托管块。
 function Write-McpPatch {
-    param($DshHome, $ProfileName, $McpExe)
+    param($DshHome, $ProfileName, $McpExe, $NodeExe, $SearchJs)
     $dir = Join-Path $DshHome "profiles\$ProfileName"
     $PatchFile = Join-Path $dir 'cordis.patch.yml'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     if (-not (Test-Path $PatchFile)) { New-Item -ItemType File -Path $PatchFile -Force | Out-Null }
+    $searchBlock = ''
+    if ($NodeExe -and $SearchJs -and (Test-Path $SearchJs)) {
+        $searchBlock = @"
+    - id: mcp-web-search-safe
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: web-search-safe
+        transport: stdio
+        command: '$NodeExe'
+        args:
+          - '$SearchJs'
+"@
+    }
     $block = @"
 # === queqiao MCP BEGIN ===
 # 由 install.ps1 / scripts/upgrade.ps1 维护。
@@ -327,24 +341,40 @@ function Write-McpPatch {
         command: '$McpExe'
         args: []
         toolCallTimeoutMs: 725000
+$searchBlock
 # === queqiao MCP END ===
 "@
     $existing = if ((Get-Item $PatchFile).Length -gt 0) { Get-Content $PatchFile -Raw -Encoding UTF8 } else { '' }
     $existing = $existing -replace '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?', ''
     $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-snowluma(-host)?\s*\r?\n.*?(?=^\S|\z)', ''
+    $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-web-search-safe\s*\r?\n.*?(?=^\S|\z)', ''
     if ($existing.Trim()) {
         Set-Content $PatchFile ($existing.TrimEnd() + "`n`n" + $block) -Encoding UTF8 -NoNewline
     } else {
         Set-Content $PatchFile $block -Encoding UTF8 -NoNewline
     }
-    Write-Ok "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp（清 Node 旧块，保留其余条目）"
+    $searchNote = if ($searchBlock) { '+web-search-safe' } else { '' }
+    Write-Ok "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp$searchNote（清 Node 旧块，保留其余条目）"
+}
+# web-search-safe 脚本先就位（注册在下面一步，Test-Path 防空注册的前提）。
+$mcpSrc = Join-Path $RepoRoot 'mcp'
+if (Test-Path $mcpSrc) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dist 'mcp') | Out-Null
+    Copy-Item $mcpSrc (Join-Path $Dist 'mcp\') -Recurse -Force
 }
 # $McpExe 此前从未赋值——空串注册成 command: ''（AI 会话挂不到 qq 工具，
 # 2026-10-31 真机排查实锤，upgrade.ps1 同款已修）。部署已完成，这里补上。
 $McpExe = Join-Path $Dist 'queqiao-mcp.exe'
 if (-not (Test-Path $McpExe)) { throw "queqiao-mcp.exe 不存在：$McpExe（refusing 写空注册）" }
-Write-McpPatch $DshHome 'web' $McpExe
-Write-McpPatch $DshHome 'desktop' $McpExe
+# web-search-safe（联网搜索，零依赖 Node 脚本随包分发）：node 不可用只跳过
+# 该条目不阻塞安装——装好 Node.js 后重跑脚本即可补上。
+$NodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+$SearchJs = Join-Path $Dist 'mcp\web-search-safe\server.js'
+if (-not $NodeExe) {
+    Write-Info '未找到 node——web-search-safe（联网搜索）本次不注册；装好 Node.js 后重跑本脚本可补上'
+}
+Write-McpPatch $DshHome 'web' $McpExe $NodeExe $SearchJs
+Write-McpPatch $DshHome 'desktop' $McpExe $NodeExe $SearchJs
 
 # ── 7. 收尾：安装器与配套文件迁入安装目录（升级/重装无需回下载目录）────────
 foreach ($f in @('install.bat', 'install.ps1', 'upgrade.bat', 'migrate-from-node.ps1')) {

@@ -9,6 +9,12 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [未发布]
+
+### 新增
+
+- **web-search-safe（联网搜索 MCP）随包分发 + 安装托管——黑话三期联网研究的最后一环**：此前实际在线的是 Node 版 qq-bridge 仓库的旧脚本（仅用户机 desktop 档注册、指向开发仓库路径），新机器装 QueQiao 得不到联网搜索（安装脚本只「保留」不安装、web 档完全无注册）。落地三层：①server 迁入仓库 `mcp/web-search-safe/`——解析/聚合（web-search-agg.js）与受限传输层（safe-fetch.js）原样迁移，server 壳**去掉 @modelcontextprotocol/sdk/zod 依赖改手写 stdio JSON-RPC**（协议形状与 queqiao-mcp 一致，DSH 验证过的同款实现；否则安装包须携带 node_modules，随包分发成本不可接受），零依赖任何有 node 的机器直接跑；②install.ps1/upgrade.ps1 的 Write-McpPatch 托管 `mcp-web-search-safe` 注册（web+desktop 两档；node 探测缺席则跳过不阻塞、重跑可补；顺手回收指向 qq-bridge 仓库的无标记旧条目，用户自配的其他条目仍保留）；③mcp/ 目录随包（release.yml 打包 + install 迁入安装目录 + upgrade 补拷）。工具面与原版一致（web_search/image_search/web_fetch 三只读工具、SSSR 防护、多引擎聚合熔断），preset 侧指引（mcp__web-search-safe__*）零改动即适配。core::search（Rust 契约测试）保持入库不动。冒烟：stdio 握手/tools 形状/真网络搜索（Bing+360 聚合出结果）/SSRF 拒本机/未知工具错误码 9 项全过；Write-McpPatch 隔离功能测试（注册/幂等/清旧/保留他条/node 缺席分支）7 项全过。
+
 ## [0.4.18] - 2026-10-31
 
 ### 变更
