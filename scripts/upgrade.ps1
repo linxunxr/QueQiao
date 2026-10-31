@@ -218,6 +218,11 @@ function Write-McpPatch {
     }
     Write-Host '  ' + "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp（清 Node 旧块，保留其余条目）"
 }
+# $McpExe 此前从未赋值——PowerShell 未定义变量展开为空串，把两档
+# cordis.patch.yml 写成 command: ''（AI 会话挂不到 qq 工具、唤醒后
+# 空转无回复，2026-10-31 真机排查实锤）。安装目录已定，这里补上。
+$McpExe = Join-Path $Dist 'queqiao-mcp.exe'
+if (-not (Test-Path $McpExe)) { throw "queqiao-mcp.exe 不存在：$McpExe（ refusing 写空注册）" }
 Write-McpPatch $DshHome 'web' $McpExe
 Write-McpPatch $DshHome 'desktop' $McpExe
 
