@@ -160,6 +160,21 @@ impl Orchestrator {
             .or_insert_with(|| SessionRuntime::new(key, wake));
     }
 
+    /// mux 断连（DSH 重启/网络抖动）：清全部会话的进行中回合态——
+    /// 连接断掉后 turn/end 不会再到，残留 turn/prompt_in_flight 令会话
+    /// 永久 busy、后续唤醒全被静默吞（2026-10-31 真机事故）。
+    pub fn on_mux_disconnect(&mut self) {
+        let n = self.sessions.values_mut().filter(|rt| rt.is_busy()).count();
+        if n > 0 {
+            crate::logging::log(&format!(
+                "[mux] 断连清理：{n} 个会话的进行中回合作废（turn/end 不会再到达）"
+            ));
+        }
+        for rt in self.sessions.values_mut() {
+            rt.abort_inflight();
+        }
+    }
+
     /// 为全部在册会话排主动检查定时器（Node 模式进入时 scheduleProactiveCheckV2
     /// 全量排程语义；启动后由 ProactiveCheck 触发自重排维持检查环，无需再调）。
     /// enabled=false 不排；同 (key, ProactiveCheck) 覆盖重排。

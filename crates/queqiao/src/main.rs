@@ -986,12 +986,17 @@ async fn run(setup: Setup) {
     // 事件不丢）。
     let (mux_env_tx, mut mux_env_rx) =
         tokio::sync::mpsc::channel::<queqiao_dsh::mux::MuxEnvelope>(256);
+    // mux 断连通知（mux 任务 → 主循环）：主循环持有 orchestrator，断连
+    // 需清进行中回合态（残留 turn/prompt_in_flight 令会话永久 busy 吞
+    // 唤醒——2026-10-31 真机事故）。
+    let (mux_down_tx, mut mux_down_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let reconnect = std::sync::Arc::new(tokio::sync::Notify::new());
     {
         let dsh = dsh_arc.clone();
         let sessions = sessions_arc.clone();
         let slang_learner_mux = slang_learner.clone();
         let env_tx = mux_env_tx.clone();
+        let mux_down_tx = mux_down_tx.clone();
         let reconnect = reconnect.clone();
         // DSH 基址重探测的起点（config 值）；DSH 重启端口漂移时 mux 失败
         // 路径触发 switch_if_drifted 切换共享 client——桥不再需要重启跟随。
@@ -1054,9 +1059,9 @@ async fn run(setup: Setup) {
                     _ = &mut handle => {
                         // 断连：退避后重连（鉴权由 outcome 无效时 ensure_auth 重铸）。
                         queqiao::logging::log("DSH mux 断连——3s 后重连");
+                        let _ = mux_down_tx.send(());
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    }
-                    _ = reconnect.notified() => {
+                    }                    _ = reconnect.notified() => {
                         // 新会话映射出现：短暂等待写盘后重连重放全部 desired。
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
@@ -1279,6 +1284,12 @@ async fn run(setup: Setup) {
                 let tick_actions = orchestrator.advance(now_ms(), &mut rng);
                 executor.execute(tick_actions, now_ms()).await;
                 sync_dirty(&orchestrator, &social_arc);
+            }
+            _ = mux_down_rx.recv() => {
+                // mux 断连：进行中回合的事件流随连接断掉（turn/end 不会再到），
+                // 残留回合态令会话永久 busy、吞掉之后一切唤醒（2026-10-31
+                // 真机：DSH 重启后 AI 对所有消息无反应且无任何日志）。
+                orchestrator.on_mux_disconnect();
             }
             maybe_envelope = mux_env_rx.recv() => {
                 // mux 信封 → 回合生命周期事件（sessionId 反查会话键）。

@@ -77,6 +77,15 @@ impl SessionRuntime {
         }
     }
 
+    /// mux 断连清理：进行中的回合事件流随连接断掉，turn/end 与回合收尾
+    /// 事件永远不会再到达——残留会让会话永久 busy（is_busy 恒真），之后
+    /// 一切唤醒进 busy 分支被静默吞掉（2026-10-31 真机：DSH 重启后 AI
+    /// 对所有消息无反应、无任何日志）。唤醒配置等持久态不受影响。
+    pub fn abort_inflight(&mut self) {
+        self.prompt_in_flight = false;
+        self.turn = None;
+    }
+
     /// busy 四条件（迁移红线之一，对齐 Node isConversationBusyV2）：
     /// ①待发送合批定时器；②唤醒在途（SendPrompt 已出、回合未开始——Node
     /// pendingWakeKeys）；③DSH prompt 投递队列运行中（bin 层串行化队列，
@@ -645,6 +654,28 @@ fn on_turn_ended(
 mod tests {
     use super::*;
     use crate::action::IncomingMessage;
+
+    /// mux 断连清理守护：残留 turn/prompt_in_flight 令会话永久 busy、
+    /// 吞掉之后一切唤醒（2026-10-31 真机事故——DSH 重启后 AI 对所有
+    /// 消息无反应）。abort_inflight 必须把 busy 打回 false。
+    #[test]
+    fn abort_inflight_clears_busy() {
+        let mut rt = SessionRuntime::new("group:1", TriggerRules::default());
+        rt.prompt_in_flight = true;
+        assert!(rt.is_busy(), "在途唤醒即 busy");
+        rt.abort_inflight();
+        assert!(!rt.is_busy(), "断连清理后不再 busy");
+        // turn 残留同款（turn/end 永不到达的断连场景）。
+        rt.turn = Some(TurnState {
+            session_id: "s".into(),
+            started_at: 0,
+            last_beat_at: 0,
+            text: String::new(),
+        });
+        assert!(rt.is_busy());
+        rt.abort_inflight();
+        assert!(!rt.is_busy());
+    }
 
     fn msg(text: &str) -> IncomingMessage {
         IncomingMessage {
