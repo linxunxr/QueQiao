@@ -388,6 +388,15 @@ fn find_dsh_exe() -> Option<std::path::PathBuf> {
         .map(|(p, _)| p)
 }
 
+/// SnowLuma 卡片「运行中」判定（纯函数）：进程探测命中即真；homeDir
+/// 未配置时进程判定恒假（-like '**' 会匹配一切进程，按未配置处理），
+/// 回落用 OneBot HTTP 探活——有人应答必有进程在服务（2026-10-31 真机
+/// 踩过：homeDir 空致卡片恒红「未运行」而 SnowLuma 实际在跑、启动链
+/// 与桥均正常——纯显示层假阴）。
+fn snowluma_running(dir: &str, proc_found: bool, http_alive: bool) -> bool {
+    proc_found || (dir.trim().is_empty() && http_alive)
+}
+
 /// 组件三态查询。async + spawn_blocking：WMI 进程枚举在系统忙时可达秒级，
 /// 同步命令占主线程会让 UI 周期性冻结（实测体感"时不时卡住"）。WMI
 /// 卡死防护在 probe_components 内部（PowerShell 5s 超时 + kill）——
@@ -408,10 +417,11 @@ async fn components_status(
         } else {
             vec![http]
         };
+        let http_alive = probe_urls.iter().any(|u| http_url_alive(u));
         serde_json::json!({
             "dsh": dsh,
-            "snowluma": snowluma,
-            "snowlumaHttp": probe_urls.iter().any(|u| http_url_alive(u)),
+            "snowluma": snowluma_running(&dir, snowluma, http_alive),
+            "snowlumaHttp": http_alive,
             "snowlumaDir": dir,
             "dshPath": find_dsh_exe().map(|p| p.display().to_string()),
             "bridgeProc": bridge_proc,
@@ -435,8 +445,8 @@ fn config_read_direct(state: tauri::State<'_, BridgeState>) -> Result<serde_json
 
 /// config.json 直读（纯函数，command 的壳下测试用）。
 fn read_config_json(home: &std::path::Path) -> Result<serde_json::Value, String> {
-    let text =
-        std::fs::read_to_string(home.join("config.json")).map_err(|e| format!("读 config.json 失败：{e}"))?;
+    let text = std::fs::read_to_string(home.join("config.json"))
+        .map_err(|e| format!("读 config.json 失败：{e}"))?;
     serde_json::from_str(text.trim_start_matches('\u{FEFF}'))
         .map_err(|e| format!("config.json 非法 JSON：{e}"))
 }
@@ -462,10 +472,11 @@ fn read_roles_snapshot(home: &std::path::Path) -> Result<serde_json::Value, Stri
         }
     }
     cards.sort();
-    let current: serde_json::Value = std::fs::read_to_string(home.join("state").join("current-role.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok())
-        .unwrap_or(serde_json::Value::Null);
+    let current: serde_json::Value =
+        std::fs::read_to_string(home.join("state").join("current-role.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok())
+            .unwrap_or(serde_json::Value::Null);
     Ok(serde_json::json!({ "roles": cards, "current": current }))
 }
 
@@ -902,6 +913,33 @@ mod probe_fp_tests {
 #[cfg(test)]
 mod direct_read_tests {
     use super::*;
+
+    /// homeDir 空的显示层回落（三态）：进程命中即真；空配置时 HTTP 探活
+    /// 代言（有人应答必有进程）；空配置且 HTTP 不通保持未运行（无法区分
+    /// 没跑与没开 OneBot，指引一键启动是对的）。homeDir 有值时纯进程判定。
+    #[test]
+    fn snowluma_running_fallback_three_states() {
+        assert!(
+            snowluma_running("D:\\x\\SnowLuma", true, false),
+            "进程在跑即真"
+        );
+        assert!(
+            !snowluma_running("D:\\x\\SnowLuma", false, true),
+            "有配置时 HTTP 不能代言进程"
+        );
+        assert!(
+            snowluma_running("", false, true),
+            "无配置 + HTTP 应答=有服务在跑"
+        );
+        assert!(
+            !snowluma_running("", false, false),
+            "无配置 + 无应答=未运行"
+        );
+        assert!(
+            snowluma_running("  ", false, true),
+            "空白配置 trim 后视同未配置——回落生效"
+        );
+    }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("qq-app-direct-{}-{tag}", std::process::id()));
