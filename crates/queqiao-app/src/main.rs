@@ -46,11 +46,58 @@ fn take_bridge_autostart_flag(home: &std::path::Path) -> Option<bool> {
     flag
 }
 
+/// 桥主循环探活：GET /api/health（TcpStream 手写——客户端不引 HTTP 依赖；
+/// Connection: close 下 axum 关连接，读到 EOF 即完整响应）。返回
+/// (mainLoopAlive, inFlight 秒)；None = 端口不通（进程死）。200 但非 JSON
+/// （升级期旧版桥的 "ok" 文本）回落 (true, None) 保持 TCP 探活语义，防
+/// 新客户端+旧桥误告警。
+fn http_health_probe(port: u16) -> Option<(bool, Option<u64>)> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    s.set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .ok()?;
+    let req =
+        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).ok()?;
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).ok()?;
+    if !buf.starts_with("HTTP/") || !buf.split_once("\r\n")?.1.starts_with("200") {
+        return None;
+    }
+    let body = buf.split_once("\r\n\r\n").map(|x| x.1).unwrap_or("");
+    let v = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => v,
+        Err(_) => return Some((true, None)),
+    };
+    let alive = v.get("mainLoopAlive").and_then(|x| x.as_bool())?;
+    let busy = v
+        .get("inFlight")
+        .and_then(|f| f.get("elapsedSec"))
+        .and_then(|x| x.as_u64());
+    Some((alive, busy))
+}
+
+/// 看门狗的桥健康判定（纯函数）：心跳在=活；心跳停但在忙一段（投递/
+/// 下载，且未超 5 分钟）=忙不告警（慢投递是新会话链的正常上限）；心跳停
+/// 且无在忙段（或忙超 5 分钟）=死。
+fn judge_health(probe: Option<(bool, Option<u64>)>) -> bool {
+    match probe {
+        None => false,
+        Some((true, _)) => true,
+        Some((false, Some(elapsed))) if elapsed < 300 => true,
+        Some((false, _)) => false,
+    }
+}
+
+fn bridge_healthy(port: u16) -> bool {
+    judge_health(http_health_probe(port))
+}
+
 /// 看门狗驱动（Node watchdog.mjs 的客户端形态）：30s 一轮探测三件套——
-/// bridge=控制台口 TCP 探活（进程活着但 HTTP 卡死也测得出），dsh/snowluma
-/// 复用进程探测。告警**直发 OneBot HTTP 私聊管理员，不经桥本身**——
-/// 桥挂了告警才发得出。重启动作不接管（SnowLuma 授权边界、DSH 形态多样，
-/// 告警先行的最小可用）。
+/// bridge=/api/health 的 mainLoopAlive（2026-10-31 卡死事故：主循环停摆时
+/// serve 任务还活着，TCP 探活必然误报健康），dsh/snowluma 复用进程探测。
+/// 告警**直发 OneBot HTTP 私聊管理员，不经桥本身**——桥挂了告警才发得出。
+/// 重启动作不接管（SnowLuma 授权边界、DSH 形态多样，告警先行的最小可用）。
 fn start_watchdog(home: std::path::PathBuf) {
     std::thread::spawn(move || {
         let mut state = queqiao_core::watchdog::WatchdogState::default();
@@ -80,7 +127,7 @@ fn start_watchdog(home: std::path::PathBuf) {
                     port = p as u16;
                 }
             }
-            let bridge_alive = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
+            let bridge_alive = bridge_healthy(port);
             let (dsh, snowluma, _) = probe_components("");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -832,6 +879,29 @@ fn home_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 看门狗健康判定：端口死/心跳活/忙（<5min）/忙超时/无在忙段的心跳停。
+    #[test]
+    fn watchdog_judge_health_busy_vs_dead() {
+        assert!(!judge_health(None), "端口不通=死");
+        assert!(judge_health(Some((true, None))), "心跳在=活");
+        assert!(
+            judge_health(Some((true, Some(999)))),
+            "心跳在时在忙段仅展示"
+        );
+        assert!(
+            judge_health(Some((false, Some(120)))),
+            "心跳停但在忙 2min=忙不告警"
+        );
+        assert!(
+            !judge_health(Some((false, Some(301)))),
+            "忙超 5min=异常告警"
+        );
+        assert!(
+            !judge_health(Some((false, None))),
+            "心跳停且无在忙段=真卡死"
+        );
+    }
 
     #[test]
     fn bridge_autostart_flag_three_states() {

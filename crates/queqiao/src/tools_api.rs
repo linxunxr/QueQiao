@@ -46,6 +46,8 @@ pub struct ToolApiState {
     /// 有限潜水闹钟与主动等待取消（Node 版这些定时器直接挂工具 handler，
     /// Rust 的定时器轮在主循环所以经通道转交）。
     pub sched_tx: tokio::sync::mpsc::UnboundedSender<crate::orchestrator::SchedReq>,
+    /// 主循环心跳/in-flight 观测（bin 注入；health 与 diagnostics 暴露）。
+    pub watch: std::sync::Arc<crate::watch::WatchState>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -193,7 +195,18 @@ pub fn build_router(
 ) -> Router {
     let ct = console_token.to_owned();
     let app = Router::new()
-        .route("/api/health", get(|| async { "ok" }))
+        .route(
+            "/api/health",
+            get(
+                |axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>| async move {
+                    let mut v = state.watch.snapshot();
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("ok".into(), json!(true));
+                    }
+                    axum::Json(v)
+                },
+            ),
+        )
         .route("/api/socialV2/status", get(status))
         .route("/api/socialV2/prompt", get(prompt))
         .route("/api/socialV2/unread", get(unread))
@@ -3022,6 +3035,7 @@ async fn diagnostics(
     ok_json(json!({
         "generatedAt": now,
         "version": env!("CARGO_PKG_VERSION"),
+        "watch": state.watch.snapshot(),
         "bridgeLog": read("bridge.log"),
         "bridgeLogPrev": read("bridge.log.1"),
         "activityLog": read("activity.log"),

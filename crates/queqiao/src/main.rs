@@ -1095,6 +1095,9 @@ async fn run(setup: Setup) {
         current: std::sync::Mutex::new(cfg.clone()),
         first_run: std::sync::atomic::AtomicBool::new(false),
     });
+    // 主循环心跳/in-flight 观测：health、diagnostics 暴露，看门狗据此区分
+    // 「忙」与「死」（2026-10-31 卡死事故 TCP 探活只看端口必然误报健康）。
+    let watch = queqiao::watch::WatchState::shared();
     // 自动更新通道：启动异步检测与控制台「检查更新」按钮共用（oneshot
     // 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic）。
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
@@ -1124,6 +1127,7 @@ async fn run(setup: Setup) {
             browser: browser_arc.clone(),
             diary_pending: diary_pending.clone(),
             sched_tx: sched_tx.clone(),
+            watch: watch.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
@@ -1253,6 +1257,7 @@ async fn run(setup: Setup) {
         slang: cfg.slang.clone(),
         diary_pending: diary_pending.clone(),
         onebot: onebot_http.clone(),
+        watch: watch.clone(),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -1520,6 +1525,7 @@ async fn run(setup: Setup) {
                 }
             }
             _ = timeout => {
+                watch.beat();
                 let now = now_ms();
                 let actions = orchestrator.advance(now, &mut rng);
                 executor.execute(actions, now).await;
@@ -1791,6 +1797,8 @@ struct Executor {
     /// 错误亮群友的出站通道（core 在 agent 回合失败且重试耗尽时产出
     /// SendMessage——此前只有 println 占位，群友对出错无感知）。
     onebot: OneBotHttpClient,
+    /// 投递段 in-flight 打点（health/diagnostics 暴露）。
+    watch: std::sync::Arc<queqiao::watch::WatchState>,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -1816,6 +1824,7 @@ impl Executor {
                         ));
                         continue;
                     }
+                    self.watch.begin("deliver", &key);
                     // 完整唤醒文本：从持久态组装上下文（agentToken/未读/最近消息/唤醒摘要）。
                     let ctx = {
                         let mut social = self.social.lock().unwrap();
@@ -2019,6 +2028,7 @@ impl Executor {
                     if after.len() > before.len() {
                         reconnect.notify_one();
                     }
+                    self.watch.end("deliver");
                 }
                 BridgeAction::SendMessage {
                     key,

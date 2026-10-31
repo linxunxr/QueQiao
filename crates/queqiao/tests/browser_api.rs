@@ -76,6 +76,7 @@ fn make_router(home: &std::path::Path, browser_enabled: bool) -> axum::Router {
         slang_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
         browser: queqiao::browser::new_browser(),
+        watch: queqiao::watch::WatchState::shared(),
     });
     build_router(state, "", None)
 }
@@ -187,6 +188,7 @@ fn make_authorized_router(home: &std::path::Path) -> (axum::Router, String) {
         slang_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
         browser: queqiao::browser::new_browser(),
+        watch: queqiao::watch::WatchState::shared(),
     });
     let r = build_router(state, "", None);
     // 从 store 里取令牌（测试侧读文件而不是内部 API——social-v2.json 落盘）。

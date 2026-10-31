@@ -1879,6 +1879,7 @@ mod tests {
             slang_busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
             browser: queqiao::browser::new_browser(),
+            watch: queqiao::watch::WatchState::shared(),
         });
         queqiao::tools_api::build_router(state, "", None)
     }

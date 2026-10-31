@@ -13,6 +13,8 @@
 
 ### 新增
 
+- **主循环心跳与 in-flight 观测（2026-10-31 卡死事故的观测闭环）**：主循环 6 处内联 `executor.execute().await` 无总帽，任一环节挂起即全桥停摆（diary/热更/消息全停、零日志），而看门狗 TCP 探活只看端口（serve 是独立任务）必然误报健康。新增 `watch::WatchState`（500ms tick 心跳 + 投递段 begin/end 打点）：`/api/health` 从恒 "ok" 升级为 `{ok, mainLoopAlive, heartbeatAgeMs, inFlight}`；`/api/diagnostics` 增 watch 段。客户端看门狗探活同步升级——手写极简 HTTP GET /api/health 解析 mainLoopAlive（零新依赖；200 但非 JSON 的升级期旧桥回落 TCP 语义防误告警），健康判定区分「忙/死」：心跳在=活；心跳停但有 in-flight 段且 <5min=忙不告警（慢投递是新会话链正常上限）；心跳停且无在忙段=死（真卡死才告警）。复发时抓线程栈的运维手段：`procdump -accepteula queqiao.exe`（Rust 无便携跨线程栈转储，观测定位段落后手动抓）。
+
 - **控制台 API 鉴权补全——/api/config 与 /api/logs/tail 此前零守卫（v0.4.8 起记录的缺口）**：GET /api/config 可读全部配置、PUT 可改 ownerQQ/白名单，且 CORS 全路由放行意味着用户浏览器里的任意网页可跨域读——与 v0.4.16 防注入想堵的「接管控制台」同款后果，攻击者从 AI 浏览器换成本机任意进程/恶意网页。三层修复：①`consoleToken` 缺位时启动自动生成密码学随机令牌（24 字节 → 48 hex）并写回 config.json——写 config 而非独立文件，保住 queqiao-mcp 从 config.json 读令牌的既有链（Node 版存 state/console-token 的做法在这里会断 MCP）；②守卫判定抽公共函数 `console_token_check`（agent 令牌头一律 403——MCP 双令牌都带，仅拒 at 才挡得住 AI 经工具读写配置；令牌非空失配 401；读活值热更即时生效），/api/config GET/PUT 与 /api/logs/tail 三端点接入，tools_api `console_only` 同源复用；③UI 全部桥 fetch（29 处）统一经 `apiFetch` 注入令牌——Tauri 模式新增 `console_token_read` 命令直读 config.json（与 MCP 同源），浏览器直开模式 401 时 prompt 输入，localStorage 缓存；401 自愈单飞（并发 401 只弹一次 prompt、在途旧令牌响应直接带新令牌重试——playwright 实测暴露并修复的 prompt 风暴）。向导模式令牌为空天然放行（首次配置的唯一写入路径不被锁死）；页面壳 GET / 不鉴权（无敏感数据）。**升级后需重启 DSH 拉起新 MCP**——存量 MCP 进程启动时读到的令牌为空，不重启则工具调用全部 401（v0.4.15 同款发版须知）。
 
 ## [0.4.17] - 2026-10-31
