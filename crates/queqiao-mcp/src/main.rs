@@ -287,7 +287,12 @@ const TOOLS: &[ToolDef] = &[
             // 严格校验拒成 400 [1210]（且模型按 json 传字符串时桥端
             // as_array() 解析不出，tags 静默丢失）。桥端本就按字符串
             // 数组解析。
-            ("tags", "array", false, "标签数组（如 [\"开心\", \"接梗\"]）"),
+            (
+                "tags",
+                "array",
+                false,
+                "标签数组（如 [\"开心\", \"接梗\"]）",
+            ),
         ],
     },
     ToolDef {
@@ -1884,8 +1889,9 @@ mod tests {
     /// MiniMax，v0.4.13 引入的毒 schema 六天才定位，本测试即防复发）。
     #[test]
     fn tool_schemas_are_valid_json_schema() {
-        const LEGAL_TYPES: [&str; 7] =
-            ["string", "number", "integer", "boolean", "object", "array", "null"];
+        const LEGAL_TYPES: [&str; 7] = [
+            "string", "number", "integer", "boolean", "object", "array", "null",
+        ];
         for def in TOOLS {
             let schema = input_schema(def);
             let mut seen = std::collections::HashSet::new();

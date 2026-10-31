@@ -1404,7 +1404,10 @@ mod tests {
             "http://0.0.0.0/",
         ] {
             assert!(guard_url(blocked, false).is_err(), "应拒绝：{blocked}");
-            assert!(guard_url(blocked, true).is_err(), "开 file 也不放内网：{blocked}");
+            assert!(
+                guard_url(blocked, true).is_err(),
+                "开 file 也不放内网：{blocked}"
+            );
         }
         // file://：默认拒；开关开后本机路径放行、内网主机仍拒。
         assert!(guard_url("file:///D:/work/config.json", false).is_err());
@@ -1575,10 +1578,7 @@ fn now_unix() -> u64 {
 /// 读站点快照（文件缺失/损坏/非对象一律 None——快照只是显示增强，不挡路）。
 fn read_binding_snapshot_at(path: &std::path::Path, site: &str) -> Option<Value> {
     let txt = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Value>(&txt)
-        .ok()?
-        .get(site)
-        .cloned()
+    serde_json::from_str::<Value>(&txt).ok()?.get(site).cloned()
 }
 
 /// 合并写站点快照（其他站点保留；既有文件损坏当空重写）。
@@ -1605,10 +1605,10 @@ fn clear_binding_snapshot_at(path: &std::path::Path, site: &str) {
     let Ok(mut all) = serde_json::from_str::<Value>(&txt) else {
         return;
     };
-    if let Some(o) = all.as_object_mut() {
-        if o.remove(site).is_some() {
-            let _ = std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default());
-        }
+    if let Some(o) = all.as_object_mut()
+        && o.remove(site).is_some()
+    {
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&all).unwrap_or_default());
     }
 }
 
@@ -1700,11 +1700,8 @@ impl Browser {
             // login-status 高频查询）时 UI 也能显示上次的昵称/头像。
             let old = read_binding_snapshot_at(&bindings_path(), site.id);
             for k in ["nickname", "avatar", "level"] {
-                if out.get(k).map_or(true, Value::is_null)
-                    && let Some(v) = old
-                        .as_ref()
-                        .and_then(|o| o.get(k))
-                        .filter(|v| !v.is_null())
+                if out.get(k).is_none_or(Value::is_null)
+                    && let Some(v) = old.as_ref().and_then(|o| o.get(k)).filter(|v| !v.is_null())
                 {
                     out[k] = v.clone();
                 }
@@ -1856,7 +1853,8 @@ mod bind_tests {
     /// 独立临时文件路径（单测互不踩踏；不用 QUEQIAO_HOME——并行测试下
     /// 环境变量会互相覆盖）。
     fn snap_file(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("queqiao-bind-snap-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("queqiao-bind-snap-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("browser-bindings.json")
@@ -1929,11 +1927,7 @@ mod bind_tests {
         assert_eq!(v["confirmedAt"], json!(1730000000));
 
         // loggedIn:false 的快照不回放（防清 cookie 后残留旧快照谎报）。
-        write_binding_snapshot_at(
-            &bindings_path(),
-            "xiaoheihe",
-            &json!({ "loggedIn": false }),
-        );
+        write_binding_snapshot_at(&bindings_path(), "xiaoheihe", &json!({ "loggedIn": false }));
         let v = b.bind_status(&cfg, site, false).await;
         assert_eq!(v["loggedIn"], json!(false));
 

@@ -3300,7 +3300,9 @@ async fn role_card_get(
     let Some(name) = role_name_ok(q.get("name").map(String::as_str).unwrap_or_default()) else {
         return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
     };
-    let path = crate::paths::queqiao_home().join("roles").join(format!("{name}.md"));
+    let path = crate::paths::queqiao_home()
+        .join("roles")
+        .join(format!("{name}.md"));
     match std::fs::read_to_string(&path) {
         Ok(content) => ok_json(json!({ "name": name, "content": content })),
         Err(_) => denied(StatusCode::NOT_FOUND, &format!("roles/{name}.md 不存在")),
@@ -3321,11 +3323,16 @@ async fn role_card_put(
     else {
         return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
     };
-    let content = body.get("content").and_then(Value::as_str).unwrap_or_default();
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if content.len() > 64 * 1024 {
         return denied(StatusCode::BAD_REQUEST, "人格卡超 64KB——检查是否贴错内容");
     }
-    let path = crate::paths::queqiao_home().join("roles").join(format!("{name}.md"));
+    let path = crate::paths::queqiao_home()
+        .join("roles")
+        .join(format!("{name}.md"));
     match crate::state::atomic_write_json(&path, content) {
         Ok(()) => ok_json(json!({ "saved": true, "name": name, "bytes": content.len() })),
         Err(e) => denied(

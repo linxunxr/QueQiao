@@ -313,7 +313,10 @@ mod tests {
     fn role_name_is_valid_rejects_instead_of_renaming() {
         assert!(role_name_is_valid("小鲸鱼"));
         assert!(role_name_is_valid("blue-whale_2"));
-        assert!(!role_name_is_valid("../escape"), "含非法字符即拒（清洗会改名放行）");
+        assert!(
+            !role_name_is_valid("../escape"),
+            "含非法字符即拒（清洗会改名放行）"
+        );
         assert!(!role_name_is_valid("a/b"));
         assert!(!role_name_is_valid("a..b"), "显式穿越模式");
         assert!(!role_name_is_valid(""));

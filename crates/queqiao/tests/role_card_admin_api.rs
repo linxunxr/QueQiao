@@ -75,10 +75,18 @@ async fn call(r: &Router, req: Request<Body>) -> (StatusCode, Value) {
 }
 
 fn get(uri: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 fn del(uri: &str) -> Request<Body> {
-    Request::builder().method("DELETE").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 fn put(uri: &str, body: Value) -> Request<Body> {
     Request::builder()
@@ -120,7 +128,10 @@ fn role_card_crud_and_guards() {
         // ③ 覆盖保存 → 再读回新内容。
         let (code, _) = call(
             &r,
-            put("/api/role/card", json!({ "name": "小鲸鱼", "content": "v2" })),
+            put(
+                "/api/role/card",
+                json!({ "name": "小鲸鱼", "content": "v2" }),
+            ),
         )
         .await;
         assert_eq!(code, StatusCode::OK);
@@ -129,7 +140,11 @@ fn role_card_crud_and_guards() {
 
         // ④ 非法名（路径穿越/空白）拒绝：不落盘、不留逃逸文件。
         for bad in ["../evil", "a/b", "  "] {
-            let (code, _) = call(&r, put("/api/role/card", json!({ "name": bad, "content": "x" }))).await;
+            let (code, _) = call(
+                &r,
+                put("/api/role/card", json!({ "name": bad, "content": "x" })),
+            )
+            .await;
             assert_eq!(code, StatusCode::BAD_REQUEST, "非法名 {bad:?} 应 400");
         }
         assert!(!home.join("evil.md").exists());
@@ -137,7 +152,11 @@ fn role_card_crud_and_guards() {
 
         // ⑤ 内容超 64KB 拒绝。
         let big = "x".repeat(64 * 1024 + 1);
-        let (code, _) = call(&r, put("/api/role/card", json!({ "name": "big", "content": big }))).await;
+        let (code, _) = call(
+            &r,
+            put("/api/role/card", json!({ "name": "big", "content": big })),
+        )
+        .await;
         assert_eq!(code, StatusCode::BAD_REQUEST);
 
         // ⑥ 在用卡删除保护：全局引用 → 409。
@@ -148,7 +167,10 @@ fn role_card_crud_and_guards() {
         .unwrap();
         let (code, v) = call(&r, del("/api/role/card?name=小鲸鱼")).await;
         assert_eq!(code, StatusCode::CONFLICT, "全局在用应 409：{v}");
-        assert!(home.join("roles").join("小鲸鱼.md").exists(), "在用卡不得删除");
+        assert!(
+            home.join("roles").join("小鲸鱼.md").exists(),
+            "在用卡不得删除"
+        );
 
         // ⑦ perConv 引用同样保护：切走全局后仍 409。
         std::fs::write(
@@ -160,7 +182,11 @@ fn role_card_crud_and_guards() {
         assert_eq!(code, StatusCode::CONFLICT, "perConv 在用应 409");
 
         // ⑧ 解除引用后可删：删完 GET 404。
-        std::fs::write(home.join("state").join("current-role.json"), r#"{"role": "别的"}"#).unwrap();
+        std::fs::write(
+            home.join("state").join("current-role.json"),
+            r#"{"role": "别的"}"#,
+        )
+        .unwrap();
         let (code, _) = call(&r, del("/api/role/card?name=小鲸鱼")).await;
         assert_eq!(code, StatusCode::OK);
         assert!(!home.join("roles").join("小鲸鱼.md").exists());
