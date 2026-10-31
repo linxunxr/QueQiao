@@ -844,7 +844,10 @@ async fn run(setup: Setup) {
         // 抖动断链，此后所有消息石沉大海且无任何日志）。5s 起退避重连，
         // 翻倍封顶 60s，恢复为止。
         loop {
-            while let Some(event) = stream.recv_event().await {
+            // keepalive 版：空闲 120s 主动 ping 探活，半开连接（NAT 超时/
+            // 断网无 close 帧）30s 无回音即断定走重连——否则 recv 永久
+            // pending，桥活着但收不到任何消息且零日志。
+            while let Some(event) = stream.recv_event_keepalive().await {
                 let bridged = match event {
                     Ok(OneBotEvent::GroupMessage(m)) if !m.sent_by_self => {
                         let key = format!("group:{}", m.group_id);
@@ -1101,6 +1104,10 @@ async fn run(setup: Setup) {
     // 自动更新通道：启动异步检测与控制台「检查更新」按钮共用（oneshot
     // 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic）。
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
+    // 下载就绪回报：下载在独立任务跑（单次 300s×主备 3+3 重试最坏半小时，
+    // 不能内联 await 主循环），就绪/失败经此通道汇回。
+    let (update_staged_tx, mut update_staged_rx) =
+        tokio::sync::mpsc::channel::<Result<std::path::PathBuf, String>>(1);
     // 当前日记回合（写入日期 + 唤醒素材块）：主循环触发时置、write-diary
     // 提交成功后清；Executor 与工具端点共享（Node diaryPendingDate 语义）。
     let diary_pending = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
@@ -1311,9 +1318,9 @@ async fn run(setup: Setup) {
                     .await;
                 }
                 let actions = orchestrator.on_event(event, now, &mut rng);
-                executor.execute(actions, now).await;
+                executor.execute_capped(actions, now).await;
                 let tick_actions = orchestrator.advance(now_ms(), &mut rng);
-                executor.execute(tick_actions, now_ms()).await;
+                executor.execute_capped(tick_actions, now_ms()).await;
                 sync_dirty(&orchestrator, &social_arc);
             }
             _ = mux_down_rx.recv() => {
@@ -1354,11 +1361,13 @@ async fn run(setup: Setup) {
                 {
                     let now = now_ms();
                     let actions = orchestrator.on_event(event, now, &mut rng);
-                    executor.execute(actions, now).await;
+                    executor.execute_capped(actions, now).await;
                 }
             }
             update = update_rx.recv() => {
-                // 检测到新版本：显示更新内容 → 下载 staging → 全体空闲时应用并重启。
+                // 检测到新版本：显示更新内容 → 下载在独立任务（不阻塞主循环
+                // ——单次下载 300s 超时 × 主备源 3+3 重试最坏半小时，内联 await
+                // 期间 diary/热更/消息全停）；就绪后经通道回报应用。
                 // （循环内的输出一律走 logging::log——裸 println 在客户端管道断裂时
                 // 写失败即 panic，曾致桥无痕死亡。）
                 if let Some(rel) = update {
@@ -1367,17 +1376,29 @@ async fn run(setup: Setup) {
                         queqiao::logging::log(&format!("│ {line}"));
                     }
                     let home = queqiao::paths::queqiao_home();
-                    match tokio::task::spawn_blocking({
-                        let rel = rel.clone();
-                        move || {
-                            let staging = update::stage_update(&rel, &home, "bridge")?;
-                            update::write_apply_bat(&staging, &home, false)
-                        }
-                    })
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r)
-                    {
+                    let watch = watch.clone();
+                    let tx = update_staged_tx.clone();
+                    tokio::spawn(async move {
+                        watch.begin("download", &rel.tag);
+                        let r = tokio::task::spawn_blocking({
+                            let rel = rel.clone();
+                            move || {
+                                let staging = update::stage_update(&rel, &home, "bridge")?;
+                                update::write_apply_bat(&staging, &home, false)
+                            }
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|r| r);
+                        watch.end("download");
+                        let _ = tx.send(r).await;
+                    });
+                }
+            }
+            staged = update_staged_rx.recv() => {
+                // 下载任务回报：就绪挂起待空闲应用；失败本次跳过。
+                if let Some(r) = staged {
+                    match r {
                         Ok(bat) => {
                             queqiao::logging::log("[update] 新版已就绪，等待会话空闲后自动应用并重启…");
                             pending_update = Some(bat);
@@ -1528,7 +1549,7 @@ async fn run(setup: Setup) {
                 watch.beat();
                 let now = now_ms();
                 let actions = orchestrator.advance(now, &mut rng);
-                executor.execute(actions, now).await;
+                executor.execute_capped(actions, now).await;
                 sync_dirty(&orchestrator, &social_arc);
                 // ── 日记三路径调度（Node scheduleDiaryV2：60s 轮询 + 启动补写）──
                 // core 的 diary 纯函数回答「该不该写」，节奏、宿主挑选与投递在
@@ -1640,7 +1661,7 @@ async fn run(setup: Setup) {
                                         "日记触发（{label}，宿主 {host}，目标 {date_key}）"
                                     ));
                                     executor
-                                        .execute(
+                                        .execute_capped(
                                             vec![BridgeAction::SendPrompt {
                                                 key: host,
                                                 reason: format!("diary:{label}"),
@@ -1809,6 +1830,26 @@ struct WakePromptConfig {
 }
 
 impl Executor {
+    /// 投递总帽：稳态单次投递 30s 封顶，但新会话/重建链串联多次 HTTP
+    ///（401 重试再翻倍）无上限——2026-10-31 卡死 5 分钟的病灶。超时放弃
+    /// 本轮剩余动作（正在跑的 spawn_blocking 后台自然完成，回复可能迟到
+    /// 不丢），主循环恢复推进（diary/热更/消息接收不再全停）。
+    async fn execute_capped(&self, actions: Vec<BridgeAction>, now: u64) {
+        const CAP_MS: u64 = 180_000;
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(CAP_MS),
+            self.execute(actions, now),
+        )
+        .await
+        .is_err()
+        {
+            self.watch.end("deliver");
+            queqiao::logging::log(
+                "[stall] 投递链超 180s 总帽，本轮剩余动作放弃（后台投递自然完成，AI 回复可能迟到）",
+            );
+        }
+    }
+
     async fn execute(&self, actions: Vec<BridgeAction>, now: u64) {
         for action in actions {
             match action {

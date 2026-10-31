@@ -73,6 +73,51 @@ impl EventStream {
             }
         }
     }
+
+    /// 空闲感知收事件：[`recv_event`] 的半开连接防御——NAT 超时/对端休眠/
+    /// 断网无 close 帧时 `ws.next()` 永久 pending（进程活、事件流死、零
+    /// 日志）。空闲 120s 发 ping 探活，宽限 30s 内仍无任何帧视同断连返回
+    /// `None`（外层走既有重连退避）；对端正常时行为与 [`recv_event]` 一致。
+    pub async fn recv_event_keepalive(&mut self) -> Option<Result<OneBotEvent, EventStreamError>> {
+        const IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+        const PONG_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+        loop {
+            let frame = match tokio::time::timeout(IDLE, self.ws.next()).await {
+                // 空闲：发 ping 后限时等回音（pong 或任何帧均可证活着）。
+                Err(_) => {
+                    use futures_util::SinkExt;
+                    if self
+                        .ws
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .is_err()
+                    {
+                        return None; // 写失败：连接已死。
+                    }
+                    match tokio::time::timeout(PONG_GRACE, self.ws.next()).await {
+                        Err(_) => return None, // 半开：探活无回音。
+                        Ok(frame) => frame,
+                    }
+                }
+                Ok(frame) => frame,
+            };
+            match frame {
+                None => return None,
+                Some(Ok(Message::Text(t))) => {
+                    match parse_event(&serde_json::from_str(t.as_str()).unwrap_or_default()) {
+                        Ok(evt) => return Some(Ok(evt)),
+                        Err(_) => continue,
+                    }
+                }
+                Some(Ok(Message::Close(_))) => return None,
+                // pong/ping/binary：任何帧都证明连接活着，继续收。
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => {
+                    return Some(Err(EventStreamError(format!("ws 帧错误：{e}"))));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

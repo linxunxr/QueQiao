@@ -57,7 +57,11 @@ fn put(uri: &str, headers: &[(&str, &str)]) -> Request<Body> {
 }
 
 /// 用例元组：(路径, 请求头, 期望码)。
-type Case = (&'static str, &'static [(&'static str, &'static str)], StatusCode);
+type Case = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    StatusCode,
+);
 
 /// 令牌非空：无头 401、失配 401、agent 头 403、正确令牌 200——三端点同语义。
 #[tokio::test]

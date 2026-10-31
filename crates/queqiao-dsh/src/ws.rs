@@ -304,11 +304,16 @@ pub mod tungstenite {
     impl WsStream for TungsteniteWs {
         type Error = String;
 
+        /// 写超时 30s：对端停滞/发送缓冲满时 sink 的 send 可无限挂起——
+        /// MuxRunner 任务卡在单次发送上，mux 事件流随之静默且无日志。
         async fn send_text(&mut self, text: &str) -> Result<(), Self::Error> {
-            self.ws
-                .send(Message::text(text.to_owned()))
-                .await
-                .map_err(|e| e.to_string())
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.ws.send(Message::text(text.to_owned())),
+            )
+            .await
+            .map_err(|_| "ws 写超时（30s）——对端停滞或缓冲满".to_string())?
+            .map_err(|e| e.to_string())
         }
 
         async fn recv_text(&mut self) -> Result<Option<String>, Self::Error> {

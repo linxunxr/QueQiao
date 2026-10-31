@@ -3398,22 +3398,32 @@ async fn dsh_catalog(
             return denied(StatusCode::UNAUTHORIZED, "console token required");
         }
     }
-    let Ok(mut dsh) = state.dsh.lock() else {
-        return denied(StatusCode::INTERNAL_SERVER_ERROR, "dsh 锁中毒");
-    };
-    let now = crate::session_manager::SessionManager::now_ms();
-    let catalog = match dsh
-        .call_unary("session/modelCatalog", Some(json!({})), now)
-        .and_then(|o| o.unwrap("session/modelCatalog"))
+    // 阻塞 HTTP 挪进 spawn_blocking：reqwest blocking 调用直接在 async
+    // handler 里跑会占死 runtime worker 线程最长 60s（30s 超时 × 401 重试
+    // 翻倍），且持 dsh 锁期间 executor 投递只能干等。
+    let dsh = state.dsh.clone();
+    let catalog = match tokio::task::spawn_blocking(move || {
+        let Ok(mut dsh) = dsh.lock() else {
+            return Err("dsh 锁中毒".to_string());
+        };
+        let now = crate::session_manager::SessionManager::now_ms();
+        let mut query = |method: &str| {
+            dsh.call_unary(method, Some(json!({})), now)
+                .and_then(|o| o.unwrap(method))
+                .map_err(|e| e.to_string())
+        };
+        query("session/modelCatalog").or_else(|_| query("session/models"))
+    })
+    .await
     {
-        Ok(v) => v,
-        Err(_) => match dsh
-            .call_unary("session/models", Some(json!({})), now)
-            .and_then(|o| o.unwrap("session/models"))
-        {
-            Ok(v) => v,
-            Err(e) => return denied(StatusCode::BAD_GATEWAY, &format!("模型目录查询失败：{e}")),
-        },
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return denied(StatusCode::BAD_GATEWAY, &format!("模型目录查询失败：{e}")),
+        Err(e) => {
+            return denied(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("目录查询任务失败：{e}"),
+            );
+        }
     };
     match serde_json::to_value(&catalog) {
         Ok(v) => ok_json(v),
