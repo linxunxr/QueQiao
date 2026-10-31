@@ -952,7 +952,9 @@ async fn run(setup: Setup) {
         },
     });
     // 白名单里的会话预注册（生产形状：allow 列表）；deny 黑名单一票否决
-    // （同 allow+deny 冲突时 deny 生效——Node allowed() 语义）。
+    // （同 allow+deny 冲突时 deny 生效——Node allowed() 语义）。注册后立即
+    // apply 持久 wakeConfig——AI 上次自主设置的触发条件真正进运行时判定
+    // （此前只落盘不生效）。
     for group in &cfg.allow.groups {
         let key = format!("group:{group}");
         if !cfg.conversation_allowed(&key) {
@@ -965,6 +967,13 @@ async fn run(setup: Setup) {
                 ..Default::default()
             },
         );
+        if let Some(wc) = social_arc
+            .lock()
+            .ok()
+            .and_then(|s| s.conversation(&key).map(|st| st.wake_config.clone()))
+        {
+            orchestrator.apply_wake_config(&key, &wc);
+        }
     }
     for user in &cfg.allow.private {
         let key = format!("private:{user}");
@@ -978,6 +987,13 @@ async fn run(setup: Setup) {
                 ..Default::default()
             },
         );
+        if let Some(wc) = social_arc
+            .lock()
+            .ok()
+            .and_then(|s| s.conversation(&key).map(|st| st.wake_config.clone()))
+        {
+            orchestrator.apply_wake_config(&key, &wc);
+        }
     }
 
     // ── DSH mux 事件流任务：信封 → BridgeEvent（回合生命周期回流决策）──────
@@ -1261,6 +1277,13 @@ async fn run(setup: Setup) {
                                 ..Default::default()
                             },
                         );
+                        if let Some(wc) = social_arc
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.conversation(&k).map(|st| st.wake_config.clone()))
+                        {
+                            orchestrator.apply_wake_config(&k, &wc);
+                        }
                         orchestrator.schedule_proactive_check(&k, now, &mut rng);
                         queqiao::logging::log(&format!("动态注册会话 {k}（allowAllWhenEmpty）"));
                     }
@@ -1466,6 +1489,15 @@ async fn run(setup: Setup) {
                         // 并按落盘后的最终值重排/取消有限潜水闹钟（5115）。
                         orchestrator.cancel_timer(&key, queqiao_core::action::TimerKind::ReplyCheck);
                         orchestrator.set_sleep_timer(&key, sleep_until, now);
+                        // 新 triggers 即时进运行时判定（此前只落盘不生效——
+                        // AI 改「触发：@/关键词」实际从不改变行为）。
+                        if let Some(wc) = social_arc
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.conversation(&key).map(|st| st.wake_config.clone()))
+                        {
+                            orchestrator.apply_wake_config(&key, &wc);
+                        }
                         match sleep_until {
                             Some(until) => {
                                 let remain = until.saturating_sub(now) / 1000;
@@ -1619,6 +1651,11 @@ async fn run(setup: Setup) {
                         let fresh = config_file.config().clone();
                         let mut cur = console_state.current.lock().unwrap();
                         if *cur != fresh {
+                            let wake_changed = queqiao::orchestrator::wake_recommend_fingerprint(
+                                &fresh.social_v2.wake,
+                            ) != queqiao::orchestrator::wake_recommend_fingerprint(
+                                &cfg.social_v2.wake,
+                            );
                             *cur = fresh.clone();
                             drop(cur);
                             // 运行循环消费的 cfg 同步换新——此前只更新
@@ -1627,6 +1664,39 @@ async fn run(setup: Setup) {
                             // 恒拒、需重启桥才生效（2026-10-31 真机踩过）。
                             cfg = fresh;
                             queqiao::logging::log("[config] 热更生效（UI 保存的配置已应用）");
+                            // 设置页唤醒推荐段变化 → 回写全部会话（管理员
+                            // 保存即接管：覆盖 AI 自主调整，重置为推荐模板；
+                            // speaker_ids 与计数类字段保留）。无关字段变化
+                            // （改个路径/开关）不触发、不打搅 AI 的自主配置。
+                            if wake_changed {
+                                let wcfg = cfg.social_v2.wake.clone();
+                                let mut n = 0;
+                                if let Ok(mut store) = social_arc.lock() {
+                                    for key in orchestrator.session_keys() {
+                                        let st = store.conversation_mut(&key);
+                                        let speakers =
+                                            std::mem::take(&mut st.wake_config.triggers.speaker_ids);
+                                        let kept = st.wake_config.clone();
+                                        let mut next =
+                                            queqiao::orchestrator::recommended_wake(&wcfg, speakers);
+                                        next.last_wake_at = kept.last_wake_at;
+                                        next.wake_count = kept.wake_count;
+                                        next.no_action_count = kept.no_action_count;
+                                        next.confirmed_at = kept.confirmed_at;
+                                        next.confirmed_by = kept.confirmed_by;
+                                        next.batch_window_ms = kept.batch_window_ms;
+                                        st.wake_config = next;
+                                        orchestrator.apply_wake_config(&key, &st.wake_config);
+                                        n += 1;
+                                    }
+                                    if n > 0 {
+                                        store.save();
+                                        queqiao::logging::log(&format!(
+                                            "[config] 唤醒推荐配置已回写 {n} 个会话（覆盖 AI 自主调整）"
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                 }

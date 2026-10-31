@@ -17,6 +17,48 @@ use queqiao_core::triggers::TriggerRules;
 /// 工具端点 → 主循环的调度请求（tools_api 无 Orchestrator 访问权，经
 /// unbounded mpsc 转交主循环排定时器；Node 版这些定时器直接挂在工具
 /// handler 里，Rust 的定时器轮在主循环所以走通道）。
+/// 设置页推荐配置 → 会话 wakeConfig 的重置模板（热更回写用）：模式/无限/
+/// 触发器/概率/关键词全取推荐值、清有限闹钟；speaker_ids 保留会话原值
+/// （AI 特设的指定成员唤醒不抹）；计数类字段（wakeCount 等）由调用方保留。
+pub fn recommended_wake(
+    w: &crate::config::WakeConfig,
+    speaker_ids: Vec<String>,
+) -> crate::state::WakeConfigState {
+    use crate::state::{WakeConfigState, WakeTriggers};
+    WakeConfigState {
+        mode: w.default_mode.clone(),
+        infinite: w.recommended_default_infinite,
+        sleep_until: None,
+        triggers: WakeTriggers {
+            at_mention: w.recommended_at_mention,
+            name_mention: w.recommended_name_mention,
+            question: w.recommended_question,
+            poke: w.recommended_poke,
+            any_message: false,
+            probability: w.recommended_probability,
+            keywords: w.recommended_keywords.clone(),
+            speaker_ids,
+        },
+        ..WakeConfigState::default()
+    }
+}
+
+/// wake 推荐段指纹（热更回写触发判定）：仅含影响会话回写的字段——
+/// 无关字段（hint/batch/额度）变化不触发全量重置（不打搅 AI 的自主调整）。
+pub fn wake_recommend_fingerprint(w: &crate::config::WakeConfig) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{:?}",
+        w.default_mode,
+        w.recommended_default_infinite,
+        w.recommended_at_mention,
+        w.recommended_name_mention,
+        w.recommended_question,
+        w.recommended_poke,
+        w.recommended_probability,
+        w.recommended_keywords,
+    )
+}
+
 #[derive(Debug, Clone)]
 pub enum SchedReq {
     /// AI 发消息成功 → 安排回复检查唤醒（已排不重置——连发时窗口从首条起算）。
@@ -158,6 +200,28 @@ impl Orchestrator {
         self.sessions
             .entry(key.to_owned())
             .or_insert_with(|| SessionRuntime::new(key, wake));
+    }
+
+    /// 持久 wakeConfig → 运行时触发规则（评估用的决策视图）。此前这条
+    /// 转换链整体缺失：注册时用近似 Default（@/名字/提问/拍拍全开、
+    /// 概率 0），AI 用 qq_set_wake_config 改的 triggers 只落盘不生效
+    /// （运行时判定与设置页/AI 配置三层不一致的深层根因，2026-10-31
+    /// 用户以「会话概要跟设置不一样」报障牵出）。
+    pub fn apply_wake_config(&mut self, key: &str, wc: &crate::state::WakeConfigState) {
+        if let Some(rt) = self.sessions.get_mut(key) {
+            let t = &wc.triggers;
+            rt.wake = TriggerRules {
+                at_mention: t.at_mention,
+                name_mention: t.name_mention,
+                any_message: t.any_message,
+                question: t.question,
+                poke: t.poke,
+                keywords: t.keywords.clone(),
+                speaker_ids: t.speaker_ids.clone(),
+                probability: t.probability,
+                self_nickname: rt.wake.self_nickname.clone(),
+            };
+        }
     }
 
     /// mux 断连（DSH 重启/网络抖动）：清全部会话的进行中回合态——
@@ -330,6 +394,67 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use queqiao_core::action::IncomingMessage;
+
+    /// 持久 wakeConfig → 运行时 TriggerRules 的断链修复（此前 AI 改触发器
+    /// 只落盘不生效）：apply 后判定规则必须逐字段反映会话配置。
+    #[test]
+    fn apply_wake_config_reaches_runtime() {
+        let mut o = Orchestrator::new(DecideRules::default());
+        o.ensure_session("group:1", TriggerRules::default());
+        let wc = crate::state::WakeConfigState {
+            mode: "diving".into(),
+            infinite: true,
+            sleep_until: None,
+            triggers: crate::state::WakeTriggers {
+                at_mention: false,
+                name_mention: false,
+                question: false,
+                poke: true,
+                any_message: false,
+                probability: 0.05,
+                keywords: vec!["小鲸鱼".into()],
+                speaker_ids: vec!["10001".into()],
+            },
+            ..crate::state::WakeConfigState::default()
+        };
+        o.apply_wake_config("group:1", &wc);
+        let rt = o.session("group:1").unwrap();
+        assert!(
+            !rt.wake.at_mention && !rt.wake.question,
+            "关闭的触发器不残留注册时的默认 true"
+        );
+        assert_eq!(rt.wake.keywords, vec!["小鲸鱼".to_owned()]);
+        assert_eq!(rt.wake.speaker_ids, vec!["10001".to_owned()]);
+        assert!((rt.wake.probability - 0.05).abs() < f64::EPSILON);
+    }
+
+    /// 推荐模板 + 指纹：模式/触发器/概率取推荐值、speaker_ids 保留；
+    /// 指纹只随回写相关字段变化（hint 等无关字段变化不触发全量重置）。
+    #[test]
+    fn recommended_wake_template_and_fingerprint() {
+        let mut w = crate::config::WakeConfig {
+            default_mode: "active".into(),
+            recommended_probability: 0.2,
+            recommended_at_mention: false,
+            ..crate::config::WakeConfig::default()
+        };
+        let tpl = recommended_wake(&w, vec!["10001".into()]);
+        assert_eq!(tpl.mode, "active");
+        assert!(!tpl.triggers.at_mention);
+        assert!((tpl.triggers.probability - 0.2).abs() < f64::EPSILON);
+        assert_eq!(
+            tpl.triggers.speaker_ids,
+            vec!["10001".to_owned()],
+            "AI 特设 speaker 保留"
+        );
+        assert!(tpl.sleep_until.is_none(), "新模板无闹钟");
+
+        let fp1 = wake_recommend_fingerprint(&w);
+        w.recommended_hint = "改个文案".into();
+        assert_eq!(wake_recommend_fingerprint(&w), fp1, "无关字段不影响指纹");
+        w.recommended_poke = !w.recommended_poke;
+        assert_ne!(wake_recommend_fingerprint(&w), fp1, "触发器变化改变指纹");
+    }
 
     fn msg(key: &str, text: &str, seq: u64) -> IncomingMessage {
         IncomingMessage {

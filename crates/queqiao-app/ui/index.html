@@ -307,7 +307,7 @@
   <section>
     <h2>二代仿真</h2>
     <div class="row">
-      <div class="field"><label>默认潜水模式（wake.defaultMode）</label><select id="f-wakeMode"><option value="diving">diving（潜水：按触发器唤醒）</option><option value="active">active（活跃：任何消息都回）</option></select><div class="hint">新会话的初始模式；AI 可随时用工具调整自己的唤醒条件</div></div>
+      <div class="field"><label>默认潜水模式（wake.defaultMode）</label><select id="f-wakeMode"><option value="diving">diving（潜水：按触发器唤醒）</option><option value="active">active（活跃：任何消息都回）</option></select><div class="hint">保存后立即回写全部会话（覆盖 AI 自主调整）；AI 之后仍可再用工具调整</div></div>
       <div class="field"><label>普通消息响应概率（0~1）</label><input id="f-wakeProb" type="number" min="0" max="1" step="0.05"><div class="hint">潜水模式下未被点名时，普通闲聊按此概率回应</div></div>
       <div class="field"><label>发送上限/分钟（send.maxSendPerMinute）</label><input id="f-sendMin" type="number" min="0"></div>
       <div class="field"><label>发送上限/小时（send.maxSendPerHour）</label><input id="f-sendHour" type="number" min="0"></div>
