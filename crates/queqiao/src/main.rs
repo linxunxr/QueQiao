@@ -808,7 +808,7 @@ fn release_slang_pipe(
 }
 
 async fn run(setup: Setup) {
-    let cfg = setup.cfg;
+    let mut cfg = setup.cfg;
     let ws_url = setup.ws_url;
     let dsh_arc = setup.dsh;
     let sessions_arc = setup.sessions;
@@ -1619,8 +1619,13 @@ async fn run(setup: Setup) {
                         let fresh = config_file.config().clone();
                         let mut cur = console_state.current.lock().unwrap();
                         if *cur != fresh {
-                            *cur = fresh;
+                            *cur = fresh.clone();
                             drop(cur);
+                            // 运行循环消费的 cfg 同步换新——此前只更新
+                            // console_state（UI 可见），conversation_allowed
+                            // 等判定仍用启动快照：UI 加白名单后动态注册
+                            // 恒拒、需重启桥才生效（2026-10-31 真机踩过）。
+                            cfg = fresh;
                             queqiao::logging::log("[config] 热更生效（UI 保存的配置已应用）");
                         }
                     }
