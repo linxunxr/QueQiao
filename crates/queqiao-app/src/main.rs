@@ -451,6 +451,18 @@ fn read_config_json(home: &std::path::Path) -> Result<serde_json::Value, String>
         .map_err(|e| format!("config.json 非法 JSON：{e}"))
 }
 
+/// 控制台令牌直读：桥启用 API 鉴权后（consoleToken 自动生成），UI 的桥
+/// fetch 须带 x-console-token——令牌源就是 config.json（与 queqiao-mcp 的
+/// load_section 同源）。UI 首次加载与 401 失配时调用。
+#[tauri::command]
+fn console_token_read(state: tauri::State<'_, BridgeState>) -> Result<String, String> {
+    let v = read_config_json(&state.home)?;
+    Ok(v.get("consoleToken")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
 /// 桥离线时人格下拉直读：roles/*.md 文件名 + current-role.json——返回
 /// 形状与 GET /api/roles 完全一致（UI 降级路径无感）。
 #[tauri::command]
@@ -713,6 +725,7 @@ fn main() {
             components_status,
             config_read_direct,
             roles_read_direct,
+            console_token_read,
             start_dsh,
             open_snowluma_dir,
             migrate_from_node,

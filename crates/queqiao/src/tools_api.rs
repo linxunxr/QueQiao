@@ -2642,24 +2642,13 @@ async fn tablet_open_url_ep(
 }
 
 /// 控制台专用校验（tokens_summary 同款令牌门 + agent token 显式拒绝——
-/// MCP 工具同时带两令牌，仅控制台令牌挡不住 AI）。
+/// MCP 工具同时带两令牌，仅控制台令牌挡不住 AI）。判定本体在
+/// console::console_token_check（与 /api/config 等控制台端点共用）。
 fn console_only(
     state: &ToolApiState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    if headers.contains_key("x-agent-token") {
-        return Err(denied(StatusCode::FORBIDDEN, "该接口仅控制台可用"));
-    }
-    if !state.cfg.console_token.is_empty() {
-        let auth = headers
-            .get("x-console-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        if auth != state.cfg.console_token {
-            return Err(denied(StatusCode::UNAUTHORIZED, "该接口仅控制台可用"));
-        }
-    }
-    Ok(())
+    crate::console::console_token_check(&state.cfg.console_token, headers)
 }
 
 /// qq_speak：文字转语音直发（SAPI 合成 → record 段）。语音默认关（与 Node

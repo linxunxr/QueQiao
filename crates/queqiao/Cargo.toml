@@ -23,6 +23,8 @@ base64 = { workspace = true }
 regex = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+# consoleToken 密码学随机生成（lock 内已有 0.3 传递实例，无新增编译单元）。
+getrandom = "0.3"
 
 [dev-dependencies]
 # 集成测试用 oneshot 直打路由（进程内验证工具面端点，不占端口）。

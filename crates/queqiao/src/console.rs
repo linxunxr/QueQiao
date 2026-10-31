@@ -5,8 +5,10 @@
 //! 首次运行（config.json 不存在）进入**设置向导模式**：起页面 + 自动开浏览器，
 //! 保存完成即继续正常启动。
 //!
-//! 鉴权：本服务只绑 127.0.0.1（本地单用户）；`consoleToken` 非空时中间件校验
-//! `x-console-token`（tools_api 既有语义），留空 = 本地免鉴权。
+//! 鉴权：本服务只绑 127.0.0.1（本地单用户）；`consoleToken` 非空时
+//! [`console_token_check`] 校验 `x-console-token`（tools_api 既有语义，启动时
+//! 缺位自动生成——见 `Config::ensure_console_token`）。向导模式令牌为空 =
+//! 免鉴权（首次配置的唯一写入路径不能被锁死）。
 
 use std::path::PathBuf;
 
@@ -15,7 +17,7 @@ use std::os::windows::process::CommandExt;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -35,6 +37,42 @@ pub struct ConsoleState {
     pub current: Mutex<Config>,
     /// 首次设置模式（config.json 尚不存在；保存后置 false）。
     pub first_run: std::sync::atomic::AtomicBool,
+}
+
+impl ConsoleState {
+    /// 守卫用令牌（读活值——热更改 consoleToken 即时生效，与 socialV2
+    /// 前缀中间件同语义；向导模式 config 全默认 = 空 = 放行）。
+    fn token_now(&self) -> String {
+        self.current.lock().unwrap().console_token.clone()
+    }
+}
+
+/// 控制台令牌校验（tools_api `console_only` 与本模块三端点共用的公共判定）：
+/// 带 agent 令牌头一律 403（AI 经 MCP 也带 x-console-token，仅拒 at 才挡得住
+/// AI 读写配置）；consoleToken 非空且不匹配 401；留空放行。
+pub fn console_token_check(
+    token: &str,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if headers.contains_key("x-agent-token") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "ok": false, "error": "该接口仅控制台可用" })),
+        ));
+    }
+    if !token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != token {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "ok": false, "error": "该接口仅控制台可用" })),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 深度合并：对象递归、标量/数组覆盖（null 视为「未提供」跳过，便于 UI 局部提交）。
@@ -62,8 +100,12 @@ async fn page() -> Html<&'static str> {
 /// 启动期日志（探活/OneBot/WS 连接）必错过——总览日志区需要历史回放。
 async fn logs_tail(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::BTreeMap<String, String>>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = console_token_check(&state.token_now(), &headers) {
+        return e;
+    }
     let n: usize = q
         .get("n")
         .and_then(|v| v.parse().ok())
@@ -81,10 +123,19 @@ async fn logs_tail(
             tail.into_iter().map(str::to_owned).collect()
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "ok": true, "value": { "lines": lines } }))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "value": { "lines": lines } })),
+    )
 }
 
-async fn get_config(State(state): State<Arc<ConsoleState>>) -> Json<Value> {
+async fn get_config(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    if let Err(e) = console_token_check(&state.token_now(), &headers) {
+        return e;
+    }
     let cur = state.current.lock().unwrap().clone();
     let mut v = serde_json::to_value(&cur).unwrap_or(Value::Null);
     if let Value::Object(map) = &mut v {
@@ -97,13 +148,17 @@ async fn get_config(State(state): State<Arc<ConsoleState>>) -> Json<Value> {
                 .into(),
         );
     }
-    Json(v)
+    (StatusCode::OK, Json(v))
 }
 
 async fn put_config(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    if let Err(e) = console_token_check(&state.token_now(), &headers) {
+        return e;
+    }
     let reply = |ok: bool, error: Option<String>, restart_hint: bool| {
         (
             StatusCode::OK,
@@ -164,6 +219,7 @@ pub fn open_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     /// 深度合并语义：对象递归、null 跳过、标量覆盖。
     #[test]
@@ -178,5 +234,38 @@ mod tests {
             serde_json::json!({ "a": 9, "b": { "x": 10, "y": 2, "z": 3 }, "keep": true })
         );
         // null 不清字段、未知键不覆盖已存在结构。
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    /// 分支：非空令牌无头/失配 401、匹配放行、agent 令牌头一律 403
+    /// （MCP 双令牌都带，仅拒 at 才挡得住 AI）；空令牌放行（向导模式，
+    /// agent 头仍拒——与 tools_api console_only 原语义一致）。
+    #[test]
+    fn console_token_check_branches() {
+        assert!(console_token_check("", &headers(&[])).is_ok());
+        let (code, _) = console_token_check("tok", &headers(&[])).unwrap_err();
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let (code, _) =
+            console_token_check("tok", &headers(&[("x-console-token", "wrong")])).unwrap_err();
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        assert!(console_token_check("tok", &headers(&[("x-console-token", "tok")])).is_ok());
+        let (code, _) = console_token_check(
+            "tok",
+            &headers(&[("x-agent-token", "a"), ("x-console-token", "tok")]),
+        )
+        .unwrap_err();
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        let (code, _) = console_token_check("", &headers(&[("x-agent-token", "a")])).unwrap_err();
+        assert_eq!(code, StatusCode::FORBIDDEN);
     }
 }

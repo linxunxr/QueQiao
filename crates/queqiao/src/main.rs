@@ -267,9 +267,12 @@ fn main() {
             }
         }
     };
-    let cfg = cfg.config().clone();
+    let mut cfg = cfg.config().clone();
     queqiao::logging::init(&queqiao::paths::queqiao_home());
     queqiao::logging::install_panic_hook();
+    // 默认安全（向导完成/正常启动两分支的共同后置）：consoleToken 缺位即
+    // 生成并写回——控制台 API 鉴权不再依赖用户手填。
+    cfg.ensure_console_token(&cfg_path);
     println!(
         "{} {} — 鹊桥主程序（M4 编排：OneBot 事件 → core 决策 → 动作日志）",
         queqiao_core::APP_NAME,

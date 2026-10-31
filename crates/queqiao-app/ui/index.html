@@ -406,6 +406,53 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 浏览器直开控制台页时无 Tauri 桥——判空防脚本中断（Tauri-only 调用全部经 T）。
 const T = window.__TAURI__ || null;
 
+// ── 控制台令牌（桥 API 鉴权）───────────────────────────────────────────────
+// 桥启动时 consoleToken 缺位即自动生成（config.json），全部桥 fetch 须带
+// x-console-token。Tauri 模式从 config.json 直读（console_token_read，与
+// queqiao-mcp 同源）；浏览器直开模式 401 时 prompt 输入。localStorage 缓存。
+let _consoleToken = localStorage.getItem('consoleToken') || '';
+async function refreshConsoleToken() {
+  if (!T) return;
+  try { _consoleToken = await T.core.invoke('console_token_read') || ''; } catch (e) { /* 桥离线/文件缺失：保留现值 */ }
+  if (_consoleToken) localStorage.setItem('consoleToken', _consoleToken);
+}
+// 401 自愈单飞：首屏多个并发请求同时 401 时共享一次取令牌（浏览器模式
+// 只弹一个 prompt，防风暴）。
+let _tokenHeal = null;
+function healTokenOnce() {
+  if (!_tokenHeal) {
+    _tokenHeal = (async () => {
+      if (T) { await refreshConsoleToken(); }
+      else {
+        const t = prompt('控制台访问令牌（config.json 的 consoleToken）：');
+        if (t) { _consoleToken = t.trim(); localStorage.setItem('consoleToken', _consoleToken); }
+      }
+    })().finally(() => { _tokenHeal = null; });
+  }
+  return _tokenHeal;
+}
+// 统一桥 fetch：注入令牌头；401 自愈——对比「本请求实际携带的令牌」与全局
+// 现值：在途旧令牌响应到达时令牌已被别处刷新（并发窗口）则直接带新令牌
+// 重试、不再取令牌；否则单飞 heal 一轮（Tauri 重读/浏览器 prompt），令牌
+// 有变化才重试（用户取消不空转），仍 401 由上层 catch 报错。
+async function apiFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (_consoleToken) opts.headers['x-console-token'] = _consoleToken;
+  let r = await fetch(url, opts);
+  if (r.status === 401) {
+    const used = opts.headers['x-console-token'] || '';
+    if (!(_consoleToken && _consoleToken !== used)) await healTokenOnce();
+    if (_consoleToken && _consoleToken !== used) {
+      opts.headers['x-console-token'] = _consoleToken;
+      r = await fetch(url, opts);
+    }
+  }
+  return r;
+}
+// Tauri 模式初始化即取一次令牌（首屏 load 免一轮 401 往返）。
+if (T) refreshConsoleToken();
+
 // ── 页签 ────────────────────────────────────────────────────────────────────
 function showTab(name) {
   for (const n of ['overview', 'review', 'settings', 'slang']) {
@@ -508,7 +555,7 @@ async function refreshPaused() {
   const btn = $('btnPauseAi');
   if (!bridgeOnline) { btn.style.display = 'none'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/paused');
+    const r = await apiFetch(BRIDGE + '/api/socialV2/paused');
     const res = await r.json();
     aiPaused = !!(res.value && res.value.paused);
     btn.style.display = '';
@@ -517,7 +564,7 @@ async function refreshPaused() {
 }
 async function togglePauseAi() {
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/set-paused', {
+    const r = await apiFetch(BRIDGE + '/api/socialV2/set-paused', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ paused: !aiPaused }),
     });
@@ -566,7 +613,7 @@ if (T) T.event.listen('bridge-state', () => refreshComponents());
 // 之后事件继续增量追加，与文件双写内容重叠无碍）。
 async function replayLog() {
   try {
-    const r = await fetch(BRIDGE + '/api/logs/tail?n=150');
+    const r = await apiFetch(BRIDGE + '/api/logs/tail?n=150');
     const res = await r.json();
     const lines = (res.value && res.value.lines) || [];
     if (!lines.length) return;
@@ -583,7 +630,7 @@ async function refreshSessions() {
   const body = $('sessionsBody');
   if (!bridgeOnline) { body.innerHTML = '<span class="hint">桥未运行——一键启动后这里显示各会话未读。</span>'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/conversations');
+    const r = await apiFetch(BRIDGE + '/api/socialV2/conversations');
     const res = await r.json();
     const ss = (res.value && res.value.sessions) || [];
     if (!ss.length) { body.innerHTML = '<div class="empty"><div class="t">暂无会话</div><div class="s">AI 收到白名单内的消息后会自动建立会话</div></div>'; return; }
@@ -591,7 +638,7 @@ async function refreshSessions() {
       ss.map(s => `<tr><td>${s.key}</td><td>${s.unread}</td><td>${s.recent}</td><td>${s.wakeMode}</td></tr>`).join('') +
       '</table>';
   } catch (e) {
-    body.innerHTML = '<span class="hint">桥在线但状态不可读（若设置了 consoleToken，需带令牌访问）。</span>';
+    body.innerHTML = '<span class="hint">桥在线但状态不可读（令牌失配——重新打开页面或检查 config.json 的 consoleToken）。</span>';
   }
 }
 
@@ -601,7 +648,7 @@ const chipLists = { groups: [], private: [] };
 
 async function load() {
   let raw;
-  try { const r = await fetch(BRIDGE + '/api/config'); raw = await r.json(); }
+  try { const r = await apiFetch(BRIDGE + '/api/config'); raw = await r.json(); }
   catch (e) {
     // 桥 HTTP 不可达 → Tauri 直读 config.json（同一份文件——设置页的
     // 数据源本就不必依赖桥进程在线）。浏览器直开模式（无 Tauri）保持
@@ -713,7 +760,7 @@ async function save() {
     // f-json 为空/坏通常是初始化时桥未在线（load 没拉到配置基底）——现拉一次重建基底；
     // 不回填表单（用户已填的值随后逐字段覆盖上来，不丢），拉不到才真正失败。
     try {
-      const r0 = await fetch(BRIDGE + '/api/config'); const raw0 = await r0.json();
+      const r0 = await apiFetch(BRIDGE + '/api/config'); const raw0 = await r0.json();
       cfg = raw0;
       document.getElementById('f-json').value = JSON.stringify(stripUi(raw0), null, 2);
       body = JSON.parse(document.getElementById('f-json').value);
@@ -763,7 +810,7 @@ async function save() {
   body.socialV2.tools.sendVoice = document.getElementById('f-voice').value === 'true';
   body.socialV2.sticker = body.socialV2.sticker || {};
   body.socialV2.sticker.enabled = document.getElementById('f-sticker').value === 'true';
-  const r = await fetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await apiFetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const res = await r.json();
   if (res.ok) {
     toast('已保存并生效', true); status.textContent = '已保存 · ' + new Date().toLocaleTimeString();
@@ -774,7 +821,7 @@ async function save() {
 
 async function exportDiag() {
   try {
-    const r = await fetch(BRIDGE + '/api/diagnostics');
+    const r = await apiFetch(BRIDGE + '/api/diagnostics');
     const res = await r.json();
     const blob = new Blob([JSON.stringify(res.value || res, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -789,7 +836,7 @@ let dshCatalog = null;
 async function loadCatalog() {
   const p = $('f-dshProvider'), m = $('f-dshModel');
   try {
-    const r = await fetch(BRIDGE + '/api/dsh/catalog');
+    const r = await apiFetch(BRIDGE + '/api/dsh/catalog');
     const res = await r.json();
     dshCatalog = res.value || null;
     const groups = (dshCatalog && dshCatalog.groups) || [];
@@ -825,7 +872,7 @@ function fillModels() {
 }
 async function loadRoles() {
   try {
-    const r = await fetch(BRIDGE + '/api/roles');
+    const r = await apiFetch(BRIDGE + '/api/roles');
     const res = await r.json();
     const v = res.value || {};
     const cur = (v.current && v.current.role) || '';
@@ -849,7 +896,7 @@ async function switchRole() {
   const role = document.getElementById('f-role').value;
   if (!role) { toast('先选择一个人格', false); return; }
   try {
-    const r = await fetch(BRIDGE + '/api/role', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role }) });
+    const r = await apiFetch(BRIDGE + '/api/role', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role }) });
     const res = await r.json();
     if (res.ok) { toast('已切换为 ' + role + '（下一条消息生效）', true); loadRoles(); }
     else { toast(res.error || '切换失败', false); }
@@ -862,7 +909,7 @@ async function editRole() {
   const role = $('f-role').value;
   if (!role) { toast('先选择一个人格', false); return; }
   try {
-    const r = await fetch(BRIDGE + '/api/role/card?name=' + encodeURIComponent(role));
+    const r = await apiFetch(BRIDGE + '/api/role/card?name=' + encodeURIComponent(role));
     const res = await r.json();
     if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
     roleEditExisting = true;
@@ -892,14 +939,14 @@ async function saveRoleCard() {
   if (!roleEditExisting) {
     // 新建撞名 → 后端 PUT 是覆盖语义，前端先确认（编辑已有卡本身就是覆盖，不问）。
     try {
-      const r = await fetch(BRIDGE + '/api/roles');
+      const r = await apiFetch(BRIDGE + '/api/roles');
       const res = await r.json();
       if ((res.value.roles || []).includes(name)
         && !(await ask('已存在同名人格卡「' + name + '」，覆盖它？', '覆盖', true))) return;
     } catch (e) { /* 列表拉不到就交给后端覆盖 */ }
   }
   try {
-    const r = await fetch(BRIDGE + '/api/role/card', {
+    const r = await apiFetch(BRIDGE + '/api/role/card', {
       method: 'PUT', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name, content: $('re-content').value })
     });
@@ -915,7 +962,7 @@ async function delRoleCard() {
   if (!name || !roleEditExisting) return;
   if (!(await ask('确认删除人格卡「' + name + '」？文件将从 roles/ 目录移除。', '删除', true))) return;
   try {
-    const r = await fetch(BRIDGE + '/api/role/card?name=' + encodeURIComponent(name), { method: 'DELETE' });
+    const r = await apiFetch(BRIDGE + '/api/role/card?name=' + encodeURIComponent(name), { method: 'DELETE' });
     const res = await r.json();
     if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
     toast('已删除 ' + name, true);
@@ -1040,7 +1087,7 @@ let turnsKey = '';
 async function showTurns(key) {
   turnsKey = key;
   try {
-    const r = await fetch(BRIDGE + '/api/tokens/turns?key=' + encodeURIComponent(key) + '&limit=50');
+    const r = await apiFetch(BRIDGE + '/api/tokens/turns?key=' + encodeURIComponent(key) + '&limit=50');
     const res = await r.json();
     const v = res.value || {};
     const rows = (v.turns || []).map(t => `<tr><td>${new Date(t.tMs).toLocaleString('zh-CN', { hour12: false })}</td><td>${t.model || '-'}</td><td>${t.cacheMiss + t.cacheWrite}</td><td>${t.output}</td><td>¥${t.cost.toFixed(4)}</td></tr>`).join('');
@@ -1089,7 +1136,7 @@ async function refreshDiary() {
   const sum = $('diarySum'), body = $('diaryBody');
   if (!bridgeOnline) { sum.textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示 AI 日记</div></div>'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/diary-recent?days=90');
+    const r = await apiFetch(BRIDGE + '/api/socialV2/diary-recent?days=90');
     const res = await r.json();
     const list = (res.value && res.value.diaries) || [];
     if (!list.length) { sum.textContent = '暂无'; body.innerHTML = '<div class="empty"><div class="t">还没写过日记</div><div class="s">AI 每晚定点写一篇（设置页行为区可开关）</div></div>'; return; }
@@ -1108,7 +1155,7 @@ async function refreshFeedback() {
   const sum = $('feedbackSum'), body = $('feedbackBody');
   if (!bridgeOnline) { sum.textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示 AI 反馈</div></div>'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/feedback');
+    const r = await apiFetch(BRIDGE + '/api/socialV2/feedback');
     const res = await r.json();
     const list = (res.value && res.value.entries) || [];
     if (!list.length) { sum.textContent = '暂无'; body.innerHTML = '<div class="empty"><div class="t">还没有反馈</div><div class="s">AI 遇到问题时会用 qq_report_feedback 上报到这里</div></div>'; return; }
@@ -1124,7 +1171,7 @@ async function refreshFeedback() {
 async function clearFeedback() {
   if (!(await ask('确认清空全部 AI 反馈记录？此操作不可恢复。', '清空', true))) return;
   try {
-    const r = await fetch(BRIDGE + '/api/socialV2/feedback/clear', { method: 'POST' });
+    const r = await apiFetch(BRIDGE + '/api/socialV2/feedback/clear', { method: 'POST' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     toast('AI 反馈已清空', true); refreshFeedback();
   } catch (e) { toast('清空失败：' + e.message, false); }
@@ -1139,7 +1186,7 @@ async function refreshSlang() {
   const list = $('slangList');
   if (!bridgeOnline) { list.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后可管理黑话词库</div></div>'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/slang');
+    const r = await apiFetch(BRIDGE + '/api/slang');
     const res = await r.json();
     slangAll = (res.value && res.value.entries) || [];
     const cfg = (res.value && res.value.config) || {};
@@ -1209,7 +1256,7 @@ function renderSlangList() {
 }
 
 async function slangCall(path, method, body) {
-  const r = await fetch(BRIDGE + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const r = await apiFetch(BRIDGE + path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const res = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(res.error || ('HTTP ' + r.status));
   return res.value || {};
@@ -1295,7 +1342,7 @@ async function saveSlangEdit() {
 
 async function saveSlangConfig() {
   try {
-    const r = await fetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ slang: { enabled: $('slangEnabled').checked, injectMax: Number($('slangInjectMax').value) || 8 } }) });
+    const r = await apiFetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ slang: { enabled: $('slangEnabled').checked, injectMax: Number($('slangInjectMax').value) || 8 } }) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     toast('黑话参数已保存', true);
   } catch (e) { toast('保存失败：' + e.message, false); }
@@ -1318,7 +1365,7 @@ async function refreshBind(scrape) {
   const sum = $('bindSum'), state = $('bindState');
   if (!bridgeOnline) { sum.textContent = ''; state.textContent = '桥未运行——启动后可绑定账号'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/browser/bind-status?site=xiaoheihe' + (scrape ? '&scrape=1' : ''));
+    const r = await apiFetch(BRIDGE + '/api/browser/bind-status?site=xiaoheihe' + (scrape ? '&scrape=1' : ''));
     const res = await r.json();
     const v = res.value || {};
     if (v.enabled === false) { sum.textContent = '未启用'; state.textContent = '专属浏览器未开启——设置页「行为」区开启后可绑定'; return; }
@@ -1345,7 +1392,7 @@ async function refreshBind(scrape) {
 }
 async function bindSite() {
   try {
-    const r = await fetch(BRIDGE + '/api/browser/bind', {
+    const r = await apiFetch(BRIDGE + '/api/browser/bind', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ site: 'xiaoheihe' })
     });
@@ -1367,7 +1414,7 @@ async function bindSite() {
 }
 async function openProfile() {
   try {
-    const r = await fetch(BRIDGE + '/api/browser/bind', {
+    const r = await apiFetch(BRIDGE + '/api/browser/bind', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ site: 'xiaoheihe', url: 'https://www.xiaoheihe.cn/user' })
     });
@@ -1379,7 +1426,7 @@ async function openProfile() {
 async function unbindSite() {
   if (!(await ask('确认解绑小黑盒？该站登录态将被清除（其他站点不受影响）。', '解绑', true))) return;
   try {
-    const r = await fetch(BRIDGE + '/api/browser/unbind', {
+    const r = await apiFetch(BRIDGE + '/api/browser/unbind', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ site: 'xiaoheihe' })
     });
@@ -1397,7 +1444,7 @@ async function refreshCost() {
   const body = $('costBody');
   if (!bridgeOnline) { document.getElementById('costSum').textContent = ''; body.innerHTML = '<div class="empty"><div class="t">桥未运行</div><div class="s">启动后显示累计花费</div></div>'; return; }
   try {
-    const r = await fetch(BRIDGE + '/api/tokens/summary');
+    const r = await apiFetch(BRIDGE + '/api/tokens/summary');
     const res = await r.json();
     const v = res.value || {};
     const sumEl = document.getElementById('costSum');
@@ -1407,7 +1454,7 @@ async function refreshCost() {
     const est = v.estimatedRows ? `（${v.estimatedRows} 行按兜底价估算）` : '';
     let day24 = '';
     try {
-      const r2 = await fetch(BRIDGE + '/api/tokens/series?hours=24&buckets=24');
+      const r2 = await apiFetch(BRIDGE + '/api/tokens/series?hours=24&buckets=24');
       const res2 = await r2.json();
       const b = (res2.value || []);
       const c24 = b.reduce((s, x) => s + (x.cost || 0), 0);

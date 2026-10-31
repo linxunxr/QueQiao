@@ -9,6 +9,12 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [未发布]
+
+### 新增
+
+- **控制台 API 鉴权补全——/api/config 与 /api/logs/tail 此前零守卫（v0.4.8 起记录的缺口）**：GET /api/config 可读全部配置、PUT 可改 ownerQQ/白名单，且 CORS 全路由放行意味着用户浏览器里的任意网页可跨域读——与 v0.4.16 防注入想堵的「接管控制台」同款后果，攻击者从 AI 浏览器换成本机任意进程/恶意网页。三层修复：①`consoleToken` 缺位时启动自动生成密码学随机令牌（24 字节 → 48 hex）并写回 config.json——写 config 而非独立文件，保住 queqiao-mcp 从 config.json 读令牌的既有链（Node 版存 state/console-token 的做法在这里会断 MCP）；②守卫判定抽公共函数 `console_token_check`（agent 令牌头一律 403——MCP 双令牌都带，仅拒 at 才挡得住 AI 经工具读写配置；令牌非空失配 401；读活值热更即时生效），/api/config GET/PUT 与 /api/logs/tail 三端点接入，tools_api `console_only` 同源复用；③UI 全部桥 fetch（29 处）统一经 `apiFetch` 注入令牌——Tauri 模式新增 `console_token_read` 命令直读 config.json（与 MCP 同源），浏览器直开模式 401 时 prompt 输入，localStorage 缓存；401 自愈单飞（并发 401 只弹一次 prompt、在途旧令牌响应直接带新令牌重试——playwright 实测暴露并修复的 prompt 风暴）。向导模式令牌为空天然放行（首次配置的唯一写入路径不被锁死）；页面壳 GET / 不鉴权（无敏感数据）。**升级后需重启 DSH 拉起新 MCP**——存量 MCP 进程启动时读到的令牌为空，不重启则工具调用全部 401（v0.4.15 同款发版须知）。
+
 ## [0.4.17] - 2026-10-31
 
 ### 修复

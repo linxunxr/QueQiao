@@ -1022,6 +1022,32 @@ impl Config {
             .map(|(k, v)| (k.clone(), (v.off.cache_hit, v.off.cache_miss, v.off.output)))
             .collect()
     }
+
+    /// 默认安全：consoleToken 缺位时生成密码学随机令牌（24 字节 → 48 hex）
+    /// 并写回 config.json。写 config 而非独立文件——queqiao-mcp 启动时从
+    /// config.json 读它作为 x-console-token 来源（Node 版存 state/console-token
+    /// 的做法在这里会断 MCP 令牌链）。非空（用户手填）不覆盖；熵源失败或写盘
+    /// 失败仅告警放行（下次启动重试）——令牌本次运行仍在内存生效。
+    pub fn ensure_console_token(&mut self, path: &Path) -> bool {
+        if !self.console_token.is_empty() {
+            return false;
+        }
+        let mut buf = [0u8; 24];
+        if getrandom::fill(&mut buf).is_err() {
+            crate::logging::log(
+                "consoleToken 生成失败（系统熵源不可用）——控制台保持免鉴权，下次启动重试",
+            );
+            return false;
+        }
+        self.console_token = buf.iter().map(|b| format!("{b:02x}")).collect();
+        let wrote = crate::state::atomic_write_json(path, &self.to_json_text()).is_ok();
+        crate::logging::log(if wrote {
+            "consoleToken 缺位，已自动生成并写回 config.json（控制台 API 鉴权启用；MCP 需重启读取）"
+        } else {
+            "consoleToken 已生成但写回 config.json 失败——本次运行鉴权生效，MCP 令牌链待写盘成功"
+        });
+        wrote
+    }
 }
 
 // ── 文件层：mtime 热更 ───────────────────────────────────────────────────────
@@ -1122,6 +1148,43 @@ mod tests {
         );
         assert_eq!(cfg.social_v2.send.max_message_chars, 500, "姊妹节不受影响");
         assert_eq!(cfg.dsh.model, "", "未配置的字符串默认空");
+    }
+
+    /// consoleToken 自动生成：缺位生成 48 hex 并写回（重载可读回、非默认值、
+    /// 非空不覆盖）。
+    #[test]
+    fn ensure_console_token_generates_and_preserves() {
+        let dir = std::env::temp_dir().join(format!("queqiao-ct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        // 缺位：生成 + 写回，48 hex。
+        let mut cfg = Config::default();
+        assert!(cfg.ensure_console_token(&path));
+        assert_eq!(cfg.console_token.len(), 48);
+        assert!(cfg.console_token.chars().all(|c| c.is_ascii_hexdigit()));
+        // 写回的是完整可解析配置，且令牌可读回。
+        let reloaded = Config::from_json_text(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reloaded.console_token, cfg.console_token);
+
+        // 非空（用户手填）：不覆盖、不写盘。
+        let mut manual = Config {
+            console_token: "user-token".into(),
+            ..Default::default()
+        };
+        assert!(!manual.ensure_console_token(&path));
+        assert_eq!(manual.console_token, "user-token");
+        let after = Config::from_json_text(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after.console_token, cfg.console_token, "手填不触盘");
+
+        // 路径不可写（父级是文件——atomic_write_json 会自动建目录，须用
+        // 真写不进的路径）：内存令牌仍生效，返回 false 不 panic。
+        let mut bad = Config::default();
+        assert!(!bad.ensure_console_token(&path.join("sub").join("config.json")));
+        assert_eq!(bad.console_token.len(), 48, "令牌已生成仅写盘失败");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ownerQQ：数字/字符串/空；非法值显式报错。
