@@ -9,7 +9,7 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
-## [未发布]
+## [0.4.18] - 2026-10-31
 
 ### 变更
 
@@ -18,6 +18,8 @@
 ### 修复
 
 - **主循环卡死风险四连修（2026-10-31 卡死事故的超时审计）**：探索证实主循环存在多条无上限阻塞路径，任一触发即全桥停摆（配合本批心跳观测，复发时可定位到段）。①**投递总帽 180s**——主循环 5 处 `executor.execute` 调用统一走 `execute_capped`：稳态单次投递 30s 封顶，但新会话/重建链串联多次 HTTP（401 重试翻倍）无总帽即卡死病灶；超时放弃本轮剩余动作（后台投递自然完成，回复可能迟到不丢），主循环恢复推进，`[stall]` 日志定位。②**更新下载出主循环**——`update_rx` 分支原来内联 await 下载（单次 300s 超时 × 主备源 3+3 重试最坏半小时，期间 diary/热更/消息全停），改独立任务 + 回报通道（slang_research 同模式），下载段 in-flight 打点（health 可见）。③**dsh_catalog 解放 worker**——async handler 里直接跑 reqwest blocking（最坏 60s）占死 runtime worker 线程且持 dsh 锁令 executor 投递干等，改 `spawn_blocking`。④**WS 双侧超时**——OneBot 事件流新增 `recv_event_keepalive`（空闲 120s 主动 ping 探活、30s 无回音断定半开走既有重连退避——消灭 NAT 超时/断网无 close 帧时 recv 永久 pending 的「桥活着但收不到任何消息且零日志」）；DSH mux `send_text` 包 30s 写超时（对端停滞/缓冲满时 sink 发送可无限挂起，MuxRunner 静默）。
+- **白名单热更不生效——运行循环 cfg 是启动快照（370c19b）**：设置页加群/私聊保存后 config.json 已更新，但主循环持有的 `cfg` 是启动时克隆，`conversation_allowed` 动态注册判定一直用旧值——UI 加了白名单仍须重启桥才生效（v0.4.17 排障坐实：群消息按旧空名单拒收）。修法：热更检测到配置变化时同步替换主循环持有的 cfg 快照。
+- **持久 wakeConfig 从未进运行时判定（063a875）**：`wakeConfig.triggers` 只落盘、从不转换进运行时 TriggerRules（注册用近似默认值：@/名字/提问/拍拍全开概率 0）——AI 用 qq_set_wake_config 改的触发器只保存不生效。修法：`orchestrator.apply_wake_config` 补通转换链（接线启动预注册/AI 改配置/动态注册三处）+ 设置页推荐段热更即回写全部会话（推荐模板重置、speaker_ids 与计数保留）。
 
 ### 新增
 
