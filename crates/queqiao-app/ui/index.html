@@ -603,14 +603,25 @@ function setMigrateState() {
   document.getElementById('migrateNote').textContent = done ? '已完成' : '未迁移';
   if (done) document.getElementById('migrateBox').removeAttribute('open');
 }
+// 日志区「新的在最上」：看日志的主场景是「桥现在怎么样」，最新行固定
+// 可见、无需滚动；往下读即往回看因果（更早的行在下）。超过 500 行裁掉
+// 尾部（最老），防长跑 DOM 无限增长。
+const LOG_MAX_LINES = 500;
+function renderLogTop(l, line) {
+  l.textContent = l.textContent ? line + '\n' + l.textContent : line;
+  const n = l.textContent.split('\n').length;
+  if (n > LOG_MAX_LINES) {
+    l.textContent = l.textContent.split('\n').slice(0, LOG_MAX_LINES).join('\n');
+  }
+}
 if (T) T.event.listen('bridge-log', e => {
-  const l = $('log'); l.textContent += (l.textContent ? '\n' : '') + e.payload;
-  l.scrollTop = l.scrollHeight;
+  renderLogTop($('log'), e.payload);
 });
 if (T) T.event.listen('bridge-state', () => refreshComponents());
 // 日志回放：bridge-log 事件是增量流，桥先于 UI 启动、启动期日志必错过——
 // 初始化与桥上线翻转时从桥拉尾部一次补齐（tail 是权威近期视图，直接替换；
-// 之后事件继续增量追加，与文件双写内容重叠无碍）。
+// 之后事件继续增量追加，与文件双写内容重叠无碍）。桥端返回时间序（老→新），
+// 这里倒序渲染成「新的在最上」。
 async function replayLog() {
   try {
     const r = await apiFetch(BRIDGE + '/api/logs/tail?n=150');
@@ -618,8 +629,7 @@ async function replayLog() {
     const lines = (res.value && res.value.lines) || [];
     if (!lines.length) return;
     const l = $('log');
-    l.textContent = lines.join('\n');
-    l.scrollTop = l.scrollHeight;
+    l.textContent = lines.slice().reverse().join('\n');
   } catch (e) { }
 }
 replayLog();

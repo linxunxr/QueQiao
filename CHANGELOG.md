@@ -11,6 +11,10 @@
 
 ## [未发布]
 
+### 变更
+
+- **总览运行日志改为「新的在最上」（用户反馈）**：看日志的主场景是「桥现在怎么样」，最新行固定可见无需滚动，往下读即往回看因果。回放（logs/tail 桥端返回时间序不变）UI 侧倒序渲染，增量事件改 prepend；顺带加 500 行上限裁掉最老行（此前 textContent 无限增长，长跑 DOM 越来越重）。
+
 ### 修复
 
 - **主循环卡死风险四连修（2026-10-31 卡死事故的超时审计）**：探索证实主循环存在多条无上限阻塞路径，任一触发即全桥停摆（配合本批心跳观测，复发时可定位到段）。①**投递总帽 180s**——主循环 5 处 `executor.execute` 调用统一走 `execute_capped`：稳态单次投递 30s 封顶，但新会话/重建链串联多次 HTTP（401 重试翻倍）无总帽即卡死病灶；超时放弃本轮剩余动作（后台投递自然完成，回复可能迟到不丢），主循环恢复推进，`[stall]` 日志定位。②**更新下载出主循环**——`update_rx` 分支原来内联 await 下载（单次 300s 超时 × 主备源 3+3 重试最坏半小时，期间 diary/热更/消息全停），改独立任务 + 回报通道（slang_research 同模式），下载段 in-flight 打点（health 可见）。③**dsh_catalog 解放 worker**——async handler 里直接跑 reqwest blocking（最坏 60s）占死 runtime worker 线程且持 dsh 锁令 executor 投递干等，改 `spawn_blocking`。④**WS 双侧超时**——OneBot 事件流新增 `recv_event_keepalive`（空闲 120s 主动 ping 探活、30s 无回音断定半开走既有重连退避——消灭 NAT 超时/断网无 close 帧时 recv 永久 pending 的「桥活着但收不到任何消息且零日志」）；DSH mux `send_text` 包 30s 写超时（对端停滞/缓冲满时 sink 发送可无限挂起，MuxRunner 静默）。
