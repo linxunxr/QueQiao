@@ -9,6 +9,15 @@
 - **1.0.0 门槛**：与 Node 版行为对拍一致（M5）+ 生产切换完成——"可用于生产"的承诺点；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [0.4.17] - 2026-10-31
+
+### 修复
+
+- **DSH 重启后 AI 对一切消息静默无反应——mux 断连残留回合态令会话永久 busy（272246e）**：真机事故链：DSH 重启 → mux 断连（进行中回合的 turn/end 事件随连接丢失）→ 会话 turn/prompt_in_flight 残留 → is_busy 恒真 → 之后所有唤醒进 busy 分支被静默吞掉（无「计划唤醒」日志、无「频率超限」日志、wakeTimes 不记账）——消息照常入库但 AI 永不响应，诊断特征为 lastIncomingAt 持续更新而 unread 堆积、唤醒账本零新增。修法：mux 任务断连分支经 unbounded channel 通知主循环 → `orchestrator.on_mux_disconnect` 清全部会话进行中回合态（abort_inflight），持久态不动、清理量打日志；守护测试钉住 busy→清→不 busy。
+- **升级/安装脚本把 MCP 注册写成空 command——AI 会话挂不到 qq 工具、唤醒空转无回复（31cd433）**：`Write-McpPatch` 调用传的 `$McpExe` 在 install.ps1/upgrade.ps1 里都只有 param 声明、从未赋值，PowerShell 未定义变量展开为空串 → DSH 两档 cordis.patch.yml 落盘 `command: ''` → spawn 不了 queqiao-mcp → AI 函数列表里没有 qq_* 工具（DSH 会话历史里 AI 自报实锤），唤醒后看一眼没工具即空转结束，activityLog 反复「连续 3 次唤醒无行动」。修复：调用前从安装目录拼 `$McpExe` 并 Test-Path 防空（拒绝写空注册）。
+- **SnowLuma 卡片恒红「未运行」——homeDir 未配置时探测假阴（ed6093f）**：homeDir 为空时进程判定恒 false（`-like '**'` 匹配一切的防御行为），SnowLuma 实际在跑卡片却恒红（v0.4.4 修 httpUrl 探活时这半没跟上）。治本 `snowluma_running` 纯函数：homeDir 空时回落用 OneBot HTTP 探活（有人应答必有进程在服务），三态单测；「运行中 · OneBot 未就绪」中间态在有 homeDir 时不受影响。
+- v0.4.16 代码补跑 fmt+clippy（b6ec9bb，纯格式无行为变化）。
+
 ## [0.4.16] - 2026-10-31
 
 ### 新增
