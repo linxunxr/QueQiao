@@ -757,6 +757,9 @@ pub struct ProactiveConfig {
     pub check_interval_max_ms: u64,
     pub idle_threshold_ms: u64,
     pub probability: f64,
+    /// 观察模式（M6 P1 主动发言审计）：proactiveCheck 回合的发送只记录不
+    /// 发出（官方 start narrow 的群聊版），审计见 state/proactive-audit.jsonl。
+    pub observe_only: bool,
 }
 
 impl Default for ProactiveConfig {
@@ -767,6 +770,7 @@ impl Default for ProactiveConfig {
             check_interval_max_ms: 90 * 60_000,
             idle_threshold_ms: 15 * 60_000,
             probability: 0.3,
+            observe_only: false,
         }
     }
 }

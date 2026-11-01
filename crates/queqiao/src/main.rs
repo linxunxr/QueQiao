@@ -2338,9 +2338,19 @@ impl Executor {
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()));
                     match result {
-                        Ok(()) => queqiao::logging::log(&format!(
-                            "SendPrompt {key}（{reason_for_log}）已投递"
-                        )),
+                        Ok(()) => {
+                            queqiao::logging::log(&format!(
+                                "SendPrompt {key}（{reason_for_log}）已投递"
+                            ));
+                            // 投递成功即定格本回合唤醒原因（供主动发言门禁
+                            // 判定「本回合是否 proactiveCheck 主动回合」——
+                            // last_wake_reason 此前自迁移起是从未写入的死字段）。
+                            if let Ok(mut store) = self.social.lock() {
+                                store.conversation_mut(&key).last_wake_reason =
+                                    Some(reason_for_log.clone());
+                                store.save();
+                            }
+                        }
                         Err(e) => queqiao::logging::log(&format!("SendPrompt {key} 投递失败：{e}")),
                     }
                     // 新会话创建后通知 mux 重连 follow。

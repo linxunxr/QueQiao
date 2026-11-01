@@ -295,6 +295,7 @@ pub fn build_router(
             "/api/role/card",
             get(role_card_get).put(role_card_put).delete(role_card_del),
         )
+        .route("/api/proactive/audit", get(proactive_audit_list))
         .route("/api/socialV2/sticker-sync", post(sticker_sync))
         .route("/api/tokens/series", get(tokens_series))
         .route("/api/tokens/turns", get(tokens_turns))
@@ -562,14 +563,74 @@ fn check_send_rate(state: &ToolApiState, key: &str) -> Result<(), (StatusCode, a
     Ok(())
 }
 
-/// 发送链复用体（send-message 与 reply 端点共用）：频率护栏 → 空校验 → 长度上限 →
-/// 敏感审计（命中整条拦截）→ 令牌打码 → 引用段 + 文本段 → 按会话类型走群/私聊。
+/// 主动发言门禁与审计（M6 P1）：proactiveCheck 回合的发送在此分流——观察
+/// 模式（socialV2.proactive.observeOnly）拦截不发出、正常模式放行，两者都
+/// 落 state/proactive-audit.jsonl；非主动回合（passive）不受门禁不审计。
+/// 决策纯函数见 core::schedule::proactive_send_gate。
+fn proactive_gate_check(
+    state: &ToolApiState,
+    key: &str,
+    text: &str,
+) -> Result<(), (StatusCode, axum::Json<Value>)> {
+    let reason = state
+        .social
+        .lock()
+        .unwrap()
+        .conversation(key)
+        .and_then(|s| s.last_wake_reason.clone());
+    let (blocked, outcome) = queqiao_core::schedule::proactive_send_gate(
+        reason.as_deref(),
+        state.cfg.social_v2.proactive.observe_only,
+    );
+    if outcome != "passive" {
+        append_proactive_audit(key, outcome, text);
+    }
+    if blocked {
+        crate::logging::activity(&format!(
+            "{key} 主动发言观察模式拦截：{}",
+            text.chars().take(60).collect::<String>()
+        ));
+        return Err(denied(
+            StatusCode::FORBIDDEN,
+            "主动发言处于观察模式（observeOnly）：本次发送已记录、未发出。无事可说可安静收尾（qq_mark_read / qq_set_wake_config）",
+        ));
+    }
+    Ok(())
+}
+
+/// 审计行追加（预览脱敏；写失败只影响审计不影响发送链）。
+fn append_proactive_audit(key: &str, outcome: &str, text: &str) {
+    let line = json!({
+        "time": crate::session_manager::SessionManager::now_ms(),
+        "key": key,
+        "outcome": outcome,
+        "preview": queqiao_core::sensitive::redact_sensitive(
+            &text.chars().take(80).collect::<String>()
+        ),
+    });
+    let file = crate::paths::queqiao_home()
+        .join("state")
+        .join("proactive-audit.jsonl");
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 发送链复用体（send-message 与 reply 端点共用）：主动发言门禁 → 频率护栏 →
+/// 空校验 → 长度上限 → 敏感审计（命中整条拦截）→ 令牌打码 → 引用段 + 文本段
+/// → 按会话类型走群/私聊。门禁在前：被拦时不消耗频率配额。
 fn send_text_with_reply(
     state: &ToolApiState,
     key: &str,
     text: &str,
     reply_to: Option<i64>,
 ) -> Result<i64, (StatusCode, axum::Json<Value>)> {
+    proactive_gate_check(state, key, text)?;
     check_send_rate(state, key)?;
     if text.trim().is_empty() {
         return Err(denied(StatusCode::BAD_REQUEST, "text 不能为空"));
@@ -1930,6 +1991,49 @@ fn feedback_file() -> std::path::PathBuf {
     crate::paths::queqiao_home()
         .join("state")
         .join("feedback.jsonl")
+}
+
+/// 控制台：主动发言审计列表（observe-only 拦截与放行记录；倒序+全量计数）。
+async fn proactive_audit_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<BTreeMap<String, String>>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 500);
+    let text = std::fs::read_to_string(
+        crate::paths::queqiao_home()
+            .join("state")
+            .join("proactive-audit.jsonl"),
+    )
+    .unwrap_or_default();
+    let mut entries: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let allowed = entries
+        .iter()
+        .filter(|e| e.get("outcome") == Some(&json!("allowed")))
+        .count();
+    let blocked = entries
+        .iter()
+        .filter(|e| e.get("outcome") == Some(&json!("blocked")))
+        .count();
+    entries.reverse();
+    entries.truncate(limit);
+    ok_json(json!({
+        "entries": entries,
+        "total": allowed + blocked,
+        "allowed": allowed,
+        "blocked": blocked,
+        "observeOnly": state.cfg.social_v2.proactive.observe_only,
+    }))
 }
 
 /// 控制台：读 AI 反馈列表（仅控制台可用——agent token 一律 403，Node 同款）。

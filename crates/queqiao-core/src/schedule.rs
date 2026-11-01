@@ -118,9 +118,47 @@ pub fn schedule_wake(
     }
 }
 
+/// 主动发言门禁决策（M6 P1：官方 Super-agent「推断候选 → would accept」
+/// 观察模式的鹊桥版）。本回合由 proactiveCheck 唤醒时视为主动发言：
+/// 观察模式拦截（记录不发送，start narrow 群聊版），非观察模式放行也落
+/// 审计。返回 (blocked, outcome)——outcome 供审计 jsonl（passive 不审计）。
+pub fn proactive_send_gate(wake_reason: Option<&str>, observe_only: bool) -> (bool, &'static str) {
+    if wake_reason != Some("proactiveCheck") {
+        return (false, "passive");
+    }
+    if observe_only {
+        (true, "blocked")
+    } else {
+        (false, "allowed")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 主动发言门禁：非主动回合一律放行不审计；主动回合按观察模式分流。
+    #[test]
+    fn proactive_send_gate_decisions() {
+        // 非主动回合（被动回复/定时/日记唤醒）不受门禁、不审计。
+        for reason in [
+            None,
+            Some("atMention"),
+            Some("timeout"),
+            Some("diary:scheduled"),
+        ] {
+            let (blocked, outcome) = proactive_send_gate(reason, true);
+            assert!(!blocked, "{reason:?} 非主动回合不拦");
+            assert_eq!(outcome, "passive");
+        }
+        // 主动回合：观察模式拦截，正常模式放行——两者都审计。
+        let (blocked, outcome) = proactive_send_gate(Some("proactiveCheck"), true);
+        assert!(blocked);
+        assert_eq!(outcome, "blocked");
+        let (blocked, outcome) = proactive_send_gate(Some("proactiveCheck"), false);
+        assert!(!blocked);
+        assert_eq!(outcome, "allowed");
+    }
 
     /// 优先级表与基名解析（子类型取冒号前）。
     #[test]
