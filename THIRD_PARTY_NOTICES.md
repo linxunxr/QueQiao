@@ -113,3 +113,36 @@ webpki-roots
 - 许可：BSD 3-Clause License 等（见资产包内 chrome-win/ 目录随附的许可文件；源码许可 <https://chromium.googlesource.com/chromium/src/+/main/LICENSE>）
 - 用途：鹊桥「专属浏览器」功能的浏览器内核，作为独立 Release 资产（queqiao-browser-*-win64.zip）分发，首次启用时下载到安装目录 browser/ 下；不修改上游代码。
 - 说明：开源 Chromium 构建不含 H.264/AAC 等专有编解码器，部分站点视频可能无法播放（文字交互不受影响）。
+
+## 语音 ASR 组件（收语音转写，随主包分发）
+
+### sherpa-onnx（含 onnxruntime 静态链接）
+
+- 上游：<https://github.com/k2-fsa/sherpa-onnx>（k2-fsa 项目）
+- 许可：Apache-2.0
+- 用途：本地离线语音识别运行时（官方 Rust crate `sherpa-onnx`，构建期静态
+  链接其预编译库——含 onnxruntime，产物单 exe 无独立 DLL）。
+
+### paraformer-zh 模型（int8，~217MB，不随包分发）
+
+- 上游：ModelScope `iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch`
+  经 k2-fsa 转换为 onnx 发布（<https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models>）
+- 许可：Apache-2.0
+- 用途：中文语音识别模型；用户首次启用时从 hf-mirror.com 下载到本机
+  `asr-model/paraformer-zh/`，不出现在发行包与仓库中。
+
+### SILK v3 解码器（vendor Skype SILK 固定点 C 源）
+
+- 上游：Skype Limited 2006 年公开发布的 SILK SDK（本仓库 vendor 于
+  `crates/queqiao-media/vendor/silk/`，源文件头保留其版权与许可声明）
+- 许可：BSD 风格（源/二进制再分发须保留版权与免责声明）；**源文件头同时
+  声明"不授任何方专利权"**——解码用途 + 单用户自托管分发的实际风险低，
+  该灰区已经项目维护者评估接受。
+- 用途：QQ 语音（silk v3，含腾讯 0x02 前缀变体）解码为 PCM；编译方式
+  （cc + 手写 FFI）参照开源项目 rust-silk（BSD-3-Clause）验证过的方案。
+
+### hound
+
+- 上游：<https://github.com/ruuda/hound>
+- 许可：Apache-2.0 OR MIT
+- 用途：WAV（RIFF/PCM）读取。

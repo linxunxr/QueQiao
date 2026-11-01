@@ -278,6 +278,8 @@ pub fn build_router(
         .route("/api/socialV2/speak-voice", post(speak_voice))
         .route("/api/socialV2/send-voice", post(send_voice))
         .route("/api/socialV2/list-voices", get(list_voices))
+        .route("/api/asr/status", get(asr_status))
+        .route("/api/asr/download", post(asr_download))
         .route("/api/socialV2/mark-read", post(mark_read))
         .route("/api/socialV2/set-wake-config", post(set_wake_config))
         .route("/api/diagnostics", get(diagnostics))
@@ -2965,6 +2967,163 @@ async fn set_wake_config(
             });
     }
     ok_json(json!({ "updated": true }))
+}
+
+// ── ASR 模型状态与下载（console_only；模型不入主包，首次启用时拉取）────────
+
+/// ASR 模型目录（与 main 的 AsrCtx 同一解析规则）。
+fn asr_model_dir(cfg: &Config) -> std::path::PathBuf {
+    if cfg.social_v2.voice.asr_model_dir.is_empty() {
+        crate::paths::queqiao_home()
+            .join("asr-model")
+            .join("paraformer-zh")
+    } else {
+        std::path::PathBuf::from(&cfg.social_v2.voice.asr_model_dir)
+    }
+}
+
+/// 下载进度（全局单例——工具 API 单进程；UI 轮询读，下载任务写）。
+static ASR_DL: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+fn asr_dl_snapshot() -> Value {
+    ASR_DL.lock().unwrap().clone().unwrap_or(Value::Null)
+}
+
+/// 模型状态：开关、在场、目录、体量、下载进度。
+async fn asr_status(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if !state.cfg.console_token.is_empty() {
+        let auth = headers
+            .get("x-console-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if auth != state.cfg.console_token {
+            return denied(StatusCode::UNAUTHORIZED, "console token required");
+        }
+    }
+    let dir = asr_model_dir(&state.cfg);
+    let present = queqiao_media::asr::model_files_present(&dir);
+    let size_mb = dir
+        .join("model.int8.onnx")
+        .metadata()
+        .map(|m| m.len() / 1024 / 1024)
+        .unwrap_or(0);
+    ok_json(json!({
+        "enabled": state.cfg.social_v2.voice.asr_enabled,
+        "modelPresent": present,
+        "modelDir": dir.display().to_string(),
+        "modelSizeMb": size_mb,
+        "download": asr_dl_snapshot(),
+    }))
+}
+
+/// 触发模型下载（hf-mirror 两文件流式拉取；进度进活动日志与本端点快照）。
+/// 已在下载 → 409。完成后**无需重启**——ASrCtx 每条语音重探在场性自动加载。
+async fn asr_download(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    {
+        let mut g = ASR_DL.lock().unwrap();
+        if let Some(v) = g.as_ref()
+            && v.get("phase").and_then(Value::as_str) == Some("downloading")
+        {
+            return denied(StatusCode::CONFLICT, "模型下载进行中");
+        }
+        *g = Some(json!({
+            "phase": "downloading", "file": "", "bytes": 0, "total": 0,
+            "startedAt": crate::session_manager::SessionManager::now_ms(),
+        }));
+    }
+    let dir = asr_model_dir(&state.cfg);
+    tokio::spawn(async move {
+        let r = tokio::task::spawn_blocking(move || download_asr_model(&dir)).await;
+        let result = match r {
+            Ok(inner) => inner,
+            Err(join_err) => Err(join_err.to_string()),
+        };
+        let (phase, error) = match result {
+            Ok(()) => {
+                crate::logging::activity("ASR 模型下载完成（下一条语音消息自动启用）");
+                ("done", String::new())
+            }
+            Err(e) => {
+                crate::logging::activity(&format!("ASR 模型下载失败：{e}"));
+                ("error", e)
+            }
+        };
+        let mut g = ASR_DL.lock().unwrap();
+        *g = Some(json!({ "phase": phase, "error": error }));
+    });
+    ok_json(json!({ "started": true }))
+}
+
+/// hf-mirror 单文件直链（国内稳；HF 同路径换域名即可切源）。
+const ASR_HF_BASE: &str =
+    "https://hf-mirror.com/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/main";
+
+fn download_asr_model(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败：{e}"))?;
+    for (file, min_bytes) in [
+        ("tokens.txt", 10 * 1024u64),
+        ("model.int8.onnx", 200 * 1024 * 1024),
+    ] {
+        let url = format!("{ASR_HF_BASE}/{file}");
+        let part = dir.join(format!("{file}.part"));
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut resp = client
+            .get(&url)
+            .send()
+            .map_err(|e| format!("{file} 请求失败：{e}"))?
+            .error_for_status()
+            .map_err(|e| format!("{file} 响应异常：{e}"))?;
+        let total = resp.content_length().unwrap_or(0);
+        let mut out =
+            std::fs::File::create(&part).map_err(|e| format!("{file} 建临时文件失败：{e}"))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut got: u64 = 0;
+        let mut last_report: u64 = 0;
+        use std::io::{Read, Write};
+        loop {
+            let n = resp
+                .read(&mut buf)
+                .map_err(|e| format!("{file} 读取中断：{e}"))?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])
+                .map_err(|e| format!("{file} 写盘失败：{e}"))?;
+            got += n as u64;
+            // 进度：快照 + 每 10% 活动日志一行。
+            let pct = (got * 100).checked_div(total).unwrap_or(0);
+            if pct / 10 > last_report {
+                last_report = pct / 10;
+                crate::logging::activity(&format!(
+                    "ASR 模型下载中：{file} {pct}%（{:.1}MB）",
+                    got as f64 / 1024.0 / 1024.0
+                ));
+            }
+            *ASR_DL.lock().unwrap() = Some(json!({
+                "phase": "downloading", "file": file, "bytes": got, "total": total,
+            }));
+        }
+        if got < min_bytes {
+            let _ = std::fs::remove_file(&part);
+            return Err(format!(
+                "{file} 体积异常（{got}B < {min_bytes}B）——疑似镜像损坏"
+            ));
+        }
+        std::fs::rename(&part, dir.join(file)).map_err(|e| format!("{file} 落位失败：{e}"))?;
+    }
+    Ok(())
 }
 
 /// 诊断包：一键收集排障所需（控制台「导出诊断包」按钮）——运行日志双份、

@@ -323,6 +323,15 @@
     <div class="row" style="margin-top:6px">
       <div class="field"><label>语音功能（tools.sendVoice）</label><select id="f-voice"><option value="false">关闭（默认，AI 发文字）</option><option value="true">开启（AI 可发语音/合成语音）</option></select></div>
       <div class="field"><label>表情包（sticker.enabled）</label><select id="f-sticker"><option value="true">开启</option><option value="false">关闭</option></select></div>
+      <div class="field"><label>收语音转写（voice.asrEnabled）</label><select id="f-asr"><option value="true">开启（本地转写回填，默认）</option><option value="false">关闭（保留 [语音] 占位）</option></select></div>
+    </div>
+    <div class="row" style="margin-top:2px">
+      <div class="field" style="flex:2"><label>ASR 模型（paraformer-zh，~217MB，本地推理不出机）</label>
+        <div style="display:flex; gap:8px; align-items:center">
+          <span id="asrModelState" style="font-size:12.5px; color:var(--fg2)">检测中…</span>
+          <button id="asrDlBtn" class="btn" style="display:none">下载模型</button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -696,6 +705,7 @@ async function load() {
   chk('f-triQ', wk.recommendedQuestion !== false);
   chk('f-triPoke', wk.recommendedPoke !== false);
   v('f-voice', String((cfg.socialV2 && cfg.socialV2.tools && cfg.socialV2.tools.sendVoice) === true));
+  v('f-asr', String((cfg.socialV2 && cfg.socialV2.voice || {}).asrEnabled !== false));
   v('f-sticker', String((cfg.socialV2 && cfg.socialV2.sticker || {}).enabled !== false));
   v('f-dshModel', cfg.dsh && cfg.dsh.model);
   v('f-dshProvider', cfg.dsh && cfg.dsh.provider);
@@ -714,8 +724,42 @@ async function load() {
   renderChips();
   document.getElementById('f-json').value = JSON.stringify(stripUi(cfg), null, 2);
   document.getElementById('status').textContent = cfg._firstRun ? '等待首次保存…' : '已加载当前配置';
+  refreshAsrModel();
 }
 function stripUi(o) { const c = { ...o }; delete c._version; delete c._firstRun; return c; }
+
+// ASR 模型状态/下载（收语音转写）：未下载给下载按钮；下载中显示进度；
+// 完成或在场显示就绪。下载在桥后台跑（详细进度看总览活动日志），此端点轮询。
+async function refreshAsrModel() {
+  const st = document.getElementById('asrModelState'); const btn = document.getElementById('asrDlBtn');
+  if (!st) return;
+  try {
+    const r = await apiFetch(BRIDGE + '/api/asr/status');
+    const v = (await r.json()).value || {};
+    if (v.download && v.download.phase === 'downloading') {
+      const mb = (v.download.bytes / 1048576).toFixed(0);
+      st.textContent = '下载中：' + (v.download.file || '') + ' ' + mb + 'MB' + (v.download.total ? '（' + Math.round(v.download.bytes * 100 / v.download.total) + '%）' : '');
+      btn.style.display = 'none';
+      setTimeout(refreshAsrModel, 5000);
+    } else if (v.modelPresent) {
+      st.textContent = '已就绪（' + v.modelSizeMb + 'MB，本地推理不出机）';
+      btn.style.display = 'none';
+    } else if (v.download && v.download.phase === 'error') {
+      st.textContent = '下载失败：' + (v.download.error || '未知错误').slice(0, 80);
+      btn.style.display = '';
+    } else {
+      st.textContent = '未下载（收语音将保留 [语音] 占位）';
+      btn.style.display = '';
+    }
+  } catch (e) { st.textContent = '桥离线，无法检测'; btn.style.display = 'none'; }
+}
+document.getElementById('asrDlBtn').onclick = async () => {
+  try {
+    const r = await apiFetch(BRIDGE + '/api/asr/download', { method: 'POST' });
+    if (r.ok) { toast('模型下载已开始（进度见总览活动日志）', true); refreshAsrModel(); }
+    else { const j = await r.json().catch(() => ({})); toast(j.error || '下载启动失败', false); }
+  } catch (e) { toast('下载请求失败：' + e, false); }
+};
 function renderChips() {
   for (const k of ['groups', 'private']) {
     const box = document.getElementById('chips-' + k);
@@ -818,6 +862,8 @@ async function save() {
   if (num('f-sendHour') !== undefined) body.socialV2.send.maxSendPerHour = num('f-sendHour');
   body.socialV2.tools = body.socialV2.tools || {};
   body.socialV2.tools.sendVoice = document.getElementById('f-voice').value === 'true';
+  body.socialV2.voice = body.socialV2.voice || {};
+  body.socialV2.voice.asrEnabled = $('f-asr').value === 'true';
   body.socialV2.sticker = body.socialV2.sticker || {};
   body.socialV2.sticker.enabled = document.getElementById('f-sticker').value === 'true';
   const r = await apiFetch(BRIDGE + '/api/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
