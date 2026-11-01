@@ -1784,6 +1784,11 @@ fn handle_request(
 }
 
 fn main() {
+    // --version：三件套统一版本口径（升级自检对账用）。
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("queqiao-mcp {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let tools_cfg = load_section("socialV2")
         .get("tools")
         .cloned()

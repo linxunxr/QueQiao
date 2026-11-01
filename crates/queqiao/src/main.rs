@@ -217,6 +217,12 @@ async fn switch_if_drifted(
 }
 
 fn main() {
+    // --version：三件套统一版本口径（升级自检对账用——`queqiao-*.exe
+    // --version` 输出 "<名称> <版本>"，见 upgrade_reconcile 版本对账）。
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{} {}", queqiao_core::APP_NAME, env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cfg_path = queqiao::paths::config_path();
     let first_run = !cfg_path.exists();
     let cfg = if first_run {
@@ -1293,7 +1299,12 @@ async fn run(setup: Setup) {
             queqiao::logging::log(&format!("已恢复 {restored} 个有限潜水闹钟"));
         }
     }
-    let mut pending_update: Option<std::path::PathBuf> = None;
+    // (apply bat, 就绪时刻 ms)：等空闲应用；超 30 分钟仍忙则强制应用——
+    // 群聊持续活跃时"等空闲"可能永远等不到（2026-11-01 真机：新版就绪后
+    // 用户点检查更新只看到撞锁"失败"）。强制断的回合：桥侧状态已即时落盘，
+    // 回合运行时态重启即清，无丢失。
+    const UPDATE_STAGED_FORCE_MS: u64 = 30 * 60_000;
+    let mut pending_update: Option<(std::path::PathBuf, u64)> = None;
     let mut config_file = ConfigFile::load(&queqiao::paths::config_path()).unwrap_or_else(|_| {
         ConfigFile::load(&queqiao::paths::config_path()).expect("config 重新加载失败")
     });
@@ -1454,7 +1465,7 @@ async fn run(setup: Setup) {
                     match r {
                         Ok(bat) => {
                             queqiao::logging::log("[update] 新版已就绪，等待会话空闲后自动应用并重启…");
-                            pending_update = Some(bat);
+                            pending_update = Some((bat, now_ms()));
                         }
                         Err(e) => queqiao::logging::log(&format!("[update] 下载/准备失败（本次跳过，下次启动重试）：{e}")),
                     }
@@ -1785,12 +1796,19 @@ async fn run(setup: Setup) {
                     }
                 }
                 // 更新已就绪且全体空闲（无回合、无在途 prompt、无待发窗口）→ 应用并重启。
-                if let Some(bat) = pending_update.take() {
+                if let Some((bat, staged_at)) = pending_update.take() {
                     let busy = orchestrator.session_keys().iter().any(|k| {
                         orchestrator.session(k).is_some_and(|rt| rt.is_busy())
                     });
-                    if !busy {
-                        println!("[update] 会话空闲，应用更新并重启…");
+                    let force = now_ms().saturating_sub(staged_at) > UPDATE_STAGED_FORCE_MS;
+                    if !busy || force {
+                        if busy {
+                            queqiao::logging::log(
+                                "[update] 新版就绪超 30 分钟仍会话繁忙，强制应用更新（进行中回合状态已落盘，重启后恢复）",
+                            );
+                        } else {
+                            println!("[update] 会话空闲，应用更新并重启…");
+                        }
                         let _ = std::process::Command::new("cmd")
                             .args(["/c", "start", "", ""])
                             .arg(&bat)
@@ -1798,7 +1816,7 @@ async fn run(setup: Setup) {
                             .spawn();
                         break;
                     }
-                    pending_update = Some(bat);
+                    pending_update = Some((bat, staged_at));
                 }
             }
         }

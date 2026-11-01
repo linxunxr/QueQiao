@@ -759,6 +759,12 @@ fn bridge_stop(state: tauri::State<'_, BridgeState>) -> Result<bool, String> {
 }
 
 fn main() {
+    // --version：三件套统一版本口径（升级自检对账用；GUI 壳也支持——
+    // args 检查先于 Tauri 启动，打印即退不开窗口）。
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("queqiao-app {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     tauri::Builder::default()
         .manage(BridgeState {
             home: home_dir(),
