@@ -11,6 +11,10 @@
 
 ## [未发布]
 
+### 修复
+
+- **看图工具自上线起每次都返回「无图」——段字段取值路径错误（2026-11-01 真机实锤：群友发普通 GIF 动图，AI 拿到失败 note 后向群友错误断言「闪照到我这就过期」）**：`dispatch` 从段**顶层**取 `url/summary/id`，而 OneBot array 格式的字段全在 `data` 子对象里（`{type, data:{url, summary}}`）——顶层取恒空，每张图都落进「无 url（可能是闪照/过期）」note，工具却显示成功（HTTP 200 + note），守护测试只断言非 404 没抓到。修法：段分派抽纯函数 `dispatch_image_segments` 统一从 `data` 取值（image/mface 的 url+summary、face 的 id——此前恒 `[QQ 表情 #0]`）；单测钉死标准段形状（data 嵌套命中、平铺不命中）防回归。顺带中性化无 url note 文案——「可能是闪照」曾被 AI 脑补成确定结论转述给群友，改为「原因未知，不要向群友断言具体原因」。
+
 ### 新增
 
 - **收语音 ASR——群友发语音 AI 能听到（Node 版 voice-asr.js 的 Rust 全链迁移，默认开启）**：此前 record 段被完全静默丢弃（纯语音消息以空文本入库），AI 对语音失聪。全链：record 段解析 + `[语音]` 占位入库（纯语音消息不再空文本）→ 异步转写（不阻塞收消息，AI 唤醒可能先于转写完成——与 Node 一致）→ 按 message_id 回填 recent+unread 为 `[语音] 转写文本`（200 字截断）。引擎与 Node 同款（转写结果可对拍）：**sherpa-onnx 2.0.1 官方 Rust API**（k2-fsa，静态链 onnxruntime 单 exe 无 DLL）+ **paraformer-zh int8**（Apache-2.0，~217MB）+ **vendor Skype SILK C 源解码**（silk-codec 因 libclang/bindgen 依赖弃用，改 rust-silk 验证过的 cc 编译 + 手写 FFI 方案；专利不授权灰区经评估接受，THIRD_PARTY_NOTICES 保留声明）。取字节三路（修正 Node 两真 bug：URL 直抓不做图片魔数校验）：段 url → get_record url → 本地路径限 SnowLuma homeDir 内；16MB/180s 限额；ffmpeg 兜底临时文件中转（stdin/stdout 双管道死锁窗口）。识别串行闸（CPU 密集排队）+ asr in-flight 打点。模型获取：**设置页一键下载**（hf-mirror 单文件直链、流式进度进活动日志、体积校验、完成后无需重启——每条语音重探在场性自动加载）；缺模型自动降级回占位不报错。本机 e2e 实测：3.2s wav 模型加载 1.4s、识别 0.08s 出「今天晚上一起打游戏吗」。CI 注意：sherpa-onnx build.rs 从 GitHub 下载静态库（CI 网络无碍；本机开发断网域须 gh 下载后设 SHERPA_ONNX_LIB_DIR）；模型不入包不入 CI（相关测试走降级路径）。

@@ -771,6 +771,47 @@ async fn recall_message(
 /// qq_get_message_images：取消息内图片/表情（get_msg 拿原始段 → 图片
 /// 下载转 base64；face 转文本；视频暂不支持抽帧）。图片下载在
 /// spawn_blocking（reqwest blocking）。
+///
+/// 段分派纯函数：OneBot array 格式字段一律在 `data` 子对象里
+/// （`{type, data:{url, summary, id}}`）——顶层取值恒空的 bug 让看图工具
+/// 自上线起每次都返回「无图」note，AI 靠脑补向群友错误解释（2026-11-01
+/// 真机实锤：正常 GIF 被断言成「闪照过期」）。
+fn dispatch_image_segments(segments: &[Value]) -> (Vec<(String, String)>, Vec<Value>, String) {
+    let mut urls = Vec::new();
+    let mut images = Vec::new();
+    let mut note = String::new();
+    for seg in segments {
+        let d = seg.get("data").cloned().unwrap_or(Value::Null);
+        match seg.get("type").and_then(Value::as_str) {
+            Some("image") | Some("mface") => {
+                let url = d.get("url").and_then(Value::as_str).unwrap_or_default();
+                let text = d
+                    .get("summary")
+                    .or_else(|| d.get("title"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    // 中性文案：不引导 AI 断言原因（「可能是闪照」曾被脑补成
+                    // 确定结论转述给群友）。
+                    images.push(json!({ "kind": "image", "text": text,
+                        "note": "未取到直链（媒体可能已过期或被撤回）——原因未知，不要向群友断言具体原因" }));
+                } else {
+                    urls.push((url.to_owned(), text.to_owned()));
+                }
+            }
+            Some("face") => {
+                let id = d.get("id").and_then(Value::as_i64).unwrap_or(0);
+                images.push(json!({ "kind": "face", "text": format!("[QQ 表情 #{id}]") }));
+            }
+            Some("video") | Some("record") => {
+                note.push_str("含视频/语音，暂不支持提取（如需可后续版本补抽帧）；");
+            }
+            _ => {}
+        }
+    }
+    (urls, images, note)
+}
+
 async fn message_images(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
     headers: HeaderMap,
@@ -806,32 +847,10 @@ async fn message_images(
     // 先收集待下载图（url），下载转 base64 后组装。
     let mut images = Vec::new();
     let mut note = String::new();
-    let mut urls = Vec::new();
-    for seg in &segments {
-        match seg.get("type").and_then(Value::as_str) {
-            Some("image") | Some("mface") => {
-                let url = seg.get("url").and_then(Value::as_str).unwrap_or_default();
-                let text = seg
-                    .get("summary")
-                    .or_else(|| seg.get("title"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if url.is_empty() {
-                    images.push(json!({ "kind": "image", "text": text, "note": "无 url（可能是闪照/过期）" }));
-                } else {
-                    urls.push((url.to_owned(), text.to_owned()));
-                }
-            }
-            Some("face") => {
-                let id = seg.get("id").and_then(Value::as_i64).unwrap_or(0);
-                images.push(json!({ "kind": "face", "text": format!("[QQ 表情 #{id}]") }));
-            }
-            Some("video") | Some("record") => {
-                note.push_str("含视频/语音，暂不支持提取（如需可后续版本补抽帧）；");
-            }
-            _ => {}
-        }
-    }
+    let (url_list, mut seg_images, seg_note) = dispatch_image_segments(&segments);
+    images.append(&mut seg_images);
+    note.push_str(&seg_note);
+    let urls = url_list;
     let downloaded = tokio::task::spawn_blocking(move || {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -4821,5 +4840,53 @@ async fn message_detail(
             StatusCode::NOT_FOUND,
             "近期记录中找不到该 messageId（只能查本会话缓冲内的消息）",
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 段分派：OneBot array 格式字段在 data 子对象里——顶层取值的旧 bug
+    ///（自上线起每次看图都返回「无图」，AI 脑补原因）钉死防回归。
+    #[test]
+    fn image_segments_dispatch_reads_data_fields() {
+        let segs = vec![
+            json!({ "type": "image", "data": {
+                "url": "https://multimedia.nt.qq.com.cn/download?rkey=x",
+                "file": "A.jpg", "sub_type": 1, "summary": "[动画表情]" } }),
+            json!({ "type": "mface", "data": {
+                "url": "https://y/z.gif", "summary": "滑稽" } }),
+            json!({ "type": "face", "data": { "id": 287 } }),
+            json!({ "type": "image", "data": { "file": "B.jpg" } }), // 无 url
+            json!({ "type": "record", "data": { "file": "v.slk" } }),
+            json!({ "type": "text", "data": { "text": "你好" } }),
+        ];
+        let (urls, images, note) = dispatch_image_segments(&segs);
+        // 两张带 url 的图命中下载清单（data.url，非顶层）。
+        assert_eq!(urls.len(), 2, "url 从 data 子对象取");
+        assert_eq!(urls[0].1, "[动画表情]");
+        assert_eq!(urls[1].1, "滑稽");
+        // face 的 id 从 data 取（顶层取恒 0 的旧 bug）。
+        assert!(
+            images
+                .iter()
+                .any(|i| i.get("text").and_then(Value::as_str) == Some("[QQ 表情 #287]"))
+        );
+        // 无 url 的图：中性 note，明确禁止 AI 断言原因（不出现「闪照」）。
+        let no_url = images
+            .iter()
+            .find(|i| i.get("note").is_some())
+            .expect("无 url 段带 note");
+        let note_text = no_url["note"].as_str().unwrap();
+        assert!(!note_text.contains("闪照"), "note 不引导断言：{note_text}");
+        assert!(note_text.contains("不要向群友断言"));
+        // video/record 提示进 note。
+        assert!(note.contains("视频/语音"));
+        // 平铺（非标）形态不命中——本项目只认标准 data 嵌套。
+        let flat = vec![json!({ "type": "image", "url": "https://top-level" })];
+        let (u2, i2, _) = dispatch_image_segments(&flat);
+        assert!(u2.is_empty() && i2.len() == 1, "平铺段按无 url 处理");
     }
 }
