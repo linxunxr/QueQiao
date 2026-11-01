@@ -425,7 +425,8 @@ pub fn write_apply_bat(staging: &Path, home: &Path, restart_app: bool) -> Result
          if exist \"{staging}\\upgrade.bat\" copy /y \"{staging}\\upgrade.bat\" upgrade.bat >nul\r\n\
          if exist \"{staging}\\migrate-from-node.ps1\" copy /y \"{staging}\\migrate-from-node.ps1\" migrate-from-node.ps1 >nul\r\n\
          if exist \"{staging}\\THIRD_PARTY_NOTICES.md\" copy /y \"{staging}\\THIRD_PARTY_NOTICES.md\" THIRD_PARTY_NOTICES.md >nul\r\n\
-         if exist \"{staging}\\dsh\" xcopy /e /y /i \"{staging}\\dsh\" dist-preset-update >nul 2>&1\r\n\
+         if exist \"{staging}\\dsh\" xcopy /e /y /i \"{staging}\\dsh\" dsh >nul 2>&1\r\n\
+         if exist dist-preset-update rd /s /q dist-preset-update >nul 2>&1\r\n\
          rd /s /q \"{staging}\" >nul 2>&1\r\n\
          del update.lock >nul 2>&1\r\n\
          echo [%date% %time%] apply done >>\"%LOG%\"\r\n\
@@ -572,6 +573,16 @@ mod tests {
             dir.join("update-staging").display()
         )));
         assert!(content.contains("start \"\" queqiao.exe"));
+        // preset 断链修复（v0.5.1）：随包 dsh/ 直接落安装目录 dsh\（供桥
+        // 启动自检部署到 ~/.dsh），并清理旧版断链的 dist-preset-update 残留。
+        assert!(
+            content.contains("xcopy /e /y /i") && content.contains(" dsh >nul"),
+            "随包 preset 须落安装目录 dsh\\"
+        );
+        assert!(
+            content.contains("rd /s /q dist-preset-update"),
+            "清理旧断链残留目录"
+        );
         assert!(content.contains(&format!("cd /d \"{}\"", dir.display())));
         let _ = std::fs::remove_dir_all(&dir);
     }

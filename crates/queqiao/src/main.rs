@@ -409,6 +409,32 @@ fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
             m.set_dsh_model(&d.provider, &d.model, &d.reasoning_effort);
         }
     }
+    // 升级自检（v0.5.1 起）：版本变化 → 部署随包 preset 到 ~/.dsh + 请求
+    // 旧 MCP 退出（DSH 对 stdio MCP 子进程有 respawn，无需重启 DSH）；
+    // 并退役全部 QQ 会话——DSH 会话创建时快照工具列表与 preset，重建后
+    // 的新会话才用新版（顺带自愈会话快照残留）；桥侧记忆全保留。
+    {
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let reconcile = queqiao::upgrade_reconcile::run(&install_dir);
+        for n in &reconcile.notes {
+            queqiao::logging::activity(n);
+        }
+        if reconcile.retire_needed
+            && let Ok(mut m) = sessions.lock()
+        {
+            let keys: Vec<String> = m.mappings().keys().cloned().collect();
+            for k in &keys {
+                m.retire(k);
+            }
+            queqiao::logging::activity(&format!(
+                "升级自检：退役 {} 个 DSH 会话（下次消息触发重建，新工具与新 preset 生效）",
+                keys.len()
+            ));
+        }
+    }
     // 黑话学习会话（Node ensureSlangLearnerSession 同构）：独立映射文件 +
     // 独立 agent 目录 + learner preset（preset fail-closed 由管理器承担）。
     let home = queqiao::paths::queqiao_home();

@@ -21,4 +21,5 @@ pub mod sticker_store;
 pub mod tablet;
 pub mod tools_api;
 pub mod update;
+pub mod upgrade_reconcile;
 pub mod watch;
