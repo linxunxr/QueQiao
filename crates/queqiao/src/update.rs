@@ -396,10 +396,13 @@ pub fn write_apply_bat(staging: &Path, home: &Path, restart_app: bool) -> Result
     let swap = |name: &str| {
         // 三行独立 if（不用括号块串联 &&：cmd 在部分环境报"此时不应有
         // &&"，2026-10-26 drill 实测换新链中断）；copy 结果落 update-apply.log。
+        // [ok]/[FAIL] 两个分支都要 >> 重定向——[ok] 只打 stdout 会随隐藏窗口
+        // 丢失，排障时日志只见 begin/done 看不出哪个件换没换（2026-11-01
+        // 真机 0.5.0 那轮桥件未换成功即无迹可查）。
         format!(
             "if exist \"{name}\" ren \"{name}\" \"{name}.old\"\r\n\
              if exist \"{staging}\\{name}\" copy /y \"{staging}\\{name}\" \"{name}\" >nul\r\n\
-             if exist \"{name}\" (echo [ok] {name}) else echo [FAIL] missing {name} >>\"%LOG%\"\r\n",
+             if exist \"{name}\" (echo [ok] {name} >>\"%LOG%\") else echo [FAIL] missing {name} >>\"%LOG%\"\r\n",
             staging = staging.display()
         )
     };
