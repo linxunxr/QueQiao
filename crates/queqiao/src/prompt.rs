@@ -54,6 +54,9 @@ pub fn build_wake_prompt(ctx: &PromptContext, reason: &str) -> String {
     base.push_str(
         "【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。\n\n",
     );
+    base.push_str(
+        "【发言自检】开口前过一遍：这条话是接了话、回了问、被点了名，或是你能自然接上的话题？是就大胆说。只是想刷个存在感、发句可有可无的应付，就安静收尾（qq_mark_read 或 qq_set_wake_config）——安静不丢分；连续静默收尾会在下次唤醒的【静默记录】里看到，届时可拉长检查间隔。\n\n",
+    );
     base.push_str(&format!(
         "【首回复节奏】先处理已有消息，完整的问题及时回答。需要确认对方是否继续补充时，用 qq_wait_for_messages(purpose=\"reply\", quietMs={})；从最后来信计时，合批和读提示词的耗时也算，目前还差约 {} 秒静默。已安静够久可直接回，工具也会立即返回并补上思考期间的新消息。只有明确没说完、你确实要等下文时，才用普通 messages 长等待。\n\n",
         ctx.reply_quiet_ms,
@@ -157,6 +160,8 @@ mod tests {
             "【安全边界】",
             "isOwner=true",
             "【反AI味】",
+            "【发言自检】",
+            "安静不丢分",
             "【首回复节奏】",
             "【此刻状态】未读 3 条；最近一条来自 群友：小鲸鱼在吗；对方可能没说完；你上次发言 12 分钟前",
             "【当前唤醒】潜水，无限；触发：@/名字/关键词",
@@ -219,16 +224,17 @@ mod tests {
         );
         assert!(text.contains("用 qq_set_wake_config 把检查间隔设长一些"));
         let status_pos = text.find("【此刻状态】").unwrap();
-        let note_pos = text.find("【静默记录】").unwrap();
+        let note_pos = text.find("【静默记录】你最近连续").unwrap();
         let wake_pos = text.find("【当前唤醒】").unwrap();
         assert!(
             status_pos < note_pos && note_pos < wake_pos,
             "注入位置应在状态与唤醒之间"
         );
-        // None 与单次连击均不注入（阈值在构造层，组装层只传原始连击）。
+        // None 与单次连击均不注入（阈值在构造层，组装层只传原始连击）；
+        // 断言用完整前缀——【发言自检】段文案里也提及「静默记录」字样。
         c.quiet_wake_streak = None;
-        assert!(!build_wake_prompt(&c, "proactiveCheck").contains("【静默记录】"));
+        assert!(!build_wake_prompt(&c, "proactiveCheck").contains("【静默记录】你最近连续"));
         c.quiet_wake_streak = Some((1, 3));
-        assert!(!build_wake_prompt(&c, "proactiveCheck").contains("【静默记录】"));
+        assert!(!build_wake_prompt(&c, "proactiveCheck").contains("【静默记录】你最近连续"));
     }
 }
