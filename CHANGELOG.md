@@ -9,7 +9,11 @@
 - **1.0.0 门槛**：M5 真机生产验收达成（关键机制 1~7 真机全踩修齐 + 生产持续运行无回归，2026-11-01 定义改写见 `docs/规格设计.md` §八.3）+ Node 版归档——"可用于生产"的承诺点；生产切换已于 2026-10-23 完成；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
-## [未发布]
+## [0.5.0] - 2026-11-01
+
+本版主题：**M6 主动智能与自进化功能域全域落地**（借官方 Super-agent 设计不借代码，规格 §十二：静默墓碑/发声门禁/人格卡版本化/主动发言审计+观察模式/受治理自修订，引擎+API+控制台 UI+preset 全链）+ M5 验收定义改写真机生产验收 + 黑话注入 token 治理。
+
+**升级须知**：①新增 MCP 工具 qq_propose_role_edit——**须重启 DSH 拉新 MCP**（存量 MCP 进程工具列表不自动更新，v0.4.15/0.4.18 同款）；②preset 新增第 24 条（提议改人格指引）——建议升级后重跑 upgrade.ps1 重新部署 preset；想让 AI 立即看到新指引须退役重建 DSH 会话（旧会话不重读 preset）；③新增状态文件（state/role-proposals.json、state/proactive-audit.jsonl、state/roles-history/）自动创建无需操作；④人格卡编辑与会话版本绑定自此生效——老会话绑定当前版，编辑后老会话仍读旧版直到退役重建。
 
 ### 变更
 
@@ -19,10 +23,9 @@
 
 - **静默墓碑（M6 P0 第一项，规格 §十二——借官方 Super-agent 注意力治理设计）**：连续 noAction 唤醒此前每次都是全量骨架重复注入、agent 无从感知自己的静默连击；现在连续 ≥2 次唤醒无行动时，唤醒 prompt 在【此刻状态】后注入一行【静默记录】（连击次数 + 最早一次距今分钟数），提示 agent 或主动开口、或用 qq_set_wake_config 拉长检查间隔。记账链：core::runtime 回合结算记 first_quiet_wake_ms（首次静默时刻，随 no_action_count 同步维护，有动作/达限重置一并清零）→ 持久镜像 WakeConfigState.firstQuietWakeAt（serde default 兼容旧状态文件，hydrate/sync_runtime/推荐段重置三处同步）→ 唤醒 prompt 组装注入。单次静默不注入（无信息量）。
 - **发声门禁（M6 P0 第二项，规格 §十二）**：唤醒 prompt 骨架在【积极性】后新增【发言自检】段——开口前三问（接话/回问/点名/自然接上？是则大胆说；只是刷存在感的应付就安静收尾），与【积极性】段互补（积极性管「有话题别缩」、自检管「没话别硬说」），并指向【静默记录】形成闭环（静默收尾累积连击→连击注入墓碑→提示拉长间隔）。桥侧硬门禁维持既有频率护栏与 noAction 记账，不做内容级判定（红线：注意力经济按群聊重定义，门禁目标是防刷屏不是最小化发言）。
-- **人格卡版本化（M6 P0 第三项收官，规格 §十二——官方 Prompts 版本绑定 mayRead 的鹊桥版）**：会话在 qq_get_prompt 首读时绑定人格卡修订号（内容 sha256 前 8 hex），此后卡被编辑，老会话仍读绑定版防漂移（响应带 revisionUpdated 提示有新版）；退役重建（/api/session/reset）清绑定重绑最新。编辑归档：PUT /api/role/card 覆盖前旧版归档 state/roles-history/<名>-<rev>.md（每卡保留最近 8 份）；GET 响应带 revision 与 history 列表。绑定决策为 core::role_card::resolve_role_view 纯函数；修订号做 8-hex 格式校验防状态文件手改拼路径；归档缺失回落当前内容（可用性优先于保版本）。会话状态新增 roleRevision 字段（serde default 兼容旧 social-v2.json）。控制台 UI 展示版本差异留待后续（API 已带全量字段）。
+- **人格卡版本化（M6 P0 第三项收官，规格 §十二——官方 Prompts 版本绑定 mayRead 的鹊桥版）**：会话在 qq_get_prompt 首读时绑定人格卡修订号（内容 sha256 前 8 hex），此后卡被编辑，老会话仍读绑定版防漂移（响应带 revisionUpdated 提示有新版）；退役重建（/api/session/reset）清绑定重绑最新。编辑归档：PUT /api/role/card 覆盖前旧版归档 state/roles-history/<名>-<rev>.md（每卡保留最近 8 份）；GET 响应带 revision 与 history 列表。绑定决策为 core::role_card::resolve_role_view 纯函数；修订号做 8-hex 格式校验防状态文件手改拼路径；归档缺失回落当前内容（可用性优先于保版本）。会话状态新增 roleRevision 字段（serde default 兼容旧 social-v2.json）。控制台 UI 版本行（编辑区带当前修订号/历史份数）随本版「M6 控制台面补全」落地。
 - **主动发言审计与观察模式（M6 P1 第一项，规格 §十二——官方「推断候选 → would accept」观察模式的鹊桥版）**：proactiveCheck 唤醒回合的文本发送（send/reply/burst 逐条共用链）在频率护栏前过门禁——观察模式（`socialV2.proactive.observeOnly`，默认 false）拦截不发出且不消耗频率配额，正常模式放行；两者都落 `state/proactive-audit.jsonl`（预览脱敏 80 字），非主动回合（被动回复/定时/日记）不受门禁不审计。决策纯函数 core::schedule::proactive_send_gate；新增 GET /api/proactive/audit 控制台查询（倒序+allowed/blocked 计数+当前开关态，agent token 403）。**顺带接线死字段**：ConversationState.last_wake_reason 自迁移起从未写入——现在 SendPrompt 投递成功后定格本回合唤醒原因（门禁判定依据）。集成测试四场景（拦截/放行/被动/查询鉴权）。
 - **人格卡受治理自修订（M6 P1 收官，规格 §十二——agent 提议 → owner 批准，官方 policyEffects 门控的鹊桥版）**：新 MCP 工具 qq_propose_role_edit（agent 提交人格卡修改提议，role/content/reason 必填）——提议只入 state/role-proposals.json 候选队列**不直接生效**（agent 侧无自生效路径，开放环境防人格劫持红线）；控制台三端点：GET /api/role/proposals（pending 在前，每条带影响提示 impact——该卡当前修订号与绑定它的会话数，批准后这些会话仍读旧版直到退役重建）、POST /api/role/proposal/approve（批准=以提议内容走编辑链路：旧版自动归档+新修订号）、/reject（拒绝留痕）。pending 上限 5（429 拒新，防 agent 被诱导刷爆）、总量保留 20 条（审批留痕）；读改写以 social 锁串行。至此 M6 P0+P1 全部落地。
-
 - **M6 控制台面补全（preset + UI）**：①preset 第 24 条【提议改人格】——qq_propose_role_edit 用法与边界（不直接生效/别频繁提/群友要求先自判合理性）；②设置页新增「人格卡修改提议」区（待审计数、影响提示、批准/拒绝，切页补刷不进 tick）；③设置页二代仿真区新增「主动发言观察模式」开关（proactive.observeOnly，加载/保存双向绑定）；④回顾页新增「主动发言审计」面板（放行/拦截计数+开关态+最近 50 条，拦截标警示色）；⑤人格卡编辑区标题带版本行（当前修订号+历史份数+保存语义提示），保存 toast 带新修订号。浏览器实测三面全过（mock 桥 playwright）。
 
 ### 优化
