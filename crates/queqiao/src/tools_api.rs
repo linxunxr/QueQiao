@@ -555,6 +555,21 @@ async fn unread(
 
 /// qq_send_message / qq_send_group_message / qq_send_private_message：
 /// 发消息回 QQ（端到端闭环的关键端点）。
+/// 数组文本解包容错：模型有时把多条消息序列化成 JSON 数组字符串塞进
+/// text（preset 旧文案「messages 数组」与 schema 参数名 text 脱节所致，
+/// 2026-11-01 真机：群里出现 `["a","b"]` 原文）——解析成功且非空即解包
+/// 分条。普通文本 serde 解析 Vec<String> 必失败，天然不误伤。
+pub fn unpack_array_text(text: &str) -> Vec<String> {
+    let t = text.trim();
+    if !(t.starts_with('[') && t.ends_with(']')) {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<String>>(t)
+        .ok()
+        .filter(|v| !v.is_empty() && v.iter().all(|s| !s.trim().is_empty()))
+        .unwrap_or_default()
+}
+
 async fn send_message(
     axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
     headers: HeaderMap,
@@ -573,6 +588,31 @@ async fn send_message(
     };
     let text = body.get("text").and_then(Value::as_str).unwrap_or_default();
     let reply_to = body.get("replyToMessageId").and_then(Value::as_i64);
+    // 容错解包：多条数组字符串 → 逐条发送（引用挂首条；每条各过频率护栏，
+    // 与 burst 逐条同语义）。
+    let parts = unpack_array_text(text);
+    if !parts.is_empty() {
+        let mut ids = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            match send_text_with_reply(&state, &key, part, if i == 0 { reply_to } else { None }) {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    if ids.is_empty() {
+                        return e;
+                    }
+                    // 部分成功：返回已发条目与失败原因（部分送达好于全弃）。
+                    mark_reply_action(&state, &key);
+                    return ok_json(json!({
+                        "messageIds": ids, "unpacked": true,
+                        "partial": format!("第 {} 条起失败：{}", i + 1,
+                            e.1.get("error").and_then(Value::as_str).unwrap_or("未知")),
+                    }));
+                }
+            }
+        }
+        mark_reply_action(&state, &key);
+        return ok_json(json!({ "messageIds": ids, "unpacked": true }));
+    }
     match send_text_with_reply(&state, &key, text, reply_to) {
         Ok(message_id) => {
             mark_reply_action(&state, &key);

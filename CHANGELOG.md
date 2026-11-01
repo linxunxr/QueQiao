@@ -15,6 +15,7 @@
 
 - **多桥并存根治（单实例语义）**：2026-11-01 真机事故——客户端与手动各拉桥形成三实例同连 OneBot，每条消息 ×3 入库、三桥各自唤醒投递互踩（AI 连续无行动、行为异常）；且桥此前在控制台端口被占时只 panic 向导/丢控制台、其余照跑。修复：启动最前（向导之前，env/默认口）+ 主流程合流处（配置口）两道单实例探测——端口已有健康鹊桥（/api/health 200 且含 mainLoopAlive）即打印退出，第二/三实例秒退。手写 TcpStream 探测零依赖（客户端探活同款）；真机验证：对着运行中桥再起一例 exit 0 秒退。
 - **工具面配置热更生效（live_cfg）**：bind-status 与 authorize 白名单此前读启动快照 cfg——真机复现：行为区开启「专属浏览器」保存热更后，绑定卡片仍报「未启用」、按钮禁用点不动（config mtime 晚于桥启动即触发）；主循环同病已由 370c19b 修，本批补工具面：ToolApiState 注入 ConsoleState（热更分支维护的活值），`live_cfg()` 优先读 current、回落快照；bind-status 的 enabled 判定与 authorize 的 conversation_allowed 均改活值。工具开关 flag（socialV2.tools.*）仍为启动快照（波及几十处端点，单独批次处理）。
+- **AI 误发 JSON 数组原文修复（三层）**：真机群聊出现 `["a","b"]` 字面量消息——tool-calls.jsonl 实锤模型把多条序列化成 JSON 数组字符串塞进 text（根因：preset 第 1 条旧文案「messages 为字符串发一条、数组发多条」与工具 schema 实际参数名 text 脱节，模型被误导折衷）。三层修复：①桥端 send_message 容错解包——text 形如非空字符串数组即逐条发送（引用挂首条、每条各过频率护栏，部分成功返回已发条目与失败位置；普通文本 serde 解析 Vec 必失败天然不误伤）；②MCP 工具描述双保险（「单条字符串，多条用 qq_send_burst 的数组参数」）；③preset 第 1 条文案修正（仓库+生产同步：text 单条、分条走 burst）。
 
 ## [0.5.2] - 2026-11-01
 

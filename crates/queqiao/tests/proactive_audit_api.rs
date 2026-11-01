@@ -191,3 +191,19 @@ fn proactive_audit_gate_and_listing() {
         assert_eq!(code, StatusCode::FORBIDDEN, "agent token 拒绝");
     });
 }
+
+/// 数组文本解包容错：多条 JSON 数组字符串解包；普通文本/空数组/含空串不误伤。
+#[test]
+fn unpack_array_text_shapes() {
+    use queqiao::tools_api::unpack_array_text;
+    let v = unpack_array_text(r#"["第一条","第二条","第三条"]"#);
+    assert_eq!(v, vec!["第一条", "第二条", "第三条"]);
+    // 普通文本（含以 [ 开头但非 JSON 的）不解包。
+    assert!(unpack_array_text("普通一句话").is_empty());
+    assert!(unpack_array_text("[链接] 不是 JSON").is_empty());
+    // 空数组/含空串：不视为多条（防把空内容当解包结果）。
+    assert!(unpack_array_text("[]").is_empty());
+    assert!(unpack_array_text(r#"["a"," "]"#).is_empty());
+    // 单元素也解包（原样发 "[x]" 文本同样怪）。
+    assert_eq!(unpack_array_text(r#"["就一条"]"#), vec!["就一条"]);
+}

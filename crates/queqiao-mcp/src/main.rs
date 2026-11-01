@@ -91,14 +91,19 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "qq_send_message",
-        description: "向当前会话发送文本消息（群或私聊按 conversationKey 自动路由）",
+        description: "向当前会话发送一条文本消息（群或私聊按 conversationKey 自动路由）。要连发多条用 qq_send_burst——本参数是单条字符串，不要传 JSON 数组字符串",
         endpoint: "send-message",
         method: "POST",
         flag: Some("sendMessage"),
         tablet_gate: TabletGate::None,
         browser_gate: BrowserGate::None,
         params: &[
-            ("text", "string", true, "消息文本"),
+            (
+                "text",
+                "string",
+                true,
+                "单条消息文本（多条请改用 qq_send_burst 的数组参数）",
+            ),
             ("replyToMessageId", "number", false, "引用回复的消息 id"),
         ],
     },
