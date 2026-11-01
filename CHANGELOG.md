@@ -16,6 +16,7 @@
 - **半更新根治（v0.5.1 用户机排障的根因闭环）**：v0.5.0 那轮真机更新只换成了客户端、桥件静默未换且无迹可查——本次四层根治：①**三件套 `--version`**（queqiao / queqiao-mcp / queqiao-app 统一输出 "<名称> <版本>"，app 的 GUI 壳打印即退不开窗口）；②**apply bat 逐件校验**：每件换装失败 `set FAIL=1`，任一失败则 **staging 保留为补装包**（不再无条件清空——此前失败后连补救材料都没了）并落 `[APPLY PARTIAL]` 日志，成功才清 staging；③**桥启动版本对账（每次启动）**：`queqiao-mcp/app.exe --version` 与桥自身比对，不一致→自动从 update-staging*/ 补装包自愈（MCP 补拷后 kill 靠 DSH respawn 拉新并触发会话退役；app 补拷后旧进程续跑到重启）；无补装包→活动日志告警提示手动检查更新；④**锁冲突文案**：撞锁错误带持有者（"桥更新器正在执行（15:27 开始）：新版多半已下载完毕，正在等会话空闲后自动应用——无需操作"），不再是一句误导性的"更新失败"。
 - **更新等空闲 30 分钟兜底**：新版就绪后一直等会话空闲，群聊持续活跃时可能永远等不到（真机：0.5.1 就绪期间用户检查更新只看到撞锁）——超 30 分钟仍忙则强制应用（进行中回合状态已即时落盘，重启恢复，无丢失）。
 - **立项：记忆二期与周期复盘（规格 §十二 P3 / 里程碑 M7）**——对标官方 ESP 补学习面：周期复盘（每 N 天安静时段触发复盘回合，产出仅为提议并走既有 owner 门控：记忆精修/黑话/人格卡三通道，复盘本身只读）；长期记忆 retention 分层（episodic→distilled 跨月沉淀），检索层落地时一并迁 SQLite+sqlite-vec（三触发信号：长期化/多会话并发/共享记忆——单用户当前量级 JSON 收益为零，不为对齐官方形态而迁）。
+- **周期复盘落地（M7 第一批次）**：core::review 三条件判定（到期 intervalDays 默认 7 天 + 白天窗口 9~21 点 + 全局安静 60min；从未复盘则首跑触发一次盘点）→ 60s 拍接线（diary 同构）→ 宿主挑最活跃会话（复用 pick_diary_host）以 reason=review 唤醒；prompt 尾段指引产出仅为提议三通道（记忆精修 qq_memory_append/remove 直改自己域 / 黑话 qq_slang_submit / 人格卡 qq_propose_role_edit 走 owner 批准），复盘不发言、无事 qq_mark_read 安静收尾；【复盘素材】块为全局盘点视角（各会话记忆概览+宿主标注、近 3 篇日记锚点、人格卡版本+待审提议数、黑话确认/候选统计）。状态 state/review.json（lastReviewAt，fire 即记宁缺勿重）；wake_priority 表 review=10（diary 之下）；config socialV2.review 节（enabled 默认 true/intervalDays 7/notBeforeHour 9/notAfterHour 21/quietMs 60min）。测试：判定全分支、素材形状、状态往返；env 测试加跨模块 ENV_TEST_LOCK（QUEQIAO_HOME 并行 set_var 竞态）。
 
 ## [0.5.1] - 2026-11-01
 

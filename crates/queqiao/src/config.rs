@@ -841,6 +841,32 @@ impl Default for DiaryConfig {
     }
 }
 
+/// 周期复盘（M7 第一批次，规格 §十二 P3）：到期 + 白天窗口 + 全局安静
+/// 三条件触发复盘回合——agent 审视记忆/日记/人格一致性，产出仅为提议
+/// 走既有门控（记忆精修/黑话/人格卡三通道），复盘本身只读不发言。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ReviewConfig {
+    pub enabled: bool,
+    /// 复盘周期（天）。首次（无状态）启动即触发一次盘点，此后按周期。
+    pub interval_days: u64,
+    pub not_before_hour: u8,
+    pub not_after_hour: u8,
+    pub quiet_ms: u64,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_days: 7,
+            not_before_hour: 9,
+            not_after_hour: 21,
+            quiet_ms: 3_600_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SocialV2Config {
@@ -858,6 +884,7 @@ pub struct SocialV2Config {
     pub feedback: FeedbackConfig,
     pub context: ContextConfig,
     pub diary: DiaryConfig,
+    pub review: ReviewConfig,
 }
 
 impl Default for SocialV2Config {
@@ -877,6 +904,7 @@ impl Default for SocialV2Config {
             feedback: FeedbackConfig::default(),
             context: ContextConfig::default(),
             diary: DiaryConfig::default(),
+            review: ReviewConfig::default(),
         }
     }
 }

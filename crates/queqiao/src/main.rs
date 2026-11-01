@@ -1170,6 +1170,7 @@ async fn run(setup: Setup) {
     // 当前日记回合（写入日期 + 唤醒素材块）：主循环触发时置、write-diary
     // 提交成功后清；Executor 与工具端点共享（Node diaryPendingDate 语义）。
     let diary_pending = std::sync::Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+    let review_pending = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     // 调度请求通道：发送端点/唤醒配置 → 主循环排定时器（回复检查、有限
     // 潜水闹钟、主动等待取消——定时器轮在主循环，工具端点经通道转交）。
     let (sched_tx, mut sched_rx) =
@@ -1313,6 +1314,7 @@ async fn run(setup: Setup) {
     // last_tried_at 是跨会话全局冷却锚点，与 core 判定同生命周期）。
     let boot_ms = now_ms();
     let mut diary_last_poll = 0u64;
+    let mut review_last_poll = 0u64;
     let mut diary_last_tried_at = 0u64;
     let mut diary_catchup_done = false;
     let executor = Executor {
@@ -1327,6 +1329,7 @@ async fn run(setup: Setup) {
         sticker: cfg.social_v2.sticker.clone(),
         slang: cfg.slang.clone(),
         diary_pending: diary_pending.clone(),
+        review_pending: review_pending.clone(),
         onebot: onebot_http.clone(),
         watch: watch.clone(),
     };
@@ -1738,6 +1741,74 @@ async fn run(setup: Setup) {
                         }
                     }
                 }
+                // 周期复盘（M7-1，core::review 判定 + review_sched 素材）：
+                // 到期 + 白天窗口 + 全局安静 → 宿主（最活跃会话）触发复盘回合。
+                // fire 即记 lastReviewAt（低频任务宁缺勿重：宿主繁忙/投递失败
+                // 都等下个周期，不做分钟级重试）。
+                if now.saturating_sub(review_last_poll) >= queqiao_core::runtime::DIARY_TICK_MS {
+                    review_last_poll = now;
+                    let rcfg = config_file.config().social_v2.review.clone();
+                    let paused = social_arc.lock().map(|s| s.paused()).unwrap_or(false);
+                    if rcfg.enabled && !paused {
+                        let input = queqiao_core::review::ReviewTickInput {
+                            now_ms: now,
+                            last_review_at: queqiao::review_sched::load_last_review_at(),
+                            last_activity_at: social_arc
+                                .lock()
+                                .map(|s| queqiao::diary_sched::global_last_activity(&s))
+                                .unwrap_or(0),
+                            now_local_hour: now_local().hour,
+                            not_before_hour: rcfg.not_before_hour,
+                            not_after_hour: rcfg.not_after_hour,
+                            quiet_ms: rcfg.quiet_ms,
+                            interval_ms: rcfg.interval_days * 86_400_000,
+                        };
+                        if queqiao_core::review::review_due(&input) {
+                            queqiao::review_sched::save_last_review_at(now);
+                            let keys = orchestrator.session_keys();
+                            let host = social_arc.lock().ok().and_then(|s| {
+                                queqiao::diary_sched::pick_diary_host(&s, &keys, now)
+                            });
+                            match host {
+                                None => {
+                                    queqiao::logging::log("复盘：没有任何会话活动，跳过本周期");
+                                }
+                                Some(host)
+                                    if orchestrator
+                                        .session(&host)
+                                        .is_some_and(|rt| rt.is_busy()) =>
+                                {
+                                    queqiao::logging::log(&format!(
+                                        "复盘：宿主会话 {host} 繁忙，本周期跳过"
+                                    ));
+                                }
+                                Some(host) => {
+                                    let material = social_arc.lock().ok().map(|s| {
+                                        queqiao::review_sched::build_review_material(
+                                            &queqiao::paths::queqiao_home(),
+                                            &s,
+                                            &host,
+                                        )
+                                    });
+                                    *review_pending.lock().unwrap() = material;
+                                    queqiao::logging::log(&format!(
+                                        "复盘触发（宿主 {host}，周期 {} 天）",
+                                        rcfg.interval_days
+                                    ));
+                                    executor
+                                        .execute_capped(
+                                            vec![BridgeAction::SendPrompt {
+                                                key: host,
+                                                reason: "review".into(),
+                                            }],
+                                            now,
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
                 // 配置热更：UI 保存 → mtime 变化 → 重载进 ConsoleState（坏配置保留旧值）。
                 if now.saturating_sub(last_tick) > 5_000 {
                     last_tick = now;
@@ -2130,6 +2201,8 @@ struct Executor {
     slang: queqiao::config::SlangConfig,
     /// 日记回合素材（diary:* 唤醒时从锁定态取出拼进 prompt）。
     diary_pending: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    /// 复盘回合素材（review 唤醒时取出拼进 prompt——M7-1 周期复盘）。
+    review_pending: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// 错误亮群友的出站通道（core 在 agent 回合失败且重试耗尽时产出
     /// SendMessage——此前只有 println 占位，群友对出错无感知）。
     onebot: OneBotHttpClient,
@@ -2354,8 +2427,17 @@ impl Executor {
                     } else {
                         String::new()
                     };
+                    let review_block = if reason == "review" {
+                        self.review_pending
+                            .lock()
+                            .ok()
+                            .and_then(|p| p.as_ref().cloned())
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     let text = format!(
-                        "{time_line}{slang_block}{memory_block}{sticker_block}{text}{diary_block}"
+                        "{time_line}{slang_block}{memory_block}{sticker_block}{text}{diary_block}{review_block}"
                     );
                     // 注入体量记账：攒每会话的唤醒 prompt 配比（记忆/骨架孰为大头）。
                     queqiao::logging::log(&format!(

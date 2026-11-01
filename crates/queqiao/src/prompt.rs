@@ -109,6 +109,10 @@ pub fn build_wake_prompt(ctx: &PromptContext, reason: &str) -> String {
             "{base}【拍一拍】{key}\n有人在群里拍了拍你（或你拍的人引发关注）。查看最近消息判断语境：如果是叫你，自然回应；如果是别人的互动，看情况要不要凑热闹。用 qq_set_wake_config 维持你的唤醒条件。",
             key = ctx.key
         ),
+        "review" => format!(
+            "{base}【复盘时间】{key}\n这是一次周期复盘（对照消息末尾【复盘素材】段盘点你的整体状态）：审视记忆、日记与人格设定有没有过时、矛盾或缺失。产出只能是提议——清理/补充记忆用 qq_memory_append / qq_memory_remove（记忆是你自己的，可直接改）；发现值得收录的新梗走 qq_slang_submit；想调整人格用 qq_propose_role_edit（管理员批准才生效）。没有任何要调整的也正常：用 qq_mark_read 安静收尾。复盘不发言——不要往群里发任何消息。",
+            key = ctx.key
+        ),
         other => {
             // keyword:xxx / atMention / private / question / speaker / anyMessage /
             // probability / diary 等：通用唤醒尾段。

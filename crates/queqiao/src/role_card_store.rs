@@ -37,6 +37,14 @@ pub fn current_role_name(home: &Path, conv_key: &str) -> Option<String> {
     sanitize_role_name(&name)
 }
 
+/// 会话当前角色卡的修订号（无角色/无卡 → None）——版本对账与复盘素材用。
+pub fn current_revision(home: &Path, conv_key: &str) -> Option<String> {
+    let name = current_role_name(home, conv_key)?;
+    std::fs::read_to_string(home.join("roles").join(format!("{name}.md")))
+        .ok()
+        .map(|c| card_revision(&c))
+}
+
 /// V2 注入用全文人格卡（模式筛小节 + 一代指令兜底过滤 + 截断）。
 /// 角色未设置 / 卡片不存在 / 名非法 → 空串（调用方省略注入）。
 pub fn hint_v2(home: &Path, conv_key: &str, max_chars: usize) -> String {

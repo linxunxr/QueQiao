@@ -26,6 +26,7 @@ pub fn wake_priority(reason: &str) -> u32 {
         "timeout" => 30,
         "proactiveCheck" => 20,
         "diary" => 15,
+        "review" => 10,
         _ => 0,
     }
 }

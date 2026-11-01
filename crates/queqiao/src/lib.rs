@@ -12,6 +12,7 @@ pub mod memory;
 pub mod orchestrator;
 pub mod paths;
 pub mod prompt;
+pub mod review_sched;
 pub mod role_card_store;
 pub mod session_manager;
 pub mod slang_store;
@@ -23,3 +24,9 @@ pub mod tools_api;
 pub mod update;
 pub mod upgrade_reconcile;
 pub mod watch;
+
+#[cfg(test)]
+/// QUEQIAO_HOME 环境变量测试互斥锁：进程级 env 的并行 set_var 存在竞态
+///（upgrade_reconcile 与 review_sched 的文件状态测试共用——同三 store
+/// FS_LOCK 的教训，env 污染面跨模块时锁也必须跨模块）。
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
