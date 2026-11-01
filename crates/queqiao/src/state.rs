@@ -294,6 +294,11 @@ pub struct ConversationState {
     #[serde(default)]
     #[serde(deserialize_with = "lenient_vec")]
     pub seen_forward_ids: Vec<String>,
+    /// 人格卡版本绑定（qq_get_prompt 首读时钉住当前修订号；此后卡被编辑，
+    /// 老会话仍读绑定版防漂移——决策见 core::role_card::resolve_role_view，
+    /// 归档见 role_card_store；会话退役重建时清空重绑）。
+    #[serde(default)]
+    pub role_revision: Option<String>,
 }
 
 impl ConversationState {
@@ -554,6 +559,7 @@ mod tests {
             "pendingThoughts",
             "memberImpressions",
             "seenForwardIds",
+            "roleRevision",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected);

@@ -19,6 +19,7 @@
 
 - **静默墓碑（M6 P0 第一项，规格 §十二——借官方 Super-agent 注意力治理设计）**：连续 noAction 唤醒此前每次都是全量骨架重复注入、agent 无从感知自己的静默连击；现在连续 ≥2 次唤醒无行动时，唤醒 prompt 在【此刻状态】后注入一行【静默记录】（连击次数 + 最早一次距今分钟数），提示 agent 或主动开口、或用 qq_set_wake_config 拉长检查间隔。记账链：core::runtime 回合结算记 first_quiet_wake_ms（首次静默时刻，随 no_action_count 同步维护，有动作/达限重置一并清零）→ 持久镜像 WakeConfigState.firstQuietWakeAt（serde default 兼容旧状态文件，hydrate/sync_runtime/推荐段重置三处同步）→ 唤醒 prompt 组装注入。单次静默不注入（无信息量）。
 - **发声门禁（M6 P0 第二项，规格 §十二）**：唤醒 prompt 骨架在【积极性】后新增【发言自检】段——开口前三问（接话/回问/点名/自然接上？是则大胆说；只是刷存在感的应付就安静收尾），与【积极性】段互补（积极性管「有话题别缩」、自检管「没话别硬说」），并指向【静默记录】形成闭环（静默收尾累积连击→连击注入墓碑→提示拉长间隔）。桥侧硬门禁维持既有频率护栏与 noAction 记账，不做内容级判定（红线：注意力经济按群聊重定义，门禁目标是防刷屏不是最小化发言）。
+- **人格卡版本化（M6 P0 第三项收官，规格 §十二——官方 Prompts 版本绑定 mayRead 的鹊桥版）**：会话在 qq_get_prompt 首读时绑定人格卡修订号（内容 sha256 前 8 hex），此后卡被编辑，老会话仍读绑定版防漂移（响应带 revisionUpdated 提示有新版）；退役重建（/api/session/reset）清绑定重绑最新。编辑归档：PUT /api/role/card 覆盖前旧版归档 state/roles-history/<名>-<rev>.md（每卡保留最近 8 份）；GET 响应带 revision 与 history 列表。绑定决策为 core::role_card::resolve_role_view 纯函数；修订号做 8-hex 格式校验防状态文件手改拼路径；归档缺失回落当前内容（可用性优先于保版本）。会话状态新增 roleRevision 字段（serde default 兼容旧 social-v2.json）。控制台 UI 展示版本差异留待后续（API 已带全量字段）。
 
 ### 优化
 

@@ -288,9 +288,76 @@ pub fn role_hint_v2(text: &str, max_chars: usize) -> String {
     kept.join("\n")
 }
 
+/// 人格卡版本视图决策（版本化：会话绑定首次读取时的修订号，热更不漂移）。
+///
+/// `bound` = 会话已绑定的修订号（None=未绑定）；`current` = 当前卡修订号
+/// （None=无角色/无卡）。返回 `want`（本次应注入的修订号——老会话被编辑
+/// 后仍读绑定版）、`bind`（需要写回会话的新绑定，None=不动）、`updated`
+/// （绑定与当前不一致，可向控制台/模型提示有新版）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleView {
+    pub want: Option<String>,
+    pub bind: Option<String>,
+    pub updated: bool,
+}
+
+pub fn resolve_role_view(bound: Option<&str>, current: Option<&str>) -> RoleView {
+    match (bound, current) {
+        (Some(b), Some(c)) if b == c => RoleView {
+            want: Some(c.to_owned()),
+            bind: None,
+            updated: false,
+        },
+        (Some(b), Some(_)) => RoleView {
+            want: Some(b.to_owned()),
+            bind: None,
+            updated: true,
+        },
+        (None, Some(c)) => RoleView {
+            want: Some(c.to_owned()),
+            bind: Some(c.to_owned()),
+            updated: false,
+        },
+        // 无卡：不注入、不绑定、不提示（切角色/删卡走既有语义）。
+        _ => RoleView {
+            want: None,
+            bind: None,
+            updated: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 版本绑定决策：首读绑定、未更原样、热更读旧版并标记、无卡全空。
+    #[test]
+    fn role_view_binding_decisions() {
+        let v = resolve_role_view(None, Some("aa11bb22"));
+        assert_eq!(v.want.as_deref(), Some("aa11bb22"));
+        assert_eq!(v.bind.as_deref(), Some("aa11bb22"));
+        assert!(!v.updated, "首次绑定不算更新");
+
+        let v = resolve_role_view(Some("aa11bb22"), Some("aa11bb22"));
+        assert_eq!(v.want.as_deref(), Some("aa11bb22"));
+        assert!(v.bind.is_none(), "已绑定不动");
+        assert!(!v.updated);
+
+        let v = resolve_role_view(Some("aa11bb22"), Some("cc33dd44"));
+        assert_eq!(
+            v.want.as_deref(),
+            Some("aa11bb22"),
+            "热更后老会话仍读绑定版"
+        );
+        assert!(v.bind.is_none());
+        assert!(v.updated, "标记有新版");
+
+        let v = resolve_role_view(Some("aa11bb22"), None);
+        assert!(v.want.is_none() && v.bind.is_none() && !v.updated);
+        let v = resolve_role_view(None, None);
+        assert!(v.want.is_none() && v.bind.is_none() && !v.updated);
+    }
 
     const SAMPLE: &str = "# 你是谁\n你是小鲸鱼，喜欢玩平板。\n\n## 表情包体系 〔二代〕\n用 qq_send_sticker 工具发表情。\n\n## 分条方式 〔一代〕\n用空格分句，不想说就 [SILENT]\n\n## 回复示例（空格代表前后分两条消息回答）\n今天天气真好 啊\n";
 

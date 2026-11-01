@@ -403,18 +403,46 @@ async fn prompt(
         Ok(k) => k,
         Err(e) => return e,
     };
-    let store = state.social.lock().unwrap();
+    let mut store = state.social.lock().unwrap();
     let st = store.conversation(&key);
     // 角色卡（Node 同源）：唤醒 prompt 只注角色名，全文卡由此端点给 AI——
     // V2 装配（模式筛小节 + 一代指令兜底过滤 + 截断）。
+    // 版本化（M6 P0）：会话首读绑定修订号，卡被编辑后老会话仍读绑定版
+    //（防漂移）；决策纯函数见 core::role_card::resolve_role_view。
     let home = crate::paths::queqiao_home();
     let role_name = crate::role_card_store::current_role_name(&home, &key);
-    let role_hint = crate::role_card_store::hint_v2(&home, &key, state.cfg.role.max_inject_chars);
+    let current_rev = role_name.as_ref().and_then(|n| {
+        std::fs::read_to_string(home.join("roles").join(format!("{n}.md")))
+            .ok()
+            .map(|c| crate::role_card_store::card_revision(&c))
+    });
+    let view = queqiao_core::role_card::resolve_role_view(
+        st.and_then(|s| s.role_revision.as_deref()),
+        current_rev.as_deref(),
+    );
+    let role_hint = crate::role_card_store::hint_v2_at(
+        &home,
+        &key,
+        state.cfg.role.max_inject_chars,
+        view.want.as_deref(),
+    );
+    let unread_n = st.map(|s| s.unread.len()).unwrap_or(0);
+    let wake_cfg = st.map(|s| s.wake_config.clone()).unwrap_or_default();
+    let has_conv = st.is_some();
+    if has_conv && let Some(b) = view.bind {
+        store.conversation_mut(&key).role_revision = Some(b);
+    }
     ok_json(json!({
         "conversationKey": key,
-        "role": { "name": role_name, "hint": role_hint },
-        "unread": st.map(|s| s.unread.len()).unwrap_or(0),
-        "wakeConfig": st.map(|s| s.wake_config.clone()).unwrap_or_default(),
+        "role": {
+            "name": role_name,
+            "hint": role_hint,
+            "revision": view.want,
+            "currentRevision": current_rev,
+            "revisionUpdated": view.updated,
+        },
+        "unread": unread_n,
+        "wakeConfig": wake_cfg,
         "recommendations": state.cfg.social_v2.provide_recommendations,
     }))
 }
@@ -3481,11 +3509,16 @@ async fn role_card_get(
     let Some(name) = role_name_ok(q.get("name").map(String::as_str).unwrap_or_default()) else {
         return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
     };
-    let path = crate::paths::queqiao_home()
-        .join("roles")
-        .join(format!("{name}.md"));
+    let home = crate::paths::queqiao_home();
+    let path = home.join("roles").join(format!("{name}.md"));
     match std::fs::read_to_string(&path) {
-        Ok(content) => ok_json(json!({ "name": name, "content": content })),
+        Ok(content) => {
+            let revision = crate::role_card_store::card_revision(&content);
+            let history = crate::role_card_store::history_revisions(&home, &name);
+            ok_json(
+                json!({ "name": name, "content": content, "revision": revision, "history": history }),
+            )
+        }
         Err(_) => denied(StatusCode::NOT_FOUND, &format!("roles/{name}.md 不存在")),
     }
 }
@@ -3511,11 +3544,17 @@ async fn role_card_put(
     if content.len() > 64 * 1024 {
         return denied(StatusCode::BAD_REQUEST, "人格卡超 64KB——检查是否贴错内容");
     }
-    let path = crate::paths::queqiao_home()
-        .join("roles")
-        .join(format!("{name}.md"));
+    let home = crate::paths::queqiao_home();
+    // 版本化：覆盖前归档旧版（内容变化才归档，每卡保留最近 8 份）。
+    crate::role_card_store::archive_if_changed(&home, &name, content);
+    let path = home.join("roles").join(format!("{name}.md"));
     match crate::state::atomic_write_json(&path, content) {
-        Ok(()) => ok_json(json!({ "saved": true, "name": name, "bytes": content.len() })),
+        Ok(()) => ok_json(json!({
+            "saved": true,
+            "name": name,
+            "bytes": content.len(),
+            "revision": crate::role_card_store::card_revision(content),
+        })),
         Err(e) => denied(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("写 roles/{name}.md 失败：{e}"),
@@ -3636,6 +3675,10 @@ async fn session_reset(
         return denied(StatusCode::INTERNAL_SERVER_ERROR, "sessions 锁中毒");
     };
     m.retire(&key);
+    // 退役重建后 agent 重新 bootstrap——人格卡版本重绑最新版。
+    if let Ok(mut store) = state.social.lock() {
+        store.conversation_mut(&key).role_revision = None;
+    }
     ok_json(json!({ "retired": true, "conversationKey": key }))
 }
 
