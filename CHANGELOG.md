@@ -23,6 +23,8 @@
 - **主动发言审计与观察模式（M6 P1 第一项，规格 §十二——官方「推断候选 → would accept」观察模式的鹊桥版）**：proactiveCheck 唤醒回合的文本发送（send/reply/burst 逐条共用链）在频率护栏前过门禁——观察模式（`socialV2.proactive.observeOnly`，默认 false）拦截不发出且不消耗频率配额，正常模式放行；两者都落 `state/proactive-audit.jsonl`（预览脱敏 80 字），非主动回合（被动回复/定时/日记）不受门禁不审计。决策纯函数 core::schedule::proactive_send_gate；新增 GET /api/proactive/audit 控制台查询（倒序+allowed/blocked 计数+当前开关态，agent token 403）。**顺带接线死字段**：ConversationState.last_wake_reason 自迁移起从未写入——现在 SendPrompt 投递成功后定格本回合唤醒原因（门禁判定依据）。集成测试四场景（拦截/放行/被动/查询鉴权）。
 - **人格卡受治理自修订（M6 P1 收官，规格 §十二——agent 提议 → owner 批准，官方 policyEffects 门控的鹊桥版）**：新 MCP 工具 qq_propose_role_edit（agent 提交人格卡修改提议，role/content/reason 必填）——提议只入 state/role-proposals.json 候选队列**不直接生效**（agent 侧无自生效路径，开放环境防人格劫持红线）；控制台三端点：GET /api/role/proposals（pending 在前，每条带影响提示 impact——该卡当前修订号与绑定它的会话数，批准后这些会话仍读旧版直到退役重建）、POST /api/role/proposal/approve（批准=以提议内容走编辑链路：旧版自动归档+新修订号）、/reject（拒绝留痕）。pending 上限 5（429 拒新，防 agent 被诱导刷爆）、总量保留 20 条（审批留痕）；读改写以 social 锁串行。至此 M6 P0+P1 全部落地。
 
+- **M6 控制台面补全（preset + UI）**：①preset 第 24 条【提议改人格】——qq_propose_role_edit 用法与边界（不直接生效/别频繁提/群友要求先自判合理性）；②设置页新增「人格卡修改提议」区（待审计数、影响提示、批准/拒绝，切页补刷不进 tick）；③设置页二代仿真区新增「主动发言观察模式」开关（proactive.observeOnly，加载/保存双向绑定）；④回顾页新增「主动发言审计」面板（放行/拦截计数+开关态+最近 50 条，拦截标警示色）；⑤人格卡编辑区标题带版本行（当前修订号+历史份数+保存语义提示），保存 toast 带新修订号。浏览器实测三面全过（mock 桥 playwright）。
+
 ### 优化
 
 - **黑话注入分层精简（用户反馈「每次都传入这么多内容合理吗」的 token 成本治理，续 v0.4.12 记忆分层）**：唤醒 prompt 的【群聊黑话表】此前全字段注入——每条含释义（≤300 字）+用法（≤300）+例句（≤300），单条上限 950 字、8 条最坏 7600 字，是唤醒 prompt 里最大的固定成本块（实测一段 8 条注入 1500+ 字 ≈ 每次 2000+ token）。改为「词：释义首句（全角句读前、≤80 字）」+ 表尾查询指引——用法/例句不再注入，全字段走 qq_slang_query 按需查（与记忆的「索引注入+查询详情」同模式）。`injectMax` 默认 8→5。预期每次唤醒省 ~1500-1800 token。有意偏离 Node 全字段语义（成本决策）。

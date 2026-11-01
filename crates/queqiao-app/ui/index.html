@@ -249,6 +249,17 @@
       <div id="feedbackBody" class="hint" style="margin-top:10px">检测中…</div>
     </details>
   </section>
+
+  <section>
+    <details id="proactiveBox">
+      <summary>主动发言审计<span class="sum-note" id="proactiveSum">—</span></summary>
+      <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="ghost mini" onclick="refreshProactiveAudit()">刷新</button>
+        <span class="hint">AI 主动检查（proactiveCheck）回合的发言意图——观察模式下拦截不发出、正常模式放行也留痕</span>
+      </div>
+      <div id="proactiveBody" class="hint" style="margin-top:10px">—</div>
+    </details>
+  </section>
 </main>
 
 <!-- ── 设置：全部配置表单 ──────────────────────────────────────────────────── -->
@@ -286,8 +297,19 @@
     </div>
   </section>
 
+  <section>
+    <details id="roleProposalBox">
+      <summary>人格卡修改提议<span class="sum-note" id="roleProposalSum">—</span></summary>
+      <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="ghost mini" onclick="refreshRoleProposals()">刷新</button>
+        <span class="hint">AI 用 qq_propose_role_edit 提交的修改；批准后成为新版（旧版自动归档，已开会话仍读旧版直到重建）</span>
+      </div>
+      <div id="roleProposalBody" class="hint" style="margin-top:10px">—</div>
+    </details>
+  </section>
+
   <section id="roleEditBox" style="display:none">
-    <h2>编辑人格卡 <span class="hint" id="roleEditName"></span></h2>
+    <h2>编辑人格卡 <span class="hint" id="roleEditName"></span> <span class="hint" id="roleEditRev"></span></h2>
     <div class="field" id="roleNameField" style="display:none"><label>人格名（中文/字母/数字/横线）</label><input type="text" id="re-name"></div>
     <div class="field"><label>人格卡内容（Markdown；保存后下一条消息即刻生效，无需重启）</label><textarea id="re-content" spellcheck="false"></textarea></div>
     <div style="display:flex;gap:8px"><button onclick="saveRoleCard()">保存</button><button class="ghost" id="re-del" onclick="delRoleCard()">删除</button><button class="ghost" onclick="hideRoleEdit()">取消</button></div>
@@ -324,6 +346,7 @@
       <div class="field"><label>语音功能（tools.sendVoice）</label><select id="f-voice"><option value="false">关闭（默认，AI 发文字）</option><option value="true">开启（AI 可发语音/合成语音）</option></select></div>
       <div class="field"><label>表情包（sticker.enabled）</label><select id="f-sticker"><option value="true">开启</option><option value="false">关闭</option></select></div>
       <div class="field"><label>收语音转写（voice.asrEnabled）</label><select id="f-asr"><option value="true">开启（本地转写回填，默认）</option><option value="false">关闭（保留 [语音] 占位）</option></select></div>
+      <div class="field"><label>主动发言观察模式（proactive.observeOnly）</label><select id="f-proactiveObserve"><option value="false">关闭（主动冒泡直接发送，默认）</option><option value="true">观察（只记录审计不发出）</option></select><div class="hint">AI 主动检查回合的发言在观察模式下只进审计（回顾页可查），回复/被点名不受影响</div></div>
     </div>
     <div class="row" style="margin-top:2px">
       <div class="field" style="flex:2"><label>ASR 模型（paraformer-zh，~217MB，本地推理不出机）</label>
@@ -471,8 +494,10 @@ function showTab(name) {
   // 延迟一拍：初始化期 showTab 先于 bridgeOnline 的 let 声明执行（TDZ），
   // 且此刻桥态未探测；refreshSlang 自身会按 bridgeOnline 给出占位。
   if (name === 'slang') setTimeout(() => refreshSlang(), 0);
-  // 回顾页三个面板不进 tick 轮询（重渲染打断阅读），切页时补刷一次。
-  if (name === 'review') setTimeout(() => { refreshCost(); refreshDiary(); refreshFeedback(); }, 0);
+  // 回顾页面板不进 tick 轮询（重渲染打断阅读），切页时补刷一次。
+  if (name === 'review') setTimeout(() => { refreshCost(); refreshDiary(); refreshFeedback(); refreshProactiveAudit(); }, 0);
+  // 设置页的提议审批同为低频面，切页补刷（不进 tick）。
+  if (name === 'settings') setTimeout(() => refreshRoleProposals(), 0);
   // 保存/导出是设置页动作，总览不显示（main 的 padding-bottom 也随之收紧）。
   $('settingsBar').style.display = name === 'settings' ? 'flex' : 'none';
   document.querySelectorAll('main').forEach(m => m.style.paddingBottom = name === 'settings' ? '96px' : '28px');
@@ -707,6 +732,7 @@ async function load() {
   v('f-voice', String((cfg.socialV2 && cfg.socialV2.tools && cfg.socialV2.tools.sendVoice) === true));
   v('f-asr', String((cfg.socialV2 && cfg.socialV2.voice || {}).asrEnabled !== false));
   v('f-sticker', String((cfg.socialV2 && cfg.socialV2.sticker || {}).enabled !== false));
+  v('f-proactiveObserve', String((cfg.socialV2 && cfg.socialV2.proactive || {}).observeOnly === true));
   v('f-dshModel', cfg.dsh && cfg.dsh.model);
   v('f-dshProvider', cfg.dsh && cfg.dsh.provider);
   v('f-dshEffort', cfg.dsh && cfg.dsh.reasoningEffort);
@@ -848,6 +874,7 @@ async function save() {
   body.browser.enabled = document.getElementById('f-browser').value === 'true';
   body.browser.headless = document.getElementById('f-browser-headless').value === 'true';
   body.socialV2.proactive = body.socialV2.proactive || {}; body.socialV2.proactive.enabled = document.getElementById('f-proactive').value === 'true';
+  body.socialV2.proactive.observeOnly = $('f-proactiveObserve').value === 'true';
   body.autoUpdate = document.getElementById('f-autoUpdate').value === 'true';
   body.socialV2 = body.socialV2 || {};
   body.socialV2.wake = body.socialV2.wake || {};
@@ -970,6 +997,9 @@ async function editRole() {
     if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
     roleEditExisting = true;
     $('roleEditName').textContent = '（' + role + '）';
+    $('roleEditRev').textContent = res.value.revision
+      ? '版本 ' + res.value.revision + '（历史 ' + ((res.value.history || []).length) + ' 份；保存产生新版本，已开会话仍读当前版直到重建）'
+      : '';
     $('roleNameField').style.display = 'none';
     $('re-name').value = role;
     $('re-content').value = res.value.content || '';
@@ -981,6 +1011,7 @@ async function editRole() {
 function newRole() {
   roleEditExisting = false;
   $('roleEditName').textContent = '（新人格）';
+  $('roleEditRev').textContent = '';
   $('roleNameField').style.display = '';
   $('re-name').value = '';
   $('re-content').value = '';
@@ -1008,7 +1039,7 @@ async function saveRoleCard() {
     });
     const res = await r.json();
     if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
-    toast('已保存 ' + name + '（下一条消息生效）', true);
+    toast('已保存 ' + name + '（版本 ' + (res.value.revision || '新') + '，下一条消息生效）', true);
     hideRoleEdit();
     loadRoles();
   } catch (e) { toast('保存失败：' + e.message, false); }
@@ -1025,6 +1056,78 @@ async function delRoleCard() {
     hideRoleEdit();
     loadRoles();
   } catch (e) { toast('删除失败：' + e.message, false); }
+}
+
+// ── 人格卡修改提议（M6 受治理自修订）：AI 提议 → 管理员批准生效为新版 ──
+async function refreshRoleProposals() {
+  try {
+    const r = await apiFetch(BRIDGE + '/api/role/proposals');
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    const list = res.value.proposals || [];
+    const pending = list.filter(p => p.status === 'pending');
+    $('roleProposalSum').textContent = pending.length ? pending.length + ' 条待审' : '无待审';
+    if (!list.length) { $('roleProposalBody').textContent = '还没有提议。AI 想调整人格时会通过 qq_propose_role_edit 提交到这里。'; return; }
+    $('roleProposalBody').innerHTML = list.map(p => {
+      const imp = p.impact
+        ? `（当前版本 ${p.impact.currentRevision || '无卡'}，${p.impact.sessionsOnCurrent} 个会话绑定——批准后它们仍读旧版直到退役重建）`
+        : '';
+      const btns = p.status === 'pending'
+        ? `<button class="mini" onclick="approveRoleProposal('${p.id}')">批准</button> <button class="ghost mini" onclick="rejectRoleProposal('${p.id}')">拒绝</button>`
+        : `<span class="hint">已${p.status === 'approved' ? '批准生效' : '拒绝'}</span>`;
+      const time = p.createdAt ? new Date(p.createdAt).toLocaleString() : '';
+      const content = String(p.content || '');
+      return `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px">
+        <div><b>${esc(p.role)}</b> · ${time} · 来自 ${esc(p.conversationKey)} · ${btns}</div>
+        <div class="hint">理由：${esc(p.reason || '')}${imp}</div>
+        <details style="margin-top:4px"><summary class="hint">内容预览（${content.length} 字）</summary><pre class="hint" style="white-space:pre-wrap">${esc(content.slice(0, 200))}…</pre></details>
+      </div>`;
+    }).join('');
+  } catch (e) { $('roleProposalSum').textContent = '读取失败'; }
+}
+async function approveRoleProposal(id) {
+  if (!(await ask('批准该提议？将覆盖当前人格卡（旧版自动归档，已开会话仍读旧版直到重建）。', '批准', true))) return;
+  try {
+    const r = await apiFetch(BRIDGE + '/api/role/proposal/approve', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    toast('已批准生效（新版 ' + (res.value.newRevision || '') + '）', true);
+    refreshRoleProposals();
+  } catch (e) { toast('批准失败：' + e.message, false); }
+}
+async function rejectRoleProposal(id) {
+  try {
+    const r = await apiFetch(BRIDGE + '/api/role/proposal/reject', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    toast('已拒绝', true);
+    refreshRoleProposals();
+  } catch (e) { toast('操作失败：' + e.message, false); }
+}
+
+// ── 主动发言审计（M6 观察模式）：拦截与放行留痕，回顾页低频面 ──
+async function refreshProactiveAudit() {
+  try {
+    const r = await apiFetch(BRIDGE + '/api/proactive/audit?limit=50');
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
+    const { entries, allowed, blocked, observeOnly } = res.value;
+    $('proactiveSum').textContent = `放行 ${allowed || 0} · 拦截 ${blocked || 0}${observeOnly ? ' · 观察模式开启中' : ''}`;
+    if (!entries || !entries.length) { $('proactiveBody').textContent = '还没有记录。AI 主动检查回合的发言（无论放行或观察模式拦截）都会记在这里。'; return; }
+    $('proactiveBody').innerHTML = entries.map(e => {
+      const time = e.time ? new Date(e.time).toLocaleString() : '';
+      const tag = e.outcome === 'blocked'
+        ? '<span style="color:var(--warn)">拦截未发出</span>'
+        : '放行';
+      return `<div style="margin-bottom:6px">${time} · ${esc(e.key)} · ${tag} · ${esc(e.preview || '')}</div>`;
+    }).join('');
+  } catch (e) { $('proactiveSum').textContent = '读取失败'; }
 }
 
 let pendingRel = null;
