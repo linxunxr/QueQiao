@@ -106,6 +106,24 @@ impl SocialStore {
         seq
     }
 
+    /// 按 message_id 回填消息文本（ASR 转写回写 recent 与 unread 两处；
+    /// Node scheduleVoiceTranscriptionV2 的 `[语音] 文字` 语义）。返回是否
+    /// 命中（未命中说明已被 100/30 条上限裁掉——正常静默）。
+    pub fn update_message_text(&mut self, key: &str, message_id: &str, text: &str) -> bool {
+        let text = truncate_chars(text, 200);
+        let st = self.conversation_mut(key);
+        let mut hit = false;
+        for r in st.recent_messages.iter_mut().chain(st.unread.iter_mut()) {
+            if r.message_id == message_id {
+                r.text = text.clone();
+                r.plain = text.clone();
+                r.tail = Some(text.clone());
+                hit = true;
+            }
+        }
+        hit
+    }
+
     /// 会话 agentToken：缺失生成（24 字节随机 hex——Node crypto.randomBytes(24)）。
     pub fn ensure_agent_token(&mut self, key: &str) -> String {
         let st = self.conversation_mut(key);
@@ -221,6 +239,44 @@ pub fn active_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ASR 回填：按 message_id 更新 recent+unread 两处；未命中静默。
+    #[test]
+    fn update_message_text_backfills() {
+        let dir = std::env::temp_dir().join(format!("qq-asr-fill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = SocialStore::load(&dir.join("social-v2.json"), None).unwrap();
+        let msg = queqiao_core::action::IncomingMessage {
+            key: "group:1".into(),
+            seq: 0,
+            message_id: "m1".into(),
+            sender: "张三".into(),
+            user_id: "100".into(),
+            text: "[语音]".into(),
+            is_self: false,
+            at_me: false,
+            reply_to_me: false,
+            time_ms: 1,
+        };
+        store.append_message("group:1", &msg, 1);
+        assert_eq!(
+            store.conversation("group:1").unwrap().recent_messages[0].text,
+            "[语音]"
+        );
+        // 回填：两处都更新且截断 200 字。
+        let long = "字".repeat(300);
+        assert!(store.update_message_text("group:1", "m1", &format!("[语音] {long}")));
+        let st = store.conversation("group:1").unwrap();
+        assert_eq!(st.recent_messages[0].text.chars().count(), 200);
+        assert_eq!(st.unread[0].text, st.recent_messages[0].text);
+        assert_eq!(
+            st.recent_messages[0].tail.as_deref(),
+            Some(st.recent_messages[0].text.as_str())
+        );
+        // 未命中（已被裁剪）不 panic。
+        assert!(!store.update_message_text("group:1", "nope", "x"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn msg(key: &str, text: &str, user: &str) -> IncomingMessage {
         IncomingMessage {

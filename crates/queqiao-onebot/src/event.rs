@@ -47,6 +47,55 @@ pub fn extract_plain_text(body: &MessageBody) -> String {
     }
 }
 
+/// 语音段信息（`record` 段的 `file` 缓存引用与可选 `url`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceRef {
+    pub file: String,
+    pub url: String,
+}
+
+/// 提取全部 record 段（一条消息理论上可带多条语音）。
+pub fn extract_voices(body: &MessageBody) -> Vec<VoiceRef> {
+    let MessageBody::Array(segments) = body else {
+        return Vec::new();
+    };
+    segments
+        .iter()
+        .filter(|s| s.get("type").and_then(Value::as_str) == Some("record"))
+        .filter_map(|s| {
+            let d = s.get("data")?;
+            Some(VoiceRef {
+                file: d
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                url: d
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 纯文本 + 媒体占位符（Node segmentsToText 语义）：有 record 段时补
+/// `[语音]` 占位——纯语音消息不再以空文本入库（ASR 异步回填前的先观）。
+pub fn extract_text_with_voice_placeholder(body: &MessageBody) -> String {
+    let mut text = extract_plain_text(body);
+    let voices = extract_voices(body);
+    if !voices.is_empty() {
+        let placeholder = " [语音]".repeat(voices.len());
+        if text.is_empty() {
+            text = placeholder.trim_start().to_string();
+        } else {
+            text.push_str(&placeholder);
+        }
+    }
+    text
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Sender {
     pub user_id: u64,
@@ -235,6 +284,46 @@ pub fn parse_event(event: &Value) -> Result<OneBotEvent, EventParseError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// record 段提取与占位文本：纯语音、混合、CQ 码字符串、无语音四态。
+    #[test]
+    fn voice_extraction_and_placeholder() {
+        let voice_only = MessageBody::Array(vec![json!({
+            "type": "record", "data": { "file": "abc.slk", "url": "http://x/y.silk" }
+        })]);
+        assert_eq!(
+            extract_voices(&voice_only),
+            vec![VoiceRef {
+                file: "abc.slk".into(),
+                url: "http://x/y.silk".into()
+            }]
+        );
+        assert_eq!(extract_text_with_voice_placeholder(&voice_only), "[语音]");
+
+        let mixed = MessageBody::Array(vec![
+            json!({ "type": "text", "data": { "text": "听这个" } }),
+            json!({ "type": "record", "data": { "file": "a", "url": "" } }),
+            json!({ "type": "record", "data": { "file": "b", "url": "" } }),
+        ]);
+        assert_eq!(
+            extract_text_with_voice_placeholder(&mixed),
+            "听这个 [语音] [语音]"
+        );
+
+        // CQ 码字符串格式无段可解析（extract_voices 空实现）——原样文本。
+        let cq = MessageBody::Text("[CQ:record,file=a.wav] 语音".into());
+        assert!(extract_voices(&cq).is_empty());
+        assert_eq!(
+            extract_text_with_voice_placeholder(&cq),
+            "[CQ:record,file=a.wav] 语音"
+        );
+
+        let text_only = MessageBody::Array(vec![
+            json!({ "type": "text", "data": { "text": "普通" } }),
+            json!({ "type": "image", "data": { "url": "http://x" } }),
+        ]);
+        assert_eq!(extract_text_with_voice_placeholder(&text_only), "普通");
+    }
 
     /// 群消息：array 格式消息段 + sender（含 card/role）。
     #[test]

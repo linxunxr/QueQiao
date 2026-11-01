@@ -21,7 +21,9 @@ use queqiao_onebot::client::OneBotHttpClient;
 use queqiao_onebot::conn::{
     AccountEndpoints, LoginProbe, discover_connection, parse_account_config,
 };
-use queqiao_onebot::event::{MessageBody, OneBotEvent, extract_plain_text};
+use queqiao_onebot::event::{
+    MessageBody, OneBotEvent, VoiceRef, extract_text_with_voice_placeholder, extract_voices,
+};
 use queqiao_onebot::ws::EventStream;
 
 use queqiao::config::ConfigFile;
@@ -812,6 +814,8 @@ fn release_slang_pipe(
 
 async fn run(setup: Setup) {
     let mut cfg = setup.cfg;
+    // 主循环心跳/in-flight 观测（WS 任务与 ToolApiState 共享，须最先构造）。
+    let watch = queqiao::watch::WatchState::shared();
     let ws_url = setup.ws_url;
     let dsh_arc = setup.dsh;
     let sessions_arc = setup.sessions;
@@ -833,9 +837,33 @@ async fn run(setup: Setup) {
         .expect("OneBot WS 连接失败（token 失效？重跑或检查 per-account 配置）");
     queqiao::logging::log(&format!("OneBot WS 已连接 {ws_url}"));
     let social_for_stream = social_arc.clone();
+    // 收语音 ASR 上下文（模型可后下载——在场性每条语音重探）。
+    let asr_ctx = AsrCtx::new(&cfg);
+    let onebot_for_asr = onebot_http.clone();
+    let social_for_asr = social_arc.clone();
+    let watch_for_asr = watch.clone();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BridgeEvent>(256);
+    // 供消息处理闭包内联调度的捕获集（schedule_asr_if_any 的宏形态太绕，
+    // 用局部闭包变量经线程局部不可行——改为直接捕获进 async 任务）。
+    let asr_dispatcher = (asr_ctx, onebot_for_asr, social_for_asr, watch_for_asr);
     let ws_url_rc = ws_url.clone();
     let ws_token_rc = setup.ws_token.clone();
+    let (asr_ctx, onebot_for_asr, social_for_asr, watch_for_asr) = asr_dispatcher;
+    // 语音转写调度（闭包形态——捕获上面四个共享件；无语音/未启用时零开销）。
+    let schedule_asr_if_any = {
+        let ctx = asr_ctx.clone();
+        let onebot = onebot_for_asr.clone();
+        let social = social_for_asr.clone();
+        let watch = watch_for_asr.clone();
+        move |body: &MessageBody, key: &str, message_id: &str| {
+            let voices = extract_voices(body);
+            if !voices.is_empty() && ctx.0.enabled {
+                schedule_voice_transcription(
+                    &ctx, &onebot, &social, &watch, key, message_id, voices,
+                );
+            }
+        }
+    };
     tokio::spawn(async move {
         let mut stream = stream;
         let social = social_for_stream;
@@ -857,7 +885,7 @@ async fn run(setup: Setup) {
                             message_id: m.message_id.to_string(),
                             sender: m.sender.card.clone().unwrap_or(m.sender.nickname.clone()),
                             user_id: m.user_id.to_string(),
-                            text: extract_plain_text(&m.message),
+                            text: extract_text_with_voice_placeholder(&m.message),
                             is_self: m.sent_by_self,
                             at_me: at_self(&m.message),
                             reply_to_me: false,
@@ -874,6 +902,7 @@ async fn run(setup: Setup) {
                                 incoming.text.chars().take(60).collect::<String>()
                             ));
                         }
+                        schedule_asr_if_any(&m.message, &key, &incoming.message_id);
                         Some(BridgeEvent::MessageArrived(Box::new(incoming)))
                     }
                     Ok(OneBotEvent::PrivateMessage(m)) if !m.sent_by_self => {
@@ -884,7 +913,7 @@ async fn run(setup: Setup) {
                             message_id: m.message_id.to_string(),
                             sender: m.sender.nickname.clone(),
                             user_id: m.user_id.to_string(),
-                            text: extract_plain_text(&m.message),
+                            text: extract_text_with_voice_placeholder(&m.message),
                             is_self: m.sent_by_self,
                             at_me: false,
                             reply_to_me: false,
@@ -894,6 +923,7 @@ async fn run(setup: Setup) {
                             .lock()
                             .map(|mut s| s.append_message(&key, &incoming, now_ms()))
                             .unwrap_or(0);
+                        schedule_asr_if_any(&m.message, &key, &incoming.message_id);
                         Some(BridgeEvent::MessageArrived(Box::new(incoming)))
                     }
                     Ok(OneBotEvent::GroupPoke {
@@ -1098,9 +1128,6 @@ async fn run(setup: Setup) {
         current: std::sync::Mutex::new(cfg.clone()),
         first_run: std::sync::atomic::AtomicBool::new(false),
     });
-    // 主循环心跳/in-flight 观测：health、diagnostics 暴露，看门狗据此区分
-    // 「忙」与「死」（2026-10-31 卡死事故 TCP 探活只看端口必然误报健康）。
-    let watch = queqiao::watch::WatchState::shared();
     // 自动更新通道：启动异步检测与控制台「检查更新」按钮共用（oneshot
     // 只能被 poll 一次——经 mpsc 转发避免 select! 多分支重 poll 的 panic）。
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<update::ReleaseInfo>(1);
@@ -1763,6 +1790,249 @@ fn sync_dirty(
         }
     }
     store.save();
+}
+
+// ── 收语音 ASR（Node voice-asr.js 的调度层）──────────────────────────────────
+
+/// 转写上下文（run() 构造一次，WS 读循环与转写任务共享）。
+#[derive(Clone)]
+struct AsrCtx(std::sync::Arc<AsrCtxInner>);
+
+struct AsrCtxInner {
+    enabled: bool,
+    model_dir: std::path::PathBuf,
+    /// SnowLuma homeDir——get_record 本地路径兜底的前缀边界（学 Node
+    /// isSafeLocalMediaPath：realpath 逃逸 homeDir 的路径不读）。
+    snowluma_home: String,
+    ffmpeg_path: String,
+    /// 识别器懒加载缓存（模型可后下载——每次语音消息重探在场性）。
+    engine: std::sync::Mutex<Option<std::sync::Arc<queqiao_media::asr::AsrEngine>>>,
+    /// 识别串行闸（CPU 密集，学 Node 串行队列——并发语音排队不互相拖慢）。
+    gate: std::sync::Mutex<()>,
+    load_failed_logged: std::sync::atomic::AtomicBool,
+}
+
+impl AsrCtx {
+    fn new(cfg: &queqiao::config::Config) -> Self {
+        let model_dir = if cfg.social_v2.voice.asr_model_dir.is_empty() {
+            queqiao::paths::queqiao_home()
+                .join("asr-model")
+                .join("paraformer-zh")
+        } else {
+            std::path::PathBuf::from(&cfg.social_v2.voice.asr_model_dir)
+        };
+        Self(std::sync::Arc::new(AsrCtxInner {
+            enabled: cfg.social_v2.voice.asr_enabled,
+            model_dir,
+            snowluma_home: cfg.snowluma.home_dir.clone(),
+            ffmpeg_path: cfg.social_v2.voice.ffmpeg_path.clone(),
+            engine: std::sync::Mutex::new(None),
+            gate: std::sync::Mutex::new(()),
+            load_failed_logged: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+
+    /// 懒加载取引擎（模型不在场返回 None——Node 语义：开关开但缺模型自动
+    /// 降级回占位，不报错误）。
+    fn engine(&self) -> Option<std::sync::Arc<queqiao_media::asr::AsrEngine>> {
+        let mut g = self.0.engine.lock().unwrap();
+        if let Some(e) = g.as_ref() {
+            return Some(e.clone());
+        }
+        if !queqiao_media::asr::model_files_present(&self.0.model_dir) {
+            return None;
+        }
+        match queqiao_media::asr::AsrEngine::load(&self.0.model_dir) {
+            Ok(e) => {
+                let e = std::sync::Arc::new(e);
+                *g = Some(e.clone());
+                queqiao::logging::log(&format!("ASR 引擎已加载（{}）", self.0.model_dir.display()));
+                Some(e)
+            }
+            Err(err) => {
+                if !self
+                    .0
+                    .load_failed_logged
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    queqiao::logging::log(&format!("ASR 模型加载失败（此后静默）：{err}"));
+                }
+                None
+            }
+        }
+    }
+}
+
+/// 转写调度：异步回填不阻塞收消息（AI 唤醒可能先于转写完成——Node 同款）。
+/// 120s 总帽防取字节/解码卡死拖累后台线程。
+fn schedule_voice_transcription(
+    ctx: &AsrCtx,
+    onebot: &OneBotHttpClient,
+    social: &std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+    watch: &std::sync::Arc<queqiao::watch::WatchState>,
+    key: &str,
+    message_id: &str,
+    voices: Vec<VoiceRef>,
+) {
+    let ctx = ctx.clone();
+    let onebot = onebot.clone();
+    let social = social.clone();
+    let watch = watch.clone();
+    let key = key.to_string();
+    let message_id = message_id.to_string();
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            tokio::task::spawn_blocking(move || {
+                transcribe_voice(&ctx, &onebot, &social, &watch, &key, &message_id, &voices)
+            })
+            .await
+        })
+        .await;
+    });
+}
+
+/// 串行闸内的完整转写（全程 blocking 线程）。
+fn transcribe_voice(
+    ctx: &AsrCtx,
+    onebot: &OneBotHttpClient,
+    social: &std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+    watch: &std::sync::Arc<queqiao::watch::WatchState>,
+    key: &str,
+    message_id: &str,
+    voices: &[VoiceRef],
+) {
+    let Some(engine) = ctx.engine() else { return };
+    let _gate = ctx.0.gate.lock().unwrap();
+    watch.begin("asr", &format!("{key}:{message_id}"));
+    let result = (|| -> Result<String, String> {
+        let mut texts = Vec::new();
+        for v in voices {
+            let bytes = fetch_voice_bytes(v, onebot, &ctx.0.snowluma_home)?;
+            let samples = match queqiao_media::decode::decode_to_16k(&bytes) {
+                Ok(s) => s,
+                Err(queqiao_media::decode::DecodeError::NeedFfmpeg) => {
+                    ffmpeg_to_16k(&bytes, &ctx.0.ffmpeg_path)?
+                }
+                Err(queqiao_media::decode::DecodeError::Empty) => return Err("语音字节过短".into()),
+                Err(queqiao_media::decode::DecodeError::Failed(e)) => return Err(e),
+            };
+            // 180s 限额（Node MAX_VOICE_SECONDS）。
+            if samples.len() as u64 / 16_000 > 180 {
+                return Err("语音超 180s 限额".into());
+            }
+            let t = engine.transcribe(&samples);
+            if !t.is_empty() {
+                texts.push(t);
+            }
+        }
+        if texts.is_empty() {
+            return Err("识别结果为空（静音或不可辨）".into());
+        }
+        Ok(texts.join(" "))
+    })();
+    watch.end("asr");
+    match result {
+        Ok(text) => {
+            let merged = format!("[语音] {text}");
+            let hit = social
+                .lock()
+                .map(|mut s| s.update_message_text(key, message_id, &merged))
+                .unwrap_or(false);
+            if hit {
+                queqiao::logging::activity(&format!(
+                    "{key} 语音转写回填：{}",
+                    text.chars().take(60).collect::<String>()
+                ));
+            }
+        }
+        Err(e) => {
+            queqiao::logging::activity(&format!("{key} 语音转写失败（保持占位）：{e}"));
+        }
+    }
+}
+
+/// 语音字节三路获取（Node fetchOneBotVoiceBytes 的修正版：URL 直抓**不做**
+/// 图片魔数校验——Node 版把语音字节错拒的真 bug 不复刻）：段 url 直抓 →
+/// get_record 的 url → get_record 的 file 本地路径（限 SnowLuma homeDir 内）。
+fn fetch_voice_bytes(
+    v: &VoiceRef,
+    onebot: &OneBotHttpClient,
+    snowluma_home: &str,
+) -> Result<Vec<u8>, String> {
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    let http_get = |url: &str| -> Result<Vec<u8>, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let b = client
+            .get(url)
+            .send()
+            .map_err(|e| format!("语音 URL 抓取失败：{e}"))?
+            .error_for_status()
+            .map_err(|e| format!("语音 URL 响应异常：{e}"))?
+            .bytes()
+            .map_err(|e| e.to_string())?;
+        if b.len() > MAX_BYTES {
+            return Err(format!("语音超 16MB 限额（{}B）", b.len()));
+        }
+        Ok(b.to_vec())
+    };
+    if !v.url.is_empty()
+        && let Ok(b) = http_get(&v.url)
+    {
+        return Ok(b);
+    }
+    let info = onebot
+        .get_record(&v.file)
+        .map_err(|e| format!("get_record：{e}"))?;
+    if let Some(url) = info.get("url").and_then(serde_json::Value::as_str)
+        && !url.is_empty()
+        && let Ok(b) = http_get(url)
+    {
+        return Ok(b);
+    }
+    if let Some(f) = info.get("file").and_then(serde_json::Value::as_str)
+        && !f.is_empty()
+        && let Ok(p) = std::fs::canonicalize(f)
+        && p.starts_with(
+            std::fs::canonicalize(snowluma_home)
+                .unwrap_or_else(|_| std::path::PathBuf::from(snowluma_home)),
+        )
+        && let Ok(b) = std::fs::read(&p)
+        && b.len() <= MAX_BYTES
+    {
+        return Ok(b);
+    }
+    Err("语音字节三路获取全失败".into())
+}
+
+/// ffmpeg 兜底（AMR/MP3 等长尾格式）：临时文件中转避免 stdin/stdout 双向
+/// 管道死锁（16MB 边写边读对撞的窗口真实存在）；ffmpeg 缺席时该路失败。
+fn ffmpeg_to_16k(bytes: &[u8], ffmpeg_cfg: &str) -> Result<Vec<f32>, String> {
+    let exe = if !ffmpeg_cfg.is_empty() {
+        ffmpeg_cfg.to_string()
+    } else {
+        std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string())
+    };
+    let tmp = queqiao::paths::queqiao_home()
+        .join("state")
+        .join(format!("asr-in-{}.bin", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("临时文件写入失败：{e}"))?;
+    let out = std::process::Command::new(&exe)
+        .arg("-i")
+        .arg(&tmp)
+        .args(["-ar", "16000", "-ac", "1", "-f", "s16le", "pipe:1"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let _ = std::fs::remove_file(&tmp);
+    let out =
+        out.map_err(|e| format!("ffmpeg 启动失败（装 ffmpeg 或配置 voice.ffmpegPath）：{e}"))?;
+    if !out.status.success() {
+        return Err("ffmpeg 转码失败".into());
+    }
+    Ok(queqiao_media::decode::pcm_s16le_to_f32(&out.stdout))
 }
 
 /// mux 信封 → 回合生命周期事件（sessionId 反查会话键；未映射会话丢弃）。

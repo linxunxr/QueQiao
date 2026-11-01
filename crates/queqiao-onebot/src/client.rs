@@ -134,6 +134,13 @@ impl OneBotHttpClient {
         debug_assert!(crate::file_guard::is_safe_cache_file_ref(file));
         self.call("get_image", json!({ "file": file }))
     }
+
+    /// 取语音信息（SnowLuma 返回 `{file, url, file_size, file_name}`——
+    /// 不带 base64；`url` 是 QQ ptt 直链，`file` 无 url 时是缓存名/路径）。
+    /// 参数是 record 段的 file 值（JSON body 无注入面，路径消费侧自校）。
+    pub fn get_record(&self, file: &str) -> Result<Value, OneBotError> {
+        self.call("get_record", json!({ "file": file }))
+    }
 }
 
 #[cfg(test)]

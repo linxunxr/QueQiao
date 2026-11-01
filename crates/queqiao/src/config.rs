@@ -720,7 +720,12 @@ pub struct VoiceConfig {
     pub ffmpeg_path: String,
     pub auto_readback: bool,
     pub tts: VoiceTtsConfig,
+    /// 收语音 ASR（Node 语义：!== false 且模型在场才生效——缺模型自动降级
+    /// 回占位，不误报错误）。
     pub asr_enabled: bool,
+    /// paraformer 模型目录；空 = `{鹊桥 home}/asr-model/paraformer-zh`
+    /// （下载端点写入的位置）。
+    pub asr_model_dir: String,
 }
 
 impl Default for VoiceConfig {
@@ -736,11 +741,10 @@ impl Default for VoiceConfig {
             default_volume: 1.0,
             loudness: "normal".into(),
             ffmpeg_path: String::new(),
-            // 收语音 ASR 转写与发送后自动回听未实现（queqiao-media 占位），
-            // 默认关防误导；实现后随功能放开。
             auto_readback: false,
             tts: VoiceTtsConfig::default(),
-            asr_enabled: false,
+            asr_enabled: true,
+            asr_model_dir: String::new(),
         }
     }
 }
