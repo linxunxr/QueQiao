@@ -227,6 +227,30 @@ const TOOLS: &[ToolDef] = &[
         ],
     },
     ToolDef {
+        name: "qq_propose_role_edit",
+        description: "提议修改自己的人格卡（不直接生效——管理员批准后成为新版；想调整性格/说话风格/自我设定时用，须写清理由）",
+        endpoint: "role/proposal",
+        method: "POST",
+        flag: Some("proposeRoleEdit"),
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
+        params: &[
+            ("role", "string", true, "要修改的人格名（当前角色）"),
+            (
+                "content",
+                "string",
+                true,
+                "提议的新人格卡全文（Markdown，与 roles/*.md 同格式）",
+            ),
+            (
+                "reason",
+                "string",
+                true,
+                "提议理由（500 字内，给管理员审批看）",
+            ),
+        ],
+    },
+    ToolDef {
         name: "qq_list_stickers",
         description: "表情库查询（query 匹配备注/标签/用途/id/md5；返回 id+备注供选择）",
         endpoint: "sticker-list",

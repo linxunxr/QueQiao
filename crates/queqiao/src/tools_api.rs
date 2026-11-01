@@ -296,6 +296,10 @@ pub fn build_router(
             get(role_card_get).put(role_card_put).delete(role_card_del),
         )
         .route("/api/proactive/audit", get(proactive_audit_list))
+        .route("/api/socialV2/role/proposal", post(role_proposal_submit))
+        .route("/api/role/proposals", get(role_proposals_list))
+        .route("/api/role/proposal/approve", post(role_proposal_approve))
+        .route("/api/role/proposal/reject", post(role_proposal_reject))
         .route("/api/socialV2/sticker-sync", post(sticker_sync))
         .route("/api/tokens/series", get(tokens_series))
         .route("/api/tokens/turns", get(tokens_turns))
@@ -3753,6 +3757,201 @@ async fn dsh_catalog(
             &format!("目录序列化失败：{e}"),
         ),
     }
+}
+
+// ── 人格卡修改提议（M6 P1-3 受治理自修订：agent 提议 → owner 控制台批准）──
+// 门控在 owner 一侧：提议只入候选队列不生效，批准走编辑链路（旧版自动
+// 归档+新修订号）；agent 侧无自生效路径——QQ 群开放环境防人格劫持红线。
+// 提议文件读改写以 social 锁串行（低频 agent 操作，借粗粒度锁免新锁）。
+
+const ROLE_PROPOSAL_MAX_PENDING: usize = 5;
+const ROLE_PROPOSAL_KEEP: usize = 20;
+
+/// qq_propose_role_edit（agent 面）：提交人格卡修改提议（候选，不生效）。
+async fn role_proposal_submit(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.propose_role_edit) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let role = body
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let Some(role) = role_name_ok(&role) else {
+        return denied(StatusCode::BAD_REQUEST, "角色名只允许中文/字母/数字/横线");
+    };
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if content.trim().is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "content 不能为空");
+    }
+    if content.len() > 64 * 1024 {
+        return denied(StatusCode::BAD_REQUEST, "人格卡超 64KB——检查是否贴错内容");
+    }
+    let reason = body
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if reason.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "reason 必填——管理员审批的依据");
+    }
+    if reason.chars().count() > 500 {
+        return denied(StatusCode::BAD_REQUEST, "reason 超 500 字");
+    }
+    let home = crate::paths::queqiao_home();
+    let _serial = state.social.lock().unwrap();
+    let mut list = crate::role_card_store::load_proposals(&home);
+    if queqiao_core::role_card::proposal_slots_full(&list, ROLE_PROPOSAL_MAX_PENDING) {
+        return denied(
+            StatusCode::TOO_MANY_REQUESTS,
+            &format!("提议队列已满（{ROLE_PROPOSAL_MAX_PENDING} 条待审），等管理员处理后再提"),
+        );
+    }
+    let now = crate::session_manager::SessionManager::now_ms();
+    let proposal = queqiao_core::role_card::RoleProposal::new(
+        now,
+        list.len() as u64,
+        &role,
+        content,
+        &reason,
+        &key,
+    );
+    let id = proposal.id.clone();
+    list.push(proposal);
+    queqiao_core::role_card::clamp_proposals(&mut list, ROLE_PROPOSAL_KEEP);
+    crate::role_card_store::save_proposals(&home, &list);
+    let pending = list.iter().filter(|p| p.status == "pending").count();
+    crate::logging::activity(&format!(
+        "{key} 提议修改人格卡 {role}（{id}）：{}",
+        reason.chars().take(60).collect::<String>()
+    ));
+    ok_json(json!({ "submitted": true, "id": id, "pending": pending }))
+}
+
+/// 提议影响提示：该卡当前修订号与绑定它的活跃会话数——批准后这些会话
+/// 仍读旧版直到退役重建（版本化语义，审批前应知晓）。
+fn proposal_impact(state: &ToolApiState, home: &std::path::Path, role: &str) -> Value {
+    let current_revision = std::fs::read_to_string(home.join("roles").join(format!("{role}.md")))
+        .ok()
+        .map(|c| crate::role_card_store::card_revision(&c));
+    let store = state.social.lock().unwrap();
+    let sessions_on_current = store
+        .conversation_keys()
+        .into_iter()
+        .filter(|k| {
+            store.conversation(k).and_then(|s| s.role_revision.clone()) == current_revision
+                && crate::role_card_store::current_role_name(home, k).as_deref() == Some(role)
+        })
+        .count();
+    json!({ "currentRevision": current_revision, "sessionsOnCurrent": sessions_on_current })
+}
+
+/// 控制台：提议列表（pending 在前、组内新的在前；pending 带影响提示）。
+async fn role_proposals_list(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let home = crate::paths::queqiao_home();
+    let mut list = crate::role_card_store::load_proposals(&home);
+    list.sort_by(|a, b| {
+        (a.status != "pending")
+            .cmp(&(b.status != "pending"))
+            .then(b.created_at.cmp(&a.created_at))
+    });
+    let entries: Vec<Value> = list
+        .iter()
+        .map(|p| {
+            let mut v = serde_json::to_value(p).unwrap_or(Value::Null);
+            if p.status == "pending" {
+                v["impact"] = proposal_impact(&state, &home, &p.role);
+            }
+            v
+        })
+        .collect();
+    ok_json(json!({ "proposals": entries }))
+}
+
+/// 控制台：批准提议——以提议内容走编辑链路生效为新版本（旧版归档）。
+async fn role_proposal_approve(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let id = body.get("id").and_then(Value::as_str).unwrap_or_default();
+    let home = crate::paths::queqiao_home();
+    let _serial = state.social.lock().unwrap();
+    let mut list = crate::role_card_store::load_proposals(&home);
+    let Some(p) = list.iter_mut().find(|p| p.id == id) else {
+        return denied(StatusCode::NOT_FOUND, &format!("提议 {id} 不存在"));
+    };
+    if p.status != "pending" {
+        return denied(StatusCode::CONFLICT, &format!("提议已处理（{}）", p.status));
+    }
+    let Some(role) = role_name_ok(&p.role) else {
+        return denied(StatusCode::BAD_REQUEST, "提议的角色名非法（存储被手改？）");
+    };
+    crate::role_card_store::archive_if_changed(&home, &role, &p.content);
+    let path = home.join("roles").join(format!("{role}.md"));
+    if let Err(e) = crate::state::atomic_write_json(&path, &p.content) {
+        return denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("写 roles/{role}.md 失败：{e}"),
+        );
+    }
+    p.status = "approved".into();
+    let new_revision = crate::role_card_store::card_revision(&p.content);
+    crate::role_card_store::save_proposals(&home, &list);
+    crate::logging::activity(&format!(
+        "人格卡提议 {id}（{role}）已批准生效，新版 {new_revision}"
+    ));
+    ok_json(json!({ "approved": true, "id": id, "role": role, "newRevision": new_revision }))
+}
+
+/// 控制台：拒绝提议（留痕不删除）。
+async fn role_proposal_reject(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    if let Err(e) = console_only(&state, &headers) {
+        return e;
+    }
+    let id = body.get("id").and_then(Value::as_str).unwrap_or_default();
+    let home = crate::paths::queqiao_home();
+    let _serial = state.social.lock().unwrap();
+    let mut list = crate::role_card_store::load_proposals(&home);
+    let Some(p) = list.iter_mut().find(|p| p.id == id) else {
+        return denied(StatusCode::NOT_FOUND, &format!("提议 {id} 不存在"));
+    };
+    if p.status != "pending" {
+        return denied(StatusCode::CONFLICT, &format!("提议已处理（{}）", p.status));
+    }
+    p.status = "rejected".into();
+    let role_name = p.role.clone();
+    crate::role_card_store::save_proposals(&home, &list);
+    crate::logging::activity(&format!("人格卡提议 {id}（{role_name}）已拒绝"));
+    ok_json(json!({ "rejected": true, "id": id }))
 }
 
 /// 会话重置（控制台）：退役本地映射，下次投递按 fail-closed 重建空历史会话。

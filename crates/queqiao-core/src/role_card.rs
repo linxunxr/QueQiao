@@ -327,9 +327,80 @@ pub fn resolve_role_view(bound: Option<&str>, current: Option<&str>) -> RoleView
     }
 }
 
+/// 人格卡修改提议（M6 P1-3 受治理自修订）。agent 只能提议；owner 在控制台
+/// 批准后走编辑链路生效为新修订版（旧版自动归档）——「感知→提案→门控→
+/// 沉淀」的门控在 owner 一侧，agent 侧无自生效路径（开放环境防人格劫持）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RoleProposal {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub reason: String,
+    pub conversation_key: String,
+    pub created_at: u64,
+    /// pending | approved | rejected。
+    pub status: String,
+}
+
+impl RoleProposal {
+    /// id = 创建时刻毫秒 hex + 同毫秒序号（时间由调用方注入，core 不碰时钟）。
+    pub fn new(
+        now_ms: u64,
+        seq: u64,
+        role: &str,
+        content: &str,
+        reason: &str,
+        conv_key: &str,
+    ) -> Self {
+        Self {
+            id: format!("{now_ms:x}-{seq:x}"),
+            role: role.to_owned(),
+            content: content.to_owned(),
+            reason: reason.to_owned(),
+            conversation_key: conv_key.to_owned(),
+            created_at: now_ms,
+            status: "pending".to_owned(),
+        }
+    }
+}
+
+/// pending 满员判定（超上限拒新提议——防 agent 被诱导刷爆存储）。
+pub fn proposal_slots_full(list: &[RoleProposal], max_pending: usize) -> bool {
+    list.iter().filter(|p| p.status == "pending").count() >= max_pending
+}
+
+/// 总量裁剪：保留最近 keep 条（含已处理条目——审批留痕的审计价值）。
+pub fn clamp_proposals(list: &mut Vec<RoleProposal>, keep: usize) {
+    if list.len() > keep {
+        let cut = list.len() - keep;
+        list.drain(0..cut);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 提议记账：pending 满员判定只数 pending；裁剪保留最新。
+    #[test]
+    fn proposal_bookkeeping() {
+        let mut ps: Vec<RoleProposal> = (0..7)
+            .map(|i| RoleProposal::new(1000 + i, i, "小鲸鱼", "c", "r", "group:1"))
+            .collect();
+        ps[0].status = "approved".into();
+        // 7 条中 1 条已处理 → 6 条 pending，上限 5 → 满员。
+        assert!(proposal_slots_full(&ps, 5));
+        // 再处理 2 条 → 4 pending → 有空位。
+        ps[1].status = "rejected".into();
+        ps[2].status = "rejected".into();
+        assert!(!proposal_slots_full(&ps, 5));
+        // 裁剪保留最新 5 条（最老的 approved/rejected 先被裁）。
+        clamp_proposals(&mut ps, 5);
+        assert_eq!(ps.len(), 5);
+        assert_eq!(ps[0].id, format!("{:x}-{:x}", 1002, 2), "最老两条被裁");
+        assert!(ps.iter().all(|p| p.id != format!("{:x}-{:x}", 1000, 0)));
+    }
 
     /// 版本绑定决策：首读绑定、未更原样、热更读旧版并标记、无卡全空。
     #[test]

@@ -184,6 +184,41 @@ pub fn history_revisions(home: &Path, name: &str) -> Vec<String> {
     out.into_iter().map(|(_, r)| r).collect()
 }
 
+// ── 人格卡修改提议（M6 P1-3 受治理自修订：agent 提议 → owner 批准）─────
+
+/// 提议文件形状（state/role-proposals.json）。
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ProposalFile {
+    proposals: Vec<queqiao_core::role_card::RoleProposal>,
+}
+
+fn proposals_file(home: &Path) -> std::path::PathBuf {
+    home.join("state").join("role-proposals.json")
+}
+
+/// 读全部提议（文件缺失 → 空）。
+pub fn load_proposals(home: &Path) -> Vec<queqiao_core::role_card::RoleProposal> {
+    std::fs::read_to_string(proposals_file(home))
+        .ok()
+        .and_then(|raw| {
+            serde_json::from_str::<ProposalFile>(raw.trim_start_matches('\u{feff}')).ok()
+        })
+        .map(|f| f.proposals)
+        .unwrap_or_default()
+}
+
+/// 落盘提议（原子写；失败仅日志——提议丢了可重提，不阻塞调用方）。
+pub fn save_proposals(home: &Path, list: &[queqiao_core::role_card::RoleProposal]) {
+    let text = serde_json::to_string_pretty(&ProposalFile {
+        proposals: list.to_vec(),
+    })
+    .unwrap_or_else(|_| "{\n  \"proposals\": []\n}".into());
+    if let Err(e) = crate::state::atomic_write_json(&proposals_file(home), &text) {
+        crate::logging::log(&format!("[role-proposal] 提议落盘失败：{e}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
