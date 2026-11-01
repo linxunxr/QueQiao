@@ -27,6 +27,9 @@ pub struct PromptContext {
     pub reply_quiet_ms: u64,
     /// 距离短静默满足还差的毫秒数。
     pub reply_remaining_ms: u64,
+    /// 静默连击（count，首次距今分钟数）——连续 ≥2 次唤醒无行动时注入
+    ///【静默记录】墓碑行；None 或 count<2 省略（单次静默无信息量，不注）。
+    pub quiet_wake_streak: Option<(u32, u64)>,
 }
 
 /// 构造唤醒 prompt（reason 支撑全部 Node 版专属尾段）。
@@ -67,6 +70,13 @@ pub fn build_wake_prompt(ctx: &PromptContext, reason: &str) -> String {
         status.push(format!("你上次发言 {min} 分钟前"));
     }
     base.push_str(&format!("【此刻状态】{}\n\n", status.join("；")));
+    if let Some((count, min_ago)) = ctx.quiet_wake_streak
+        && count >= 2
+    {
+        base.push_str(&format!(
+            "【静默记录】你最近连续 {count} 次唤醒都没行动（最早一次约 {min_ago} 分钟前）——期间群里没有值得参与的内容。这次若仍无话可说，用 qq_set_wake_config 把检查间隔设长一些；有想说的就正常开口。\n\n"
+        ));
+    }
     base.push_str(&format!("【当前唤醒】{}\n\n", ctx.wake_summary));
     base.push_str(&format!(
         "【沉睡前强制等待】这是决定潜水收尾时的步骤，不是首回复的前置条件。除非对方明确说「不聊了/晚安/下了/拜拜」等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs={}) 完成一次沉睡前观察；回复前 purpose=\"reply\" 的短静默不能代替这次完整观察。若 {} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n",
@@ -133,6 +143,7 @@ mod tests {
             pre_sleep_ms: 300_000,
             reply_quiet_ms: 8_000,
             reply_remaining_ms: 6_000,
+            quiet_wake_streak: None,
         }
     }
 
@@ -193,5 +204,31 @@ mod tests {
         let mut bare = ctx();
         bare.role_name = String::new();
         assert!(!build_wake_prompt(&bare, "poke").contains("【当前角色】"));
+    }
+
+    /// 静默墓碑行：streak ≥2 注入（带计数与跨度）、None 或单次省略、
+    /// 注入位置在【此刻状态】与【当前唤醒】之间。
+    #[test]
+    fn quiet_wake_streak_note() {
+        let mut c = ctx();
+        c.quiet_wake_streak = Some((2, 47));
+        let text = build_wake_prompt(&c, "proactiveCheck");
+        assert!(
+            text.contains("【静默记录】你最近连续 2 次唤醒都没行动（最早一次约 47 分钟前）"),
+            "缺静默记录行"
+        );
+        assert!(text.contains("用 qq_set_wake_config 把检查间隔设长一些"));
+        let status_pos = text.find("【此刻状态】").unwrap();
+        let note_pos = text.find("【静默记录】").unwrap();
+        let wake_pos = text.find("【当前唤醒】").unwrap();
+        assert!(
+            status_pos < note_pos && note_pos < wake_pos,
+            "注入位置应在状态与唤醒之间"
+        );
+        // None 与单次连击均不注入（阈值在构造层，组装层只传原始连击）。
+        c.quiet_wake_streak = None;
+        assert!(!build_wake_prompt(&c, "proactiveCheck").contains("【静默记录】"));
+        c.quiet_wake_streak = Some((1, 3));
+        assert!(!build_wake_prompt(&c, "proactiveCheck").contains("【静默记录】"));
     }
 }

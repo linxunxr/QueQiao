@@ -1739,6 +1739,7 @@ async fn run(setup: Setup) {
                                         next.last_wake_at = kept.last_wake_at;
                                         next.wake_count = kept.wake_count;
                                         next.no_action_count = kept.no_action_count;
+                                        next.first_quiet_wake_at = kept.first_quiet_wake_at;
                                         next.confirmed_at = kept.confirmed_at;
                                         next.confirmed_by = kept.confirmed_by;
                                         next.batch_window_ms = kept.batch_window_ms;
@@ -2203,6 +2204,18 @@ impl Executor {
                             last_message: last_msg,
                             last_unfinished,
                             last_ai_reply_min_ago: None,
+                            // 静默墓碑：连击 ≥2 次时注入【静默记录】行（阈值与
+                            // 文案在 prompt 构造层），组装层只传计数与跨度。
+                            quiet_wake_streak: if wc.no_action_count >= 2
+                                && wc.first_quiet_wake_at > 0
+                            {
+                                Some((
+                                    wc.no_action_count,
+                                    now.saturating_sub(wc.first_quiet_wake_at) / 60_000,
+                                ))
+                            } else {
+                                None
+                            },
                             wake_summary: summary,
                             pre_sleep_ms: self.wake_cfg.pre_sleep_ms,
                             reply_quiet_ms: self.wake_cfg.reply_quiet_ms,

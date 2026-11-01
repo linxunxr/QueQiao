@@ -143,6 +143,7 @@ impl SocialStore {
         st.wake_times = rt.wake_times.clone();
         st.last_action_at = rt.last_action_at;
         st.wake_config.no_action_count = rt.no_action_count;
+        st.wake_config.first_quiet_wake_at = rt.first_quiet_wake_ms;
         st.bootstrap_sent = rt.bootstrap_sent;
     }
 

@@ -39,6 +39,9 @@ pub struct SessionRuntime {
     pub last_activity_at: u64,
     pub last_action_at: u64,
     pub no_action_count: u32,
+    /// 本轮静默连击的首次时刻（0=无；随 no_action_count 同步维护，供唤醒
+    /// prompt 注入【静默记录】的跨度计算——静默墓碑记账）。
+    pub first_quiet_wake_ms: u64,
     pub bootstrap_sent: bool,
     pub wake: TriggerRules,
     // ── 运行时（绝不落盘，重启即清）──
@@ -64,6 +67,7 @@ impl SessionRuntime {
             last_activity_at: 0,
             last_action_at: 0,
             no_action_count: 0,
+            first_quiet_wake_ms: 0,
             bootstrap_sent: false,
             wake,
             seq: 0,
@@ -626,12 +630,17 @@ fn on_turn_ended(
             // 孤儿 end：不参与 noAction 统计。
         } else if action_taken {
             rt.no_action_count = 0;
+            rt.first_quiet_wake_ms = 0;
         } else {
+            if rt.no_action_count == 0 {
+                rt.first_quiet_wake_ms = now_ms;
+            }
             rt.no_action_count += 1;
             if rt.no_action_count >= rules.no_action_limit {
                 rt.wake = TriggerRules::default();
                 rt.bootstrap_sent = true;
                 rt.no_action_count = 0;
+                rt.first_quiet_wake_ms = 0;
                 actions.push(BridgeAction::Log {
                     message: format!(
                         "[{}] 连续 {} 次唤醒无行动，重置唤醒配置",
@@ -957,6 +966,74 @@ mod tests {
             8500,
         );
         assert_eq!(rt.no_action_count, 0);
+    }
+
+    /// 静默墓碑记账：首次无动作记时刻、连续保持、有动作清零（跨度供
+    ///【静默记录】注入计算）。
+    #[test]
+    fn first_quiet_wake_tracking() {
+        let mut rt = runtime();
+        // 第一轮静默：记首次时刻。
+        decide1(
+            &mut rt,
+            &BridgeEvent::TurnStarted {
+                key: "group:4242".to_owned(),
+                session_id: "s".into(),
+            },
+            1000,
+        );
+        decide1(
+            &mut rt,
+            &BridgeEvent::TurnEnded {
+                key: "group:4242".to_owned(),
+                session_id: "s".into(),
+                ok: true,
+                error_text: None,
+            },
+            1100,
+        );
+        assert_eq!((rt.no_action_count, rt.first_quiet_wake_ms), (1, 1100));
+        // 第二轮静默：首次时刻保持不变。
+        decide1(
+            &mut rt,
+            &BridgeEvent::TurnStarted {
+                key: "group:4242".to_owned(),
+                session_id: "s".into(),
+            },
+            5000,
+        );
+        decide1(
+            &mut rt,
+            &BridgeEvent::TurnEnded {
+                key: "group:4242".to_owned(),
+                session_id: "s".into(),
+                ok: true,
+                error_text: None,
+            },
+            5100,
+        );
+        assert_eq!((rt.no_action_count, rt.first_quiet_wake_ms), (2, 1100));
+        // 有动作：连击与时刻一并清零。
+        rt.last_action_at = 8000;
+        decide1(
+            &mut rt,
+            &BridgeEvent::TurnStarted {
+                key: "group:4242".to_owned(),
+                session_id: "s".into(),
+            },
+            7000,
+        );
+        decide1(
+            &mut rt,
+            &BridgeEvent::TurnEnded {
+                key: "group:4242".to_owned(),
+                session_id: "s".into(),
+                ok: true,
+                error_text: None,
+            },
+            7500,
+        );
+        assert_eq!((rt.no_action_count, rt.first_quiet_wake_ms), (0, 0));
     }
 
     /// 频率超限跳过（rate 红线：错误循环之外的成本失控防线）。

@@ -166,6 +166,7 @@ pub struct WakeConfigState {
     pub last_wake_at: u64,
     pub wake_count: u64,
     pub no_action_count: u32,
+    pub first_quiet_wake_at: u64,
     pub confirmed_at: Option<u64>,
     pub confirmed_by: Option<String>,
 }
@@ -181,6 +182,7 @@ impl Default for WakeConfigState {
             last_wake_at: 0,
             wake_count: 0,
             no_action_count: 0,
+            first_quiet_wake_at: 0,
             confirmed_at: None,
             confirmed_by: None,
         }

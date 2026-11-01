@@ -381,6 +381,7 @@ impl Orchestrator {
         rt.last_activity_at = persisted.last_incoming_at;
         rt.last_action_at = persisted.last_action_at;
         rt.no_action_count = persisted.wake_config.no_action_count;
+        rt.first_quiet_wake_ms = persisted.wake_config.first_quiet_wake_at;
         rt.bootstrap_sent = persisted.bootstrap_sent;
         self.sessions.insert(key.to_owned(), rt);
     }
