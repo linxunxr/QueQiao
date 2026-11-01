@@ -355,6 +355,63 @@ pub fn build_router(
     app.layer(axum::middleware::from_fn(cors_mw))
 }
 
+/// 单实例探测：控制台端口已有健康的鹊桥在答 → true（本进程应退出）。
+/// 手写 HTTP（TcpStream，与客户端探活同款——不引依赖）；1s 超时，连接
+/// 失败/超时/非鹊桥响应一律 false（正常继续——端口空着或被别的程序占）。
+/// 背景（2026-11-01 真机事故）：桥此前在控制台端口被占时只丢控制台、其余
+/// 照跑——客户端/手动各拉一个即三桥同连 OneBot，消息×3 入库、唤醒投递
+/// 互踩（AI 连续无行动）。多实例的第二、三实例在此处秒退。
+pub fn probe_existing_instance(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+    let Ok(()) = s.write_all(
+        format!("GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    ) else {
+        return false;
+    };
+    let mut buf = String::new();
+    if s.read_to_string(&mut buf).is_err() {
+        return false;
+    }
+    // 鹊桥的 health：0.4.18+ 为 JSON（含 mainLoopAlive），更早恒 "ok" 文本。
+    buf.starts_with("HTTP/1.1 200") && (buf.contains("mainLoopAlive") || buf.contains("\"ok\""))
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    /// 探测：鹊桥式 JSON 响应 → true；无监听 / 非 200 → false。
+    #[test]
+    fn probe_detects_existing_bridge() {
+        use std::io::{Read, Write};
+        // 起一个伪鹊桥（同步 listener 单连接线程）。
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            if let Ok((mut c, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = c.read(&mut buf);
+                let _ = c.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"mainLoopAlive\":true}",
+                );
+            }
+        });
+        assert!(probe_existing_instance(port), "鹊桥 JSON 应判已有实例");
+        t.join().unwrap();
+
+        // 无监听端口 → false。
+        let free = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let free_port = free.local_addr().unwrap().port();
+        drop(free);
+        assert!(!probe_existing_instance(free_port));
+    }
+}
+
 /// 启动工具 API（控制台端口共用；本批仅工具端点）。
 pub async fn serve(
     state: Arc<ToolApiState>,

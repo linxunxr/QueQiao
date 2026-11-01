@@ -223,6 +223,17 @@ fn main() {
         println!("{} {}", queqiao_core::APP_NAME, env!("CARGO_PKG_VERSION"));
         return;
     }
+    // 单实例（第一道，向导之前——向导也绑同一端口）：已有健康鹊桥 → 秒退
+    //（2026-11-01 真机三桥事故根治——多实例重复收发消息、回合互踩）。
+    // 此处用 env/默认口；配置口在主流程合流处再探一道。
+    let probe_port = std::env::var("QUEQIAO_CONSOLE_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3100);
+    if queqiao::tools_api::probe_existing_instance(probe_port) {
+        println!("已有鹊桥实例运行于 127.0.0.1:{probe_port}，本进程退出（多实例会重复收发消息）");
+        return;
+    }
     let cfg_path = queqiao::paths::config_path();
     let first_run = !cfg_path.exists();
     let cfg = if first_run {
@@ -276,6 +287,16 @@ fn main() {
         }
     };
     let mut cfg = cfg.config().clone();
+    // 单实例：控制台端口已有健康鹊桥 → 本进程直接退出（2026-11-01 真机
+    // 三桥事故根治——多实例会重复收发消息、回合互踩；第二实例在此秒退，
+    // 无论它由客户端重拉还是手动误启）。
+    if queqiao::tools_api::probe_existing_instance(cfg.console_port) {
+        println!(
+            "已有鹊桥实例运行于 127.0.0.1:{}，本进程退出（多实例会重复收发消息）",
+            cfg.console_port
+        );
+        return;
+    }
     queqiao::logging::init(&queqiao::paths::queqiao_home());
     queqiao::logging::install_panic_hook();
     // 默认安全（向导完成/正常启动两分支的共同后置）：consoleToken 缺位即
