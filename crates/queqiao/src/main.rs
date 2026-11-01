@@ -1216,6 +1216,7 @@ async fn run(setup: Setup) {
             diary_pending: diary_pending.clone(),
             sched_tx: sched_tx.clone(),
             watch: watch.clone(),
+            console: Some(console_state.clone()),
         });
         let console = console_state.clone();
         tokio::spawn(async move {

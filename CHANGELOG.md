@@ -14,6 +14,7 @@
 ### 修复
 
 - **多桥并存根治（单实例语义）**：2026-11-01 真机事故——客户端与手动各拉桥形成三实例同连 OneBot，每条消息 ×3 入库、三桥各自唤醒投递互踩（AI 连续无行动、行为异常）；且桥此前在控制台端口被占时只 panic 向导/丢控制台、其余照跑。修复：启动最前（向导之前，env/默认口）+ 主流程合流处（配置口）两道单实例探测——端口已有健康鹊桥（/api/health 200 且含 mainLoopAlive）即打印退出，第二/三实例秒退。手写 TcpStream 探测零依赖（客户端探活同款）；真机验证：对着运行中桥再起一例 exit 0 秒退。
+- **工具面配置热更生效（live_cfg）**：bind-status 与 authorize 白名单此前读启动快照 cfg——真机复现：行为区开启「专属浏览器」保存热更后，绑定卡片仍报「未启用」、按钮禁用点不动（config mtime 晚于桥启动即触发）；主循环同病已由 370c19b 修，本批补工具面：ToolApiState 注入 ConsoleState（热更分支维护的活值），`live_cfg()` 优先读 current、回落快照；bind-status 的 enabled 判定与 authorize 的 conversation_allowed 均改活值。工具开关 flag（socialV2.tools.*）仍为启动快照（波及几十处端点，单独批次处理）。
 
 ## [0.5.2] - 2026-11-01
 

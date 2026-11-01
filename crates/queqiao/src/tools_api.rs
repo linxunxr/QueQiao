@@ -48,6 +48,9 @@ pub struct ToolApiState {
     pub sched_tx: tokio::sync::mpsc::UnboundedSender<crate::orchestrator::SchedReq>,
     /// 主循环心跳/in-flight 观测（bin 注入；health 与 diagnostics 暴露）。
     pub watch: std::sync::Arc<crate::watch::WatchState>,
+    /// 控制台活值配置（热更分支维护的 ConsoleState.current；bin 注入，
+    /// 测试缺省 None）——`live_cfg` 的数据源。
+    pub console: Option<std::sync::Arc<crate::console::ConsoleState>>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -56,6 +59,17 @@ fn denied(code: StatusCode, msg: &str) -> (StatusCode, Json<Value>) {
 }
 
 impl ToolApiState {
+    /// 活值配置：热更分支维护的 ConsoleState.current 优先，回落启动快照。
+    /// 背景（2026-11-01 真机）：bind-status/authorize 读启动快照 cfg，UI
+    /// 行为区开启浏览器保存热更后判定仍 false——绑定按钮禁用"点了没反
+    /// 应"；主循环同病已于 370c19b 修，本方法覆盖工具面。
+    pub fn live_cfg(&self) -> Config {
+        self.console
+            .as_ref()
+            .and_then(|c| c.current.lock().ok().map(|g| g.clone()))
+            .unwrap_or_else(|| self.cfg.clone())
+    }
+
     /// 六层校验链前三层：会话键合法 → 白名单（模式门禁）→ agent token 匹配
     /// → 工具开关。通过返回会话键。
     fn authorize(
@@ -66,6 +80,7 @@ impl ToolApiState {
     ) -> Result<String, (StatusCode, Json<Value>)> {
         // 管理员暂停（Node socialV2.paused 同款）：暂停期间拒绝一切工具调用，
         // AI 在唤醒 prompt 后的第一次工具失败即会安静收尾。
+        let cfg = self.live_cfg();
         if self.social.lock().map(|s| s.paused()).unwrap_or(false) {
             return Err(denied(
                 StatusCode::FORBIDDEN,
@@ -80,7 +95,7 @@ impl ToolApiState {
             ));
         }
         // ① 模式门禁：白名单 + deny 黑名单/allowAllWhenEmpty（Node allowed() 语义）。
-        if !self.cfg.conversation_allowed(&key) {
+        if !cfg.conversation_allowed(&key) {
             return Err(denied(
                 StatusCode::FORBIDDEN,
                 &format!("会话 {key} 不在白名单内（config.json allow.groups / allow.private）"),
@@ -2511,7 +2526,7 @@ async fn browser_bind_status_ep(
     if let Err(e) = console_only(&state, &headers) {
         return e;
     }
-    if !state.cfg.browser.enabled {
+    if !state.live_cfg().browser.enabled {
         return ok_json(json!({
             "enabled": false,
             "hint": "浏览器工具未启用：设置页开启「专属浏览器」后可绑定账号"

@@ -74,6 +74,7 @@ fn make_router(home: &std::path::Path) -> (Router, String) {
         slang_research_tx: tokio::sync::mpsc::unbounded_channel().0,
         browser: queqiao::browser::new_browser(),
         watch: queqiao::watch::WatchState::shared(),
+        console: None,
     });
     (build_router(state, "", None), token)
 }
