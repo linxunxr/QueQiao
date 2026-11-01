@@ -1,8 +1,18 @@
 [package]
 name = "queqiao-media"
-description = "媒体处理：图片压缩降级、语音 ASR、视频抽帧（后期阶段，当前占位）"
+description = "鹊桥媒体处理：语音解码与 ASR（图片压缩/视频抽帧后期）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# 官方 sherpa-onnx（k2-fsa）Rust API：build.rs 自动下载静态库（含 onnxruntime），
+# 最终单 exe 无 DLL。本机 github 下载域断时设 SHERPA_ONNX_LIB_DIR 指向手动
+# 下载的 win-x64-static -lib 包。
+sherpa-onnx = "2.0"
+# 纯 Rust wav 读取（RIFF 嗅探后的 PCM 提取）。
+hound = "3.5"
+
+[build-dependencies]
+# 编译 vendor/silk 的 Skype SILK C 源（解码器）。
+cc = "1"
