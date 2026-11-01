@@ -197,7 +197,7 @@
           <div><span style="font-weight:600">小黑盒</span><span id="bindNickname" style="margin-left:8px;font-size:14px"></span><span id="bindLevel" class="hint" style="margin-left:6px"></span></div>
           <div class="hint" id="bindState" style="margin-top:2px">检测中…</div>
         </div>
-        <button class="ghost mini" onclick="bindSite()">绑定 / 登录</button>
+        <button class="ghost mini" id="bindLoginBtn" onclick="bindSite()">绑定 / 登录</button>
         <button class="ghost mini" id="bindProfileBtn" onclick="openProfile()" style="display:none">个人主页</button>
         <button class="ghost mini" onclick="unbindSite()">解绑</button>
         <button class="ghost mini" onclick="refreshBind(true)">刷新</button>
@@ -211,7 +211,7 @@
       <summary>数据迁移（从 Node 版 qq-bridge）<span class="sum-note" id="migrateNote"></span></summary>
       <div style="margin-top:14px">
         <div class="row">
-          <div class="field" style="flex:3 1 320px"><label>Node 版桥路径（含 config.json 与 state/）</label><input id="f-nodeBridge" placeholder="如 D:@workCTools\qq-bridge"></div>
+          <div class="field" style="flex:3 1 320px"><label>Node 版桥路径（含 config.json 与 state/）</label><input id="f-nodeBridge" placeholder="如 D:/workCTools/qq-bridge（你的 Node 版安装目录）"></div>
           <div class="field" style="flex:0 0 auto; align-self:end"><button class="ghost" onclick="browseNodeBridge()">浏览…</button></div>
           <div class="field" style="flex:0 0 auto; align-self:end"><button onclick="migrateNode()">迁移到本安装目录</button></div>
         </div>
@@ -1424,7 +1424,13 @@ async function refreshBind(scrape) {
     const r = await apiFetch(BRIDGE + '/api/browser/bind-status?site=xiaoheihe' + (scrape ? '&scrape=1' : ''));
     const res = await r.json();
     const v = res.value || {};
-    if (v.enabled === false) { sum.textContent = '未启用'; state.textContent = '专属浏览器未开启——设置页「行为」区开启后可绑定'; return; }
+    const loginBtn = document.getElementById('bindLoginBtn');
+    if (v.enabled === false) {
+      sum.textContent = '未启用'; state.textContent = '专属浏览器未开启——设置页「行为」区开启后可绑定';
+      loginBtn.disabled = true; loginBtn.title = '先在设置页「行为」区开启浏览器工具';
+      return;
+    }
+    loginBtn.disabled = false; loginBtn.title = '';
     const av = document.getElementById('bindAvatar');
     const nick = document.getElementById('bindNickname');
     const lv = document.getElementById('bindLevel');
