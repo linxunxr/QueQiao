@@ -317,7 +317,7 @@ impl Default for SlangConfig {
             extract_min_messages: 10,
             extract_cooldown_ms: 300_000,
             inference_thresholds: vec![2, 4, 8],
-            inject_max: 8,
+            inject_max: 5,
             learner_preset: "qq-chat".into(),
             workspace_title: "QQ 黑话学习".into(),
             auto_research: true,

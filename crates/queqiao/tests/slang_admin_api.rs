@@ -163,7 +163,10 @@ fn slang_admin_full_lifecycle() {
         let (code, v) = call(&mut r, "GET", "/api/slang", None).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(v["value"]["entries"].as_array().unwrap().len(), 2);
-        assert_eq!(v["value"]["config"]["injectMax"], 8);
+        assert_eq!(
+            v["value"]["config"]["injectMax"], 5,
+            "默认降至 5（注入精简成本治理）"
+        );
         let (code, v) = call(&mut r, "GET", "/api/slang?status=candidate", None).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(v["value"]["entries"].as_array().unwrap().len(), 1);

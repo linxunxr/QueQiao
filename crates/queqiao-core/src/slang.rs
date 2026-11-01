@@ -216,8 +216,12 @@ fn rank(e: &SlangEntry) -> u8 {
     }
 }
 
-/// 注入表（Node buildSlangContext）：已确认且有释义，按出现次数排序取 max；
-/// 词条转义 + CQ 防伪；无可用词条返回空。
+/// 注入表（Node buildSlangContext 的**分层精简版**，2026-11-01 成本治理）：
+/// 已确认且有释义，按出现次数排序取 max；注入只带「词：释义首句（≤80字）」
+/// ——用法/例句不注入（全字段走 qq_slang_query 按需查，对齐 v0.4.12 记忆
+/// 分层的「索引注入+查询详情」模式）。此前全字段注入单条上限 950 字、
+/// 8 条最坏 7600 字，是唤醒 prompt 里最大的固定成本块。词条转义 + CQ
+/// 防伪不变；无可用词条返回空。
 pub fn build_context(entries: &[SlangEntry], max: usize) -> String {
     let mut confirmed: Vec<&SlangEntry> = entries
         .iter()
@@ -232,20 +236,31 @@ pub fn build_context(entries: &[SlangEntry], max: usize) -> String {
     let lines: Vec<String> = top
         .iter()
         .map(|e| {
-            let mut line = format!("- {}：{}", clean(&e.content, 50), clean(&e.meaning, 300));
-            if !e.usage.is_empty() {
-                line.push_str(&format!("（用法：{}）", clean(&e.usage, 300)));
-            }
-            if !e.example.is_empty() {
-                line.push_str(&format!("（例：{}）", clean(&e.example, 300)));
-            }
-            line
+            format!(
+                "- {}：{}",
+                clean(&e.content, 50),
+                first_clause(&e.meaning, 80)
+            )
         })
         .collect();
     format!(
-        "【群聊黑话表】群里已确认/常用的网络用语和梗（按出现次数排序，知道即可，不要刻意堆砌）：\n{}",
+        "【群聊黑话表】群里已确认/常用的网络用语和梗（按出现次数排序，知道即可，不要刻意堆砌；更多黑话可用 qq_slang_query 查全文释义与例句）：\n{}",
         lines.join("\n")
     )
+}
+
+/// 释义首句：取到第一个全角句读（。；！？）为止再截 max 字——注入只要
+/// 「这个词大概是什么」，完整释义留给查询工具。只认全角：ASCII 分号会
+/// 撞上 clean 转义出的 HTML 实体（`&lt;`）被误当句读。
+fn first_clause(text: &str, max: usize) -> String {
+    let cleaned = clean(text, usize::MAX);
+    let cut = cleaned
+        .char_indices()
+        .find(|(_, c)| "。；！？".contains(*c))
+        .map(|(i, _)| i)
+        .unwrap_or(cleaned.len());
+    // 只截断不再 clean——转义后的实体（&lt;）再过一次 clean 会被二次转义。
+    cleaned[..cut].chars().take(max).collect()
 }
 
 #[cfg(test)]
@@ -278,6 +293,35 @@ mod tests {
         assert!(ctx.contains("甲"));
         assert!(!ctx.contains("丙"));
         assert!(!ctx.contains("候选中"), "candidate 不注入");
+    }
+
+    /// 精简注入（2026-11-01 成本治理）：释义只取全角句读前的首句（≤80 字），
+    /// 用法/例句不注入，表尾带查询指引——全字段留给 qq_slang_query。
+    #[test]
+    fn context_is_leanness_first_clause_only() {
+        let mut e = entry(
+            "烧心",
+            "原指胃酸反流的灼痛感。随 AI 短剧爆火引申为靠谱、品质好。还有更多更长的补充说明。",
+            "confirmed",
+            9,
+        );
+        e.usage = "评价东西靠谱时用".into();
+        e.example = "这价值上的不烧心".into();
+        let ctx = build_context(&[e], 5);
+        assert!(ctx.contains("原指胃酸反流的灼痛感"), "首句保留");
+        assert!(!ctx.contains("随 AI 短剧爆火"), "首句之后的释义截断");
+        assert!(!ctx.contains("（用法："), "用法不注入");
+        assert!(!ctx.contains("（例："), "例句不注入");
+        assert!(ctx.contains("qq_slang_query"), "表尾查询指引");
+        // 超长首句截 80 字。
+        let mut long = entry("长词", &("a".repeat(200) + "。后半句"), "confirmed", 1);
+        long.content = "长词".into();
+        let ctx2 = build_context(&[long], 5);
+        let line = ctx2.lines().find(|l| l.starts_with("- 长词")).unwrap();
+        assert!(
+            line.chars().count() <= "- 长词：".chars().count() + 80,
+            "首句截 80 字"
+        );
     }
 
     #[test]
