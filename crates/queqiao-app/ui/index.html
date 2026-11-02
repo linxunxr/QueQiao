@@ -656,15 +656,26 @@ if (T) T.event.listen('bridge-state', () => refreshComponents());
 // 初始化与桥上线翻转时从桥拉尾部一次补齐（tail 是权威近期视图，直接替换；
 // 之后事件继续增量追加，与文件双写内容重叠无碍）。桥端返回时间序（老→新），
 // 这里倒序渲染成「新的在最上」。
+// 回放失败标记：对账轮据此持续重试（面板非空也可能是只有失败提示行）。
+let logReplayFailed = false;
 async function replayLog() {
   try {
     const r = await apiFetch(BRIDGE + '/api/logs/tail?n=150');
     const res = await r.json();
+    // 401 自愈失败等场景 fetch 不抛异常、响应体 {ok:false}——同样显形。
+    if (!res.ok) throw new Error(res.error || ('HTTP ' + r.status));
     const lines = (res.value && res.value.lines) || [];
-    if (!lines.length) return;
-    const l = $('log');
-    l.textContent = lines.slice().reverse().join('\n');
-  } catch (e) { }
+    if (!lines.length) { logReplayFailed = false; return; }
+    $('log').textContent = lines.slice().reverse().join('\n');
+    logReplayFailed = false;
+  } catch (e) {
+    // 失败显形：回放链断（桥未起/令牌失配/端口漂移）不无声吞掉，顶部写
+    // 诊断提示行；旧失败行先移除防持续失败时堆积，成功路径整体替换自清除。
+    logReplayFailed = true;
+    const msg = (e && e.message) ? e.message : String(e);
+    const kept = $('log').textContent.split('\n').filter(x => !x.startsWith('〔日志回放失败'));
+    $('log').textContent = ['〔日志回放失败：' + msg + '〕'].concat(kept).join('\n');
+  }
 }
 replayLog();
 
@@ -1224,9 +1235,11 @@ document.getElementById('page-settings').addEventListener('input', () => {
 loadCatalog();
 refreshBind(); // 绑定面板初始刷新：桥未起时先占位，tick 探测到桥上线后由恢复链重刷
 (async () => { await load(); fillModels(); })();
+let tickN = 0;
 (async function tick() {
   // 窗口最小化/后台时暂停轮询（WMI 进程枚举有成本；恢复可见立即刷一次）。
   if (!document.hidden) {
+    tickN++;
     const st = await refreshComponents();
     // 标志置位必须先于翻转分支：refreshDiary 等低频面板内部以 bridgeOnline
     // 门禁渲染，晚置位会让它们在"桥刚上线"时渲染成"桥未运行"，而它们不在
@@ -1236,6 +1249,10 @@ refreshBind(); // 绑定面板初始刷新：桥未起时先占位，tick 探测
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
     if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); }
+    // 日志区对账（每 6 轮 = 60s）：回放只在加载/桥翻转时跑，而清屏只清显示、
+    // 桥长跑不翻转——清屏或上轮回放失败后面板会一直空白。桥在线但面板空
+    //（或仅有失败提示）即补一次回放。
+    if (st.bridge && tickN % 6 === 0 && (!$('log').textContent || logReplayFailed)) replayLog();
     refreshPaused();
     refreshSessions();
     refreshCost();
@@ -1634,7 +1651,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); refreshBind(); } refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); refreshBind(); } if (st.bridge && (!$('log').textContent || logReplayFailed)) replayLog(); refreshSessions(); }); }
 });
 </script>
 </body>
