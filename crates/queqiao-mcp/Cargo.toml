@@ -13,6 +13,8 @@ path = "src/main.rs"
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+
 [dev-dependencies]
 # 守护测试：遍历 TOOLS 断言每个 endpoint 在桥 build_router 有路由（防两端
 # 路径约定再漂移——images/message 曾因此 404 空 body 全灭）。

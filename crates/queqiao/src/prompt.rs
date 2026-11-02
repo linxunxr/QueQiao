@@ -110,7 +110,7 @@ pub fn build_wake_prompt(ctx: &PromptContext, reason: &str) -> String {
             key = ctx.key
         ),
         "review" => format!(
-            "{base}【复盘时间】{key}\n这是一次周期复盘（对照消息末尾【复盘素材】段盘点你的整体状态）：审视记忆、日记与人格设定有没有过时、矛盾或缺失。产出只能是提议——清理/补充记忆用 qq_memory_append / qq_memory_remove（记忆是你自己的，可直接改）；发现值得收录的新梗走 qq_slang_submit；想调整人格用 qq_propose_role_edit（管理员批准才生效）。没有任何要调整的也正常：用 qq_mark_read 安静收尾。复盘不发言——不要往群里发任何消息。",
+            "{base}【复盘时间】{key}\n这是一次周期复盘（对照消息末尾【复盘素材】段盘点你的整体状态）：审视记忆、日记与人格设定有没有过时、矛盾或缺失。产出只能是提议——清理/补充短期记忆用 qq_memory_append / qq_memory_remove（记忆是你自己的，可直接改）；**经得起时间考验的（群友稳定喜好/重要事实/长期印象）蒸馏进长期记忆用 qq_memory_save_longterm（跨会话永久保留，别存流水账）**；发现值得收录的新梗走 qq_slang_submit；想调整人格用 qq_propose_role_edit（管理员批准才生效）。没有任何要调整的也正常：用 qq_mark_read 安静收尾。复盘不发言——不要往群里发任何消息。",
             key = ctx.key
         ),
         other => {

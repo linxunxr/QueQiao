@@ -1196,6 +1196,12 @@ async fn run(setup: Setup) {
     // 潜水闹钟、主动等待取消——定时器轮在主循环，工具端点经通道转交）。
     let (sched_tx, mut sched_rx) =
         tokio::sync::mpsc::unbounded_channel::<queqiao::orchestrator::SchedReq>();
+    // 长期记忆库（M7-2）：工具面与唤醒注入共享一份；磁盘库 open 失败降级
+    // 内存库（长期面空转不阻塞其它链路——与三 store 容忍哲学一致）。
+    let ltm_arc = std::sync::Arc::new(std::sync::Mutex::new(
+        queqiao::longterm_store::open(&queqiao::longterm_store::db_path())
+            .unwrap_or_else(|| rusqlite::Connection::open_in_memory().expect("内存库失败")),
+    ));
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
@@ -1217,6 +1223,9 @@ async fn run(setup: Setup) {
             sched_tx: sched_tx.clone(),
             watch: watch.clone(),
             console: Some(console_state.clone()),
+            // 长期记忆库（M7-2）：磁盘库 open 失败降级内存库（长期面空转
+            // 不阻塞其它链路——与三 store 容忍哲学一致）。
+            longterm: ltm_arc.clone(),
         });
         let console = console_state.clone();
         tokio::spawn(async move {
@@ -1354,6 +1363,7 @@ async fn run(setup: Setup) {
         review_pending: review_pending.clone(),
         onebot: onebot_http.clone(),
         watch: watch.clone(),
+        longterm: ltm_arc.clone(),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -2230,6 +2240,8 @@ struct Executor {
     onebot: OneBotHttpClient,
     /// 投递段 in-flight 打点（health/diagnostics 暴露）。
     watch: std::sync::Arc<queqiao::watch::WatchState>,
+    /// 长期记忆库（M7-2：唤醒 prompt 注入计数索引行用）。
+    longterm: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -2361,19 +2373,33 @@ impl Executor {
                             reply_remaining_ms: self.wake_cfg.reply_remaining_ms,
                         }
                     };
-                    // 记忆注入（Node 版 memoryLine 语义：话题/想法/印象随唤醒出现）。
+                    // 记忆注入（Node 版 memoryLine 语义：话题/想法/印象随唤醒出现；
+                    // 长期记忆（M7-2）只注一行计数索引——token 红线：不因记忆
+                    // 扩容回退分层注入，全文走 qq_memory_query category=longterm）。
                     let memory_block = {
                         let social = self.social.lock().unwrap();
+                        let ltm_index = self
+                            .longterm
+                            .lock()
+                            .ok()
+                            .and_then(|c| {
+                                let (t, f, i) = queqiao::longterm_store::count(&c, None);
+                                (t + f + i > 0).then_some(format!(
+                                    "【长期记忆】{t} 条话题 / {f} 条事实 / {i} 条印象（跨会话永久，qq_memory_query category=longterm 查全文）\n\n"
+                                ))
+                            })
+                            .unwrap_or_default();
                         social
                             .conversation(&key)
                             .map(|st| {
                                 let now = now_ms();
                                 let block = queqiao::memory::format_memory(st, now);
-                                if block.is_empty() {
+                                let combined = format!("{ltm_index}{block}");
+                                if combined.trim().is_empty() {
                                     String::new()
                                 } else {
                                     format!(
-                                        "{block}
+                                        "{combined}
 
 "
                                     )

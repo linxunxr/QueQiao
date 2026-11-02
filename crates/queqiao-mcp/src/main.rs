@@ -108,8 +108,21 @@ const TOOLS: &[ToolDef] = &[
         ],
     },
     ToolDef {
+        name: "qq_memory_save_longterm",
+        description: "蒸馏一条长期记忆（跨会话永久保留，与短期轻量记忆不同——只有经得起时间考验的才值得存：群友稳定的喜好/重要事实/长期印象）",
+        endpoint: "memory/longterm-save",
+        method: "POST",
+        flag: Some("memory"),
+        tablet_gate: TabletGate::None,
+        browser_gate: BrowserGate::None,
+        params: &[
+            ("kind", "string", true, "topic / fact / impression"),
+            ("content", "string", true, "长期记忆内容（500 字内）"),
+        ],
+    },
+    ToolDef {
         name: "qq_memory_append",
-        description: "记一条轻量记忆：进行中的话题(activeTopic)/想说未说(pendingThought)/对群友的印象(memberImpression 需 target)",
+        description: "记一条轻量记忆：进行中的话题(activeTopic)/想说未说(pendingThought)/对群友的印象(memberImpression 需 target)。要永久保留的用 qq_memory_save_longterm",
         endpoint: "memory-append",
         method: "POST",
         flag: Some("memory"),
@@ -157,30 +170,50 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "qq_memory_query",
-        description: "查看记忆详情（全量）：进行中的话题/想说未说/对群友的印象。唤醒提示里只有摘要与印象索引，查某类全文时传 category（印象必传）",
+        description: "查看记忆详情（全量）：进行中的话题/想说未说/对群友的印象/长期记忆。唤醒提示里只有摘要与印象索引，查某类全文时传 category（印象必传）；长期记忆传 category=longterm（可选 kind 过滤 + query 关键词）",
         endpoint: "memory",
         method: "GET",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
         browser_gate: BrowserGate::None,
-        params: &[(
-            "category",
-            "string",
-            false,
-            "activeTopic / pendingThought / memberImpression（缺省全部）",
-        )],
+        params: &[
+            (
+                "category",
+                "string",
+                false,
+                "activeTopic / pendingThought / memberImpression / longterm（缺省全部）",
+            ),
+            (
+                "kind",
+                "string",
+                false,
+                "longterm 时可选：topic / fact / impression",
+            ),
+            ("query", "string", false, "longterm 时可选：关键词过滤"),
+        ],
     },
     ToolDef {
         name: "qq_memory_remove",
-        description: "删除一条记忆（category + content 精确匹配）",
+        description: "删除一条记忆（短期 category+content 精确匹配；长期传 category=longterm+longtermId）",
         endpoint: "memory-remove",
         method: "POST",
         flag: Some("memory"),
         tablet_gate: TabletGate::None,
         browser_gate: BrowserGate::None,
         params: &[
-            ("category", "string", true, "activeTopic / pendingThought"),
-            ("content", "string", true, "要删除的记忆原文"),
+            (
+                "category",
+                "string",
+                true,
+                "activeTopic / pendingThought / longterm",
+            ),
+            ("content", "string", false, "短期记忆原文（长期删除不用）"),
+            (
+                "longtermId",
+                "number",
+                false,
+                "longterm 必填：qq_memory_query category=longterm 可查 id",
+            ),
         ],
     },
     ToolDef {
@@ -1915,6 +1948,9 @@ mod tests {
             browser: queqiao::browser::new_browser(),
             watch: queqiao::watch::WatchState::shared(),
             console: None,
+            longterm: std::sync::Arc::new(std::sync::Mutex::new(
+                rusqlite::Connection::open_in_memory().unwrap(),
+            )),
         });
         queqiao::tools_api::build_router(state, "", None)
     }

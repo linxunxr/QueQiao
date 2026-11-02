@@ -77,6 +77,15 @@ pub fn build_review_material(home: &Path, social: &SocialStore, host: &str) -> S
             ));
         }
     }
+    // 长期记忆库统计（M7-2：复盘是蒸馏主时机——素材给全局量，指引在
+    // prompt 尾段「蒸馏值得长期保留的」）。
+    let ltm = crate::longterm_store::open(&crate::longterm_store::db_path())
+        .map(|c| crate::longterm_store::count(&c, None))
+        .unwrap_or((0, 0, 0));
+    out.push_str(&format!(
+        "\n· 长期记忆（跨会话永久，qq_memory_query category=longterm 可查全文）：话题 {} 条、事实 {} 条、印象 {} 条\n",
+        ltm.0, ltm.1, ltm.2
+    ));
     // 人格卡状态：当前角色/版本/待审提议。
     let role = crate::role_card_store::current_role_name(home, host)
         .unwrap_or_else(|| "（未设置）".into());

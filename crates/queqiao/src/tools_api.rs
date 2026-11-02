@@ -51,6 +51,9 @@ pub struct ToolApiState {
     /// 控制台活值配置（热更分支维护的 ConsoleState.current；bin 注入，
     /// 测试缺省 None）——`live_cfg` 的数据源。
     pub console: Option<std::sync::Arc<crate::console::ConsoleState>>,
+    /// 长期记忆库（M7-2：state/memory.db，WAL；Mutex 串行与三 store 同
+    /// 哲学）。open 失败时注入内存库（长期面降级为空，不阻塞其它链路）。
+    pub longterm: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
 }
 
 /// 校验失败响应（状态码 + 消息）。
@@ -322,6 +325,10 @@ pub fn build_router(
         .route("/api/socialV2/tool-log", get(tool_log))
         .route("/api/socialV2/tool-log/clear", post(tool_log_clear))
         .route("/api/socialV2/memory", get(memory_list))
+        .route(
+            "/api/socialV2/memory/longterm-save",
+            post(memory_longterm_save),
+        )
         .route("/api/socialV2/memory-append", post(memory_append))
         .route("/api/socialV2/memory-remove", post(memory_remove))
         .route("/api/socialV2/memory-clear", post(memory_clear))
@@ -5084,12 +5091,40 @@ async fn memory_list(
     let category = q.get("category").map(String::as_str).unwrap_or("all");
     if !matches!(
         category,
-        "activeTopic" | "pendingThought" | "memberImpression" | "all"
+        "activeTopic" | "pendingThought" | "memberImpression" | "longterm" | "all"
     ) {
         return denied(
             StatusCode::BAD_REQUEST,
-            "category 须为 activeTopic / pendingThought / memberImpression / all",
+            "category 须为 activeTopic / pendingThought / memberImpression / longterm / all",
         );
+    }
+    // 长期层走 SQLite（kind 过滤 + 可选 query 关键词 LIKE）。
+    if category == "longterm" {
+        let now = crate::session_manager::SessionManager::now_ms();
+        let kind = q.get("kind").and_then(|k| {
+            crate::longterm_store::KINDS
+                .iter()
+                .find(|x| *x == &k.as_str())
+                .copied()
+        });
+        let kw = q.get("query").map(String::as_str);
+        let rows = {
+            let Ok(guard) = state.longterm.lock() else {
+                return denied(StatusCode::INTERNAL_SERVER_ERROR, "长期库锁中毒");
+            };
+            crate::longterm_store::query(&guard, kind, kw, now)
+        };
+        return match rows {
+            Ok(list) => ok_json(json!({
+                "memory": list,
+                "count": list.len(),
+                "hint": "长期记忆（跨会话共享）：topic=沉淀话题 / fact=稳定事实 / impression=群友印象"
+            })),
+            Err(e) => denied(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("长期库查询失败：{e}"),
+            ),
+        };
     }
     let store = state.social.lock().unwrap();
     let now = crate::session_manager::SessionManager::now_ms();
@@ -5098,6 +5133,72 @@ async fn memory_list(
         .and_then(|st| crate::memory::format_memory_detail(st, category, now))
         .unwrap_or_default();
     ok_json(json!({ "memory": block }))
+}
+
+/// qq_memory_save_longterm：蒸馏一条长期记忆（跨会话共享，SQLite 永久层）。
+async fn memory_longterm_save(
+    axum::extract::State(state): axum::extract::State<Arc<ToolApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let key = body
+        .get("conversationKey")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let key = match state.authorize(&headers, &key, state.cfg.social_v2.tools.memory) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    let kind = body.get("kind").and_then(Value::as_str).unwrap_or_default();
+    if !crate::longterm_store::KINDS.contains(&kind) {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            "kind 须为 topic / fact / impression",
+        );
+    }
+    let content = body
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if content.is_empty() {
+        return denied(StatusCode::BAD_REQUEST, "content 不能为空");
+    }
+    if content.chars().count() > 500 {
+        return denied(
+            StatusCode::BAD_REQUEST,
+            "长期记忆超 500 字——写结论不写流水账",
+        );
+    }
+    let now = crate::session_manager::SessionManager::now_ms();
+    let r = {
+        let Ok(guard) = state.longterm.lock() else {
+            return denied(StatusCode::INTERNAL_SERVER_ERROR, "长期库锁中毒");
+        };
+        crate::longterm_store::save(&guard, kind, &content, &key, now)
+    };
+    match r {
+        Ok(id) => {
+            crate::logging::activity(&format!(
+                "{key} 蒸馏长期记忆 [{kind}]：{}",
+                content.chars().take(60).collect::<String>()
+            ));
+            let (t, f, i) = state
+                .longterm
+                .lock()
+                .map(|c| crate::longterm_store::count(&c, None))
+                .unwrap_or((0, 0, 0));
+            ok_json(
+                json!({ "saved": true, "id": id, "totals": { "topic": t, "fact": f, "impression": i } }),
+            )
+        }
+        Err(e) => denied(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("长期库写入失败：{e}"),
+        ),
+    }
 }
 
 /// qq_memory_append：追加记忆（activeTopic / pendingThought / memberImpression）。
@@ -5186,6 +5287,27 @@ async fn memory_remove(
         .get("category")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // 长期条目按 id 删除（longterm + longtermId）。
+    if category == "longterm" {
+        let id = body.get("longtermId").and_then(Value::as_i64).unwrap_or(0);
+        if id <= 0 {
+            return denied(
+                StatusCode::BAD_REQUEST,
+                "longtermId 必填（qq_memory_query category=longterm 可查 id）",
+            );
+        }
+        let removed = {
+            let Ok(guard) = state.longterm.lock() else {
+                return denied(StatusCode::INTERNAL_SERVER_ERROR, "长期库锁中毒");
+            };
+            crate::longterm_store::remove(&guard, id).unwrap_or(false)
+        };
+        return if removed {
+            ok_json(json!({ "removed": true, "id": id }))
+        } else {
+            denied(StatusCode::NOT_FOUND, &format!("长期记忆 #{id} 不存在"))
+        };
+    }
     let content = body
         .get("content")
         .and_then(Value::as_str)

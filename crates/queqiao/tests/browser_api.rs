@@ -78,6 +78,9 @@ fn make_router(home: &std::path::Path, browser_enabled: bool) -> axum::Router {
         browser: queqiao::browser::new_browser(),
         watch: queqiao::watch::WatchState::shared(),
         console: None,
+        longterm: std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )),
     });
     build_router(state, "", None)
 }
@@ -191,6 +194,9 @@ fn make_authorized_router(home: &std::path::Path) -> (axum::Router, String) {
         browser: queqiao::browser::new_browser(),
         watch: queqiao::watch::WatchState::shared(),
         console: None,
+        longterm: std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )),
     });
     let r = build_router(state, "", None);
     // 从 store 里取令牌（测试侧读文件而不是内部 API——social-v2.json 落盘）。

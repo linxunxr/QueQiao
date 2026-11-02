@@ -71,6 +71,9 @@ fn make_router(home: &std::path::Path, observe_only: bool, wake_reason: &str) ->
         browser: queqiao::browser::new_browser(),
         watch: queqiao::watch::WatchState::shared(),
         console: None,
+        longterm: std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )),
     });
     (build_router(state, "", None), token)
 }

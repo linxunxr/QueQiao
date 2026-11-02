@@ -9,6 +9,12 @@
 - **1.0.0 门槛**：M5 真机生产验收达成（关键机制 1~7 真机全踩修齐 + 生产持续运行无回归，2026-11-01 定义改写见 `docs/规格设计.md` §八.3）+ Node 版归档——"可用于生产"的承诺点；生产切换已于 2026-10-23 完成；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [未发布]
+
+### 新增
+
+- **长期记忆（M7 第二批次，规格 §十二 P3——SQLite 触发信号"长期化"已到）**：新全局长期层 state/memory.db（rusqlite bundled，WAL；AI 同一人格跨会话共享），episodic 短期层（social-v2.json）不动、双轨并行零迁移。三通道：**qq_memory_save_longterm**（蒸馏写入：kind=topic/fact/impression，500 字上限，同 kind+content 幂等去重）/**qq_memory_query category=longterm**（kind 过滤+关键词 LIKE ESCAPE 转义，recall_count/last_recalled_at 记账——高频先出的重要性排序数据积累）/**qq_memory_remove category=longterm+longtermId**（owner-only，与短期删除同防线）。**token 红线**：唤醒 prompt 只注一行计数索引（【长期记忆】N 话题/N 事实/N 印象+查询指引），全文走查询工具——不因记忆扩容回退分层注入。复盘联动：素材加长期库统计、尾段指引"经得起时间考验的蒸馏进长期记忆（别存流水账）"——周期复盘是蒸馏主时机。语义检索（sqlite-vec+本地 embedding）留二期。
+
 ## [0.5.3] - 2026-11-01
 
 ### 修复
