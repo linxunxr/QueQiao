@@ -262,6 +262,9 @@ mod tests {
     ///（DSH_HOME 指向隔离目录防污染真机；组件对账用不存在的 exe 绕开。）
     #[test]
     fn marker_idempotent() {
+        let _env = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = temp_root("marker");
         unsafe {
             std::env::set_var("QUEQIAO_HOME", &root);
