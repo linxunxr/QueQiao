@@ -1483,6 +1483,92 @@ fn call_tool(def: &ToolDef, args: &Value, console_token: &str) -> Result<Value, 
         .map_err(|e| format!("桥响应解析失败：{e}"))
 }
 
+/// 桥成功响应（ok/value 信封）→ MCP content 块：带图工具转 image 块
+/// （视觉模型直接看图），其余 text 兜底。纯函数。信封在此统一解——
+/// 此前特判在信封顶层取 images/image 恒 miss（自 13b71f6 上线起从未
+/// 命中过），兜底把整信封连 base64 塞进 text 块，模型收到一坨 base64
+/// 文本只能说「看不了图片」（2026-11-06 真机会话 reasoning 实锤）。
+fn tool_result_content(name: &str, resp: &Value) -> Vec<Value> {
+    // 成功信封取 value 本体；ok:false / 意外形状原样透传（模型能看到错误）。
+    let value = if resp.get("ok") == Some(&json!(true)) && resp.get("value").is_some() {
+        &resp["value"]
+    } else {
+        resp
+    };
+    // qq_get_self_image / qq_get_sticker_image / tablet_screenshot /
+    // browser_screenshot：单图（value.image）转 MCP image 块（模型看不了裸 URL）。
+    if (name == "qq_get_self_image"
+        || name == "qq_get_sticker_image"
+        || name == "tablet_screenshot"
+        || name == "browser_screenshot")
+        && let Some(img) = value.get("image")
+        && let (Some(data), Some(mime)) = (
+            img.get("data").and_then(Value::as_str),
+            img.get("mimeType").and_then(Value::as_str),
+        )
+    {
+        let label = if name == "qq_get_self_image" {
+            let nickname = value.get("nickname").and_then(Value::as_str).unwrap_or("?");
+            format!("当前形象（{nickname}）：")
+        } else if name == "tablet_screenshot" {
+            let file = value.get("file").and_then(Value::as_str).unwrap_or("");
+            format!("平板截图（{file}）：")
+        } else {
+            let desc = value.get("desc").and_then(Value::as_str).unwrap_or("");
+            let note = value.get("note").and_then(Value::as_str).unwrap_or("");
+            if note.is_empty() {
+                format!("收藏表情（{desc}）：")
+            } else {
+                format!("收藏表情（{desc}）——{note}")
+            }
+        };
+        return vec![
+            json!({ "type": "text", "text": label }),
+            json!({ "type": "image", "mimeType": mime, "data": data }),
+        ];
+    }
+    // qq_get_message_images：images 数组里带 data 的项转 MCP image 内容块
+    // （视觉模型可直接看图）；无图项用桥给的 text 标注（face 的
+    // [QQ 表情 #id]、下载失败的 note），没有 text 才标获取失败。
+    if name == "qq_get_message_images"
+        && let Some(imgs) = value.get("images").and_then(Value::as_array)
+        && !imgs.is_empty()
+    {
+        let mut content: Vec<Value> = Vec::new();
+        let mut labels = Vec::new();
+        for (i, img) in imgs.iter().enumerate() {
+            let kind = if img.get("kind").and_then(Value::as_str) == Some("face") {
+                "表情"
+            } else {
+                "图片"
+            };
+            match (
+                img.get("data").and_then(Value::as_str),
+                img.get("mimeType").and_then(Value::as_str),
+            ) {
+                (Some(data), Some(mime)) => {
+                    labels.push(format!("[{}{}]", kind, i + 1));
+                    content.push(json!({ "type": "image", "mimeType": mime, "data": data }));
+                }
+                _ => {
+                    let text = img.get("text").and_then(Value::as_str).unwrap_or("");
+                    if text.is_empty() {
+                        labels.push(format!("[{}{}（获取失败）]", kind, i + 1));
+                    } else {
+                        labels.push(format!("[{}{}：{}]", kind, i + 1, text));
+                    }
+                }
+            }
+        }
+        content.insert(
+            0,
+            json!({ "type": "text", "text": format!("消息媒体（{} 项）：\n{}", imgs.len(), labels.join("\n")) }),
+        );
+        return content;
+    }
+    vec![json!({ "type": "text", "text": value.to_string() })]
+}
+
 /// qq_send_burst 的连发实现：messages 归一（数组 / JSON 数组字符串 / 单条
 /// 字符串），逐条调桥 send-message。间隔走 config send 节（Node computeGapsV2
 /// auto 模式）：普通区间 burstIntervalMin/Max，longGapProbability 概率落
@@ -1728,85 +1814,10 @@ fn handle_request(
             let result = call_tool(def, &args, console_token);
             audit_tool_call(def, &args, &result, &key);
             match result {
-                Ok(value) => {
-                    // qq_get_self_image / qq_get_sticker_image / tablet_screenshot：
-                    // 单图（value.image）转 MCP image 块（模型看不了裸 URL）。
-                    if (name == "qq_get_self_image"
-                        || name == "qq_get_sticker_image"
-                        || name == "tablet_screenshot"
-                        || name == "browser_screenshot")
-                        && let Some(img) = value.get("image")
-                        && let (Some(data), Some(mime)) = (
-                            img.get("data").and_then(Value::as_str),
-                            img.get("mimeType").and_then(Value::as_str),
-                        )
-                    {
-                        let label = if name == "qq_get_self_image" {
-                            let nickname =
-                                value.get("nickname").and_then(Value::as_str).unwrap_or("?");
-                            format!("当前形象（{nickname}）：")
-                        } else if name == "tablet_screenshot" {
-                            let file = value.get("file").and_then(Value::as_str).unwrap_or("");
-                            format!("平板截图（{file}）：")
-                        } else {
-                            let desc = value.get("desc").and_then(Value::as_str).unwrap_or("");
-                            let note = value.get("note").and_then(Value::as_str).unwrap_or("");
-                            if note.is_empty() {
-                                format!("收藏表情（{desc}）：")
-                            } else {
-                                format!("收藏表情（{desc}）——{note}")
-                            }
-                        };
-                        return json!({
-                            "jsonrpc": "2.0", "id": id,
-                            "result": { "content": [
-                                { "type": "text", "text": label },
-                                { "type": "image", "mimeType": mime, "data": data }
-                            ] }
-                        });
-                    }
-                    // qq_get_message_images：images 数组里带 data 的项转 MCP
-                    // image 内容块（视觉模型可直接看图），其余以文本标注。
-                    if name == "qq_get_message_images" {
-                        let imgs = value.get("images").and_then(Value::as_array);
-                        if let Some(imgs) = imgs
-                            && !imgs.is_empty()
-                        {
-                            let mut content: Vec<Value> = Vec::new();
-                            let mut labels = Vec::new();
-                            for (i, img) in imgs.iter().enumerate() {
-                                let kind =
-                                    if img.get("kind").and_then(Value::as_str) == Some("face") {
-                                        "表情"
-                                    } else {
-                                        "图片"
-                                    };
-                                match (
-                                    img.get("data").and_then(Value::as_str),
-                                    img.get("mimeType").and_then(Value::as_str),
-                                ) {
-                                    (Some(data), Some(mime)) => {
-                                        labels.push(format!("[{}{}]", kind, i + 1));
-                                        content.push(json!({ "type": "image", "mimeType": mime, "data": data }));
-                                    }
-                                    _ => labels.push(format!("[{}{}（获取失败）]", kind, i + 1)),
-                                }
-                            }
-                            content.insert(
-                                    0,
-                                    json!({ "type": "text", "text": format!("消息媒体（{} 项）：\n{}", imgs.len(), labels.join("\n")) }),
-                                );
-                            return json!({
-                                "jsonrpc": "2.0", "id": id,
-                                "result": { "content": content }
-                            });
-                        }
-                    }
-                    json!({
-                        "jsonrpc": "2.0", "id": id,
-                        "result": { "content": [ { "type": "text", "text": value.to_string() } ] }
-                    })
-                }
+                Ok(value) => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "content": tool_result_content(name, &value) }
+                }),
                 Err(e) => json!({
                     "jsonrpc": "2.0", "id": id,
                     "result": { "content": [ { "type": "text", "text": e } ], "isError": true }
@@ -1984,6 +1995,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 守护：桥成功响应统一包 ok/value 信封——tool_result_content 必须先
+    /// 解信封再取 images/image，否则特判在顶层恒 miss，整信封连 base64
+    /// 塞进 text 块，模型收到一坨 base64 文本只能说「看不了图片」
+    /// （自 13b71f6 上线特判从未命中过，2026-11-06 真机会话实锤，本测试
+    /// 即防复发）。
+    #[test]
+    fn tool_result_content_unwraps_envelope_to_image_blocks() {
+        // 看图：成功信封里的 images → text 标注 + image 内容块。
+        let resp = json!({
+            "ok": true,
+            "value": { "images": [
+                { "kind": "image", "mimeType": "image/gif", "data": "R0lGODlh" },
+                { "kind": "face", "text": "[QQ 表情 #18]" },
+            ], "note": "" }
+        });
+        let content = tool_result_content("qq_get_message_images", &resp);
+        assert_eq!(content.len(), 2, "1 图 1 face：text 标注 + 1 个 image 块");
+        assert_eq!(content[0]["type"], "text");
+        assert!(
+            content[0]["text"].as_str().unwrap().contains("[图片1]"),
+            "标注行应含图片编号：{}",
+            content[0]["text"]
+        );
+        assert!(
+            !content[0]["text"].as_str().unwrap().contains("获取失败"),
+            "face 有 text 不应标获取失败：{}",
+            content[0]["text"]
+        );
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], "image/gif");
+        assert_eq!(content[1]["data"], "R0lGODlh");
+
+        // 单图工具：信封里的 value.image → image 块。
+        let resp = json!({
+            "ok": true,
+            "value": { "image": { "mimeType": "image/png", "data": "iVBOR" },
+                       "desc": "开心", "note": "" }
+        });
+        let content = tool_result_content("qq_get_sticker_image", &resp);
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], "image/png");
+
+        // 错误信封（ok:false）：不解信封原样透传，模型能看到错误信息。
+        let resp = json!({ "ok": false, "error": "agent token 无效" });
+        let content = tool_result_content("qq_get_message_images", &resp);
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"].as_str().unwrap().contains("agent token 无效"));
+
+        // 普通工具：信封解开后 text 兜底不再带 ok/value 包装。
+        let resp = json!({ "ok": true, "value": { "messages": [] } });
+        let content = tool_result_content("qq_get_unread_messages", &resp);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"].as_str().unwrap(), r#"{"messages":[]}"#);
     }
 
     /// 守护：TOOLS 里每个 endpoint 按 call_tool 同款规则拼 URL，桥上必须有

@@ -980,6 +980,26 @@ async fn recall_message(
     }
 }
 
+/// 图片字节魔数嗅探（PNG/JPEG/GIF/WebP）。看图链路的 mimeType 一律以
+/// 本体字节为准——QQ 表情大量是 GIF，二选一猜错 mime（GIF 标成 jpeg）
+/// 会被视觉模型拒解。
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif")
+    } else if bytes.len() >= 12
+        && bytes.starts_with(&[0x52, 0x49, 0x46, 0x46])
+        && &bytes[8..12] == b"WEBP"
+    {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 /// qq_get_message_images：取消息内图片/表情（get_msg 拿原始段 → 图片
 /// 下载转 base64；face 转文本；视频暂不支持抽帧）。图片下载在
 /// spawn_blocking（reqwest blocking）。
@@ -1082,11 +1102,8 @@ async fn message_images(
                 .and_then(|r| r.bytes());
             match fetched {
                 Ok(bytes) => {
-                    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-                        "image/png"
-                    } else {
-                        "image/jpeg"
-                    };
+                    // 嗅探失败仍按 jpeg 容错（QQ 图床偶发奇怪容器），不拒图。
+                    let mime = sniff_image_mime(&bytes).unwrap_or("image/jpeg");
                     use base64::Engine;
                     out.push(json!({
                         "kind": "image", "mimeType": mime, "text": text,
@@ -4904,20 +4921,7 @@ async fn sticker_image(
                     if bytes.len() > 10 * 1024 * 1024 {
                         return None;
                     }
-                    let mime = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-                        "image/png"
-                    } else if bytes.starts_with(&[0xFF, 0xD8]) {
-                        "image/jpeg"
-                    } else if bytes.starts_with(b"GIF8") {
-                        "image/gif"
-                    } else if bytes.len() >= 12
-                        && bytes.starts_with(&[0x52, 0x49, 0x46, 0x46])
-                        && &bytes[8..12] == b"WEBP"
-                    {
-                        "image/webp"
-                    } else {
-                        return None;
-                    };
+                    let mime = sniff_image_mime(&bytes)?;
                     use base64::Engine;
                     Some((
                         mime.to_owned(),
@@ -5427,6 +5431,25 @@ async fn message_detail(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 魔数嗅探四格式齐全——QQ 表情大量是 GIF，此前看图二选一判断把
+    /// GIF 标成 image/jpeg，视觉模型拒解错 mime。
+    #[test]
+    fn sniff_image_mime_covers_four_formats() {
+        assert_eq!(sniff_image_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]), Some("image/png"));
+        assert_eq!(sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(sniff_image_mime(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(
+            sniff_image_mime(&[0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, b'W', b'E', b'B', b'P']),
+            Some("image/webp")
+        );
+        assert_eq!(sniff_image_mime(b"<html>403"), None);
+        // RIFF 但非 WebP（如 WAV/AVI）不算图。
+        assert_eq!(
+            sniff_image_mime(&[0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, b'W', b'A', b'V', b'E']),
+            None
+        );
+    }
 
     /// 段分派：OneBot array 格式字段在 data 子对象里——顶层取值的旧 bug
     ///（自上线起每次看图都返回「无图」，AI 脑补原因）钉死防回归。
