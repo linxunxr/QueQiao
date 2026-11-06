@@ -5436,8 +5436,14 @@ mod tests {
     /// GIF 标成 image/jpeg，视觉模型拒解错 mime。
     #[test]
     fn sniff_image_mime_covers_four_formats() {
-        assert_eq!(sniff_image_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]), Some("image/png"));
-        assert_eq!(sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(
+            sniff_image_mime(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff_image_mime(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
         assert_eq!(sniff_image_mime(b"GIF89a...."), Some("image/gif"));
         assert_eq!(
             sniff_image_mime(&[0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, b'W', b'E', b'B', b'P']),

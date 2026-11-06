@@ -2045,7 +2045,12 @@ mod tests {
         let content = tool_result_content("qq_get_message_images", &resp);
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
-        assert!(content[0]["text"].as_str().unwrap().contains("agent token 无效"));
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("agent token 无效")
+        );
 
         // 普通工具：信封解开后 text 兜底不再带 ok/value 包装。
         let resp = json!({ "ok": true, "value": { "messages": [] } });
