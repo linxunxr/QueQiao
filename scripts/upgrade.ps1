@@ -23,6 +23,9 @@ param(
     [string]$NodeBridge = $env:QUEQIAO_NODE_BRIDGE
 )
 $ErrorActionPreference = 'Stop'
+# UTF-8 无 BOM 写入：PS5.1 的 Set-Content -Encoding UTF8 / Out-File -Encoding utf8 均带 BOM，
+# dsh 的 YAML/JSON 解析器不认 BOM（2026-11-06 cordis.patch.yml 解析报错根因，勿改回）。
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $Profile = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
@@ -160,7 +163,7 @@ if (Test-Path $slCfg) {
             if (Test-Path (Join-Path $target 'launcher.bat')) {
                 Write-Host "  安装目录下已有 SnowLuma——仅更新 config.homeDir 指向它（旧目录不动）" -ForegroundColor Yellow
                 $j.snowluma.homeDir = $target
-                $j | ConvertTo-Json -Depth 20 | Out-File $slCfg -Encoding utf8
+                [IO.File]::WriteAllText($slCfg, ($j | ConvertTo-Json -Depth 20), $Utf8NoBom)
             } else {
                 $answer = Read-Host '  迁移过来？（回车 = 迁；n = 保持原位）'
                 $mv = if ($null -ne $answer) { "$answer".Trim() } else { '' }
@@ -172,7 +175,7 @@ if (Test-Path $slCfg) {
                     Start-Sleep 2
                     Move-Item $hd $target
                     $j.snowluma.homeDir = $target
-                    $j | ConvertTo-Json -Depth 20 | Out-File $slCfg -Encoding utf8
+                    [IO.File]::WriteAllText($slCfg, ($j | ConvertTo-Json -Depth 20), $Utf8NoBom)
                     Write-Host "  已迁入：$target（config.homeDir 已更新）" -ForegroundColor Green
                 } else {
                     Write-Host "  保持原位（$hd）" -ForegroundColor Yellow
@@ -223,14 +226,14 @@ function Write-McpPatch {
 $searchBlock
 # === queqiao MCP END ===
 "@
-    $existing = if ((Get-Item $PatchFile).Length -gt 0) { Get-Content $PatchFile -Raw -Encoding UTF8 } else { '' }
+    $existing = if ((Get-Item $PatchFile).Length -gt 0) { (Get-Content $PatchFile -Raw -Encoding UTF8).TrimStart([char]0xFEFF) } else { '' }
     $existing = $existing -replace '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?', ''
     $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-snowluma(-host)?\s*\r?\n.*?(?=^\S|\z)', ''
     $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-web-search-safe\s*\r?\n.*?(?=^\S|\z)', ''
     if ($existing.Trim()) {
-        Set-Content $PatchFile ($existing.TrimEnd() + "`n`n" + $block) -Encoding UTF8 -NoNewline
+        [IO.File]::WriteAllText($PatchFile, ($existing.TrimEnd() + "`n`n" + $block), $Utf8NoBom)
     } else {
-        Set-Content $PatchFile $block -Encoding UTF8 -NoNewline
+        [IO.File]::WriteAllText($PatchFile, $block, $Utf8NoBom)
     }
     $searchNote = if ($searchBlock) { '+web-search-safe' } else { '' }
     Write-Host '  ' + "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp$searchNote（清 Node 旧块，保留其余条目）"

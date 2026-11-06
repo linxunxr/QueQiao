@@ -27,6 +27,9 @@ param(
     [string]$NodeBridge = $env:QUEQIAO_NODE_BRIDGE
 )
 $ErrorActionPreference = 'Stop'
+# UTF-8 无 BOM 写入：PS5.1 的 Set-Content -Encoding UTF8 / Out-File -Encoding utf8 均带 BOM，
+# dsh 的 YAML/JSON 解析器不认 BOM（2026-11-06 cordis.patch.yml 解析报错根因，勿改回）。
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 # install.ps1 在仓库根（Release zip 里在安装根）：RepoRoot 即脚本所在目录。
 $RepoRoot = $PSScriptRoot
 
@@ -300,7 +303,7 @@ if (Test-Path $cfgPath) {
             private = @($privates -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object { [int64]$_ })
         }
     }
-    $cfg | ConvertTo-Json -Depth 5 | Out-File $cfgPath -Encoding utf8
+    [IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 5), $Utf8NoBom)
     Write-Ok "已生成 $cfgPath（其余配置按默认值深度合并——按需参考仓库 README 修订）"
 }
 
@@ -344,14 +347,14 @@ function Write-McpPatch {
 $searchBlock
 # === queqiao MCP END ===
 "@
-    $existing = if ((Get-Item $PatchFile).Length -gt 0) { Get-Content $PatchFile -Raw -Encoding UTF8 } else { '' }
+    $existing = if ((Get-Item $PatchFile).Length -gt 0) { (Get-Content $PatchFile -Raw -Encoding UTF8).TrimStart([char]0xFEFF) } else { '' }
     $existing = $existing -replace '(?s)# === (qq-bridge|queqiao) MCP BEGIN ===.*?# === (qq-bridge|queqiao) MCP END ===\r?\n?', ''
     $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-snowluma(-host)?\s*\r?\n.*?(?=^\S|\z)', ''
     $existing = $existing -replace '(?ms)^-\s*insert:\s*\r?\n\s*-\s*id:\s*mcp-web-search-safe\s*\r?\n.*?(?=^\S|\z)', ''
     if ($existing.Trim()) {
-        Set-Content $PatchFile ($existing.TrimEnd() + "`n`n" + $block) -Encoding UTF8 -NoNewline
+        [IO.File]::WriteAllText($PatchFile, ($existing.TrimEnd() + "`n`n" + $block), $Utf8NoBom)
     } else {
-        Set-Content $PatchFile $block -Encoding UTF8 -NoNewline
+        [IO.File]::WriteAllText($PatchFile, $block, $Utf8NoBom)
     }
     $searchNote = if ($searchBlock) { '+web-search-safe' } else { '' }
     Write-Ok "profiles\$ProfileName\cordis.patch.yml 已注册 queqiao-mcp$searchNote（清 Node 旧块，保留其余条目）"

@@ -4,3 +4,4 @@
 dist/
 *.log
 .playwright-mcp/
+.zcode/
