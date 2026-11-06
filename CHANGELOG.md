@@ -11,6 +11,13 @@
 
 ## [未发布]
 
+## [0.5.4] - 2026-11-06
+
+### 修复
+
+- **看图工具返回的图模型从未看到过（自看图工具上线即如此）**：真机群聊 AI 反复说「看不了图片」——实为桥成功响应统一包 ok/value 信封，而 MCP 侧转 image 内容块的特判在信封顶层取 images/image 恒 miss（自 13b71f6 上线即死代码，此前两次修复 6cd4255/e4f347a 均在桥侧、验证未覆盖 MCP 层），兜底把整信封连 base64 塞进 text 块，模型收到一坨 base64 文本（真机会话 reasoning 实锤）；工具调用链全程 ok:true、图也真实下载成功，只死在最后一步格式转换。修复：转换逻辑抽纯函数 tool_result_content 统一解信封——单图特判（当前形象/收藏表情/平板截图/浏览器截图）与看图多图特判全部复活；face 项改用桥给的 text 标注不再误标「获取失败」；桥端抽公用 sniff_image_mime 补 GIF/WebP 魔数（QQ 表情大量是 GIF，原 PNG/JPEG 二选一把 GIF 错标 image/jpeg，视觉模型拒解错 mime）。守护测试钉死信封解包各分支；进程级 stdio 冒烟（假桥+真 MCP 全链路）验证 image 块返回、base64 不再泄漏 text。
+- **控制台运行日志清屏/回放失败后永不自愈**：回放此前只在页面加载/桥离线转在线翻转时执行，而清屏只清显示不翻转状态——桥长跑时面板永久空白；回放失败又被静默吞掉。修复：回放失败在日志区顶部写〔日志回放失败：原因〕诊断行（重复失败去重不堆积，成功整体替换自清除），tick 每 6 轮（60s）与窗口恢复可见时对账——桥在线但面板空或上轮失败即补跑回放（浏览器对生产真桥实测五用例全过）。
+
 ### 新增
 
 - **长期记忆（M7 第二批次，规格 §十二 P3——SQLite 触发信号"长期化"已到）**：新全局长期层 state/memory.db（rusqlite bundled，WAL；AI 同一人格跨会话共享），episodic 短期层（social-v2.json）不动、双轨并行零迁移。三通道：**qq_memory_save_longterm**（蒸馏写入：kind=topic/fact/impression，500 字上限，同 kind+content 幂等去重）/**qq_memory_query category=longterm**（kind 过滤+关键词 LIKE ESCAPE 转义，recall_count/last_recalled_at 记账——高频先出的重要性排序数据积累）/**qq_memory_remove category=longterm+longtermId**（owner-only，与短期删除同防线）。**token 红线**：唤醒 prompt 只注一行计数索引（【长期记忆】N 话题/N 事实/N 印象+查询指引），全文走查询工具——不因记忆扩容回退分层注入。复盘联动：素材加长期库统计、尾段指引"经得起时间考验的蒸馏进长期记忆（别存流水账）"——周期复盘是蒸馏主时机。语义检索（sqlite-vec+本地 embedding）留二期。
