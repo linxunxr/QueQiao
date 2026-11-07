@@ -1869,6 +1869,18 @@ async fn run(setup: Setup) {
                             // 恒拒、需重启桥才生效（2026-10-31 真机踩过）。
                             cfg = fresh;
                             queqiao::logging::log("[config] 热更生效（UI 保存的配置已应用）");
+                            // 模型钉选同步热更：set_dsh_model 的文档承诺「config
+                            // 热更时调用」，但此前唯一调用点在启动 discover——
+                            // 运行中改 dsh.provider/model 只进 ConsoleState（UI
+                            // 可见），SessionManager 仍持启动快照的空值=不钉，
+                            // 会话重建回落 DSH 默认模型（v0.5.5 真机：钉选写入
+                            // config 后新回合仍未见 selectModel，重启才生效）。
+                            {
+                                let d = cfg.dsh.clone();
+                                if let Ok(mut m) = sessions_arc.lock() {
+                                    m.set_dsh_model(&d.provider, &d.model, &d.reasoning_effort);
+                                }
+                            }
                             // 设置页唤醒推荐段变化 → 回写全部会话（管理员
                             // 保存即接管：覆盖 AI 自主调整，重置为推荐模板；
                             // speaker_ids 与计数类字段保留）。无关字段变化
