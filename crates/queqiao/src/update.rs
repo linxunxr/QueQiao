@@ -19,7 +19,8 @@ const REPO: &str = "linxunxr/QueQiao";
 const GITEE_REPO: &str = "mwcxlinxun/QueQiao";
 
 /// 解析 "0.1.2" → (0, 1, 2)；非法输入返回 None。
-fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
+/// （升级自检复活待应用更新时也用：比对 staging 三件套与当前版本。）
+pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let mut it = s.split('.');
     let maj = it.next()?.parse().ok()?;
     let min = it.next()?.parse().ok()?;

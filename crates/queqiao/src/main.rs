@@ -449,6 +449,14 @@ fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
         for n in &reconcile.notes {
             queqiao::logging::activity(n);
         }
+        // 复活了未应用的就绪更新：apply bat 已在跑（先 kill 本进程再换装
+        // 重启新版）——立即退出，别再起 DSH 连接/工具面/主循环（起来也会
+        // 被 bat 杀掉，白忙一场还可能留下半初始化状态）。discover 返回
+        // None 会让 main 重试循环再睡 30s——不能走那条路，直接进程退出。
+        if reconcile.exit_for_apply {
+            queqiao::logging::log("检测到未应用的就绪更新——apply 脚本已接管，本进程退出");
+            std::process::exit(0);
+        }
         if reconcile.retire_needed
             && let Ok(mut m) = sessions.lock()
         {

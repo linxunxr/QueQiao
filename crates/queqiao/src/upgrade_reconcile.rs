@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 pub struct ReconcileOutcome {
     pub retire_needed: bool,
     pub notes: Vec<String>,
+    /// 启动时补跑了 apply bat（旧进程即本进程，bat 会先 kill 我们再换装
+    /// 重启）——宿主收到后应立即退出主循环，把换装交给 bat。
+    pub exit_for_apply: bool,
 }
 
 /// DSH home（与 main 的凭据发现同源：DSH_HOME 覆盖 → %USERPROFILE%\.dsh）。
@@ -43,6 +46,27 @@ pub fn run(install_dir: &Path) -> ReconcileOutcome {
     let marker = crate::paths::queqiao_home()
         .join("state")
         .join("last-bridge-version.json");
+
+    // ⓪**桥死后未应用更新的复活**（v0.5.5 发版真机实锤的缺口）：桥侧
+    // 更新就绪后「等会话空闲再应用」的状态（pending_update）只活在主循环
+    // 里——桥进程一旦死亡/被杀，就绪的 staging 与 update.lock 永远躺在
+    // 磁盘上：不会应用、锁不过期（20min 过期只挡并发不改执行）、下轮
+    // 下载还得等锁。启动时发现「staging 三件套齐全 + update.lock 属
+    // bridge」→ 桥自身已是被 kill 的旧进程，直接补跑 apply bat：bat 会
+    // 再 kill 一次（无害）、换装、重启新版。staging 三件套**必须比当前
+    // 新**才补跑——apply 失败保留的残包（组件对账后可能已是同版本）不
+    // 该触发重启循环。
+    if let Some(bat) = revive_pending_apply(install_dir, version) {
+        return ReconcileOutcome {
+            retire_needed: false,
+            notes: vec![format!(
+                "启动自检发现未应用的就绪更新（update-staging 完整 + update.lock 属 bridge）\
+                 ——补跑 apply：{bat:?}，旧进程退出把换装交棒"
+            )],
+            exit_for_apply: true,
+        };
+    }
+
     let same = std::fs::read_to_string(&marker)
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -82,12 +106,14 @@ pub fn run(install_dir: &Path) -> ReconcileOutcome {
         ReconcileOutcome {
             retire_needed: true,
             notes,
+            exit_for_apply: false,
         }
     } else {
         // 同版本但 MCP 自愈过 → 工具面变了，会话同样需要重建。
         ReconcileOutcome {
             retire_needed: mcp_patched,
             notes,
+            exit_for_apply: false,
         }
     }
 }
@@ -164,6 +190,68 @@ fn heal_component(
             false
         }
     }
+}
+
+/// 三件套版本探测：spawn `<exe> --version` 取第二段。失败/无输出 None。
+fn probe_version(path: &Path) -> Option<String> {
+    std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.split_whitespace().nth(1).map(String::from))
+}
+
+/// 启动复活判定：update-staging/ 三件套齐全且**比当前版本新**，且
+/// update.lock 存在且属 bridge（桥侧更新器的持锁标记）→ 补跑 apply bat
+/// 并返回其路径。任一条件不满足返回 None（正常启动路径不受影响）。
+///
+/// 只认桥侧 staging（`update-staging`）：`update-staging-app` 是客户端
+/// 更新器的领地，其 apply-update-app.bat 只重启客户端不重启桥——桥侧
+/// 无权代跑，留给客户端自己的启动逻辑。
+fn revive_pending_apply(install_dir: &Path, current: &str) -> Option<PathBuf> {
+    let staging = install_dir.join("update-staging");
+    // 三件套齐全才算「就绪」（apply 中途失败的残包可能缺件——残包走
+    // 组件对账的补拷自愈，不走重启路径）。
+    let exes = ["queqiao.exe", "queqiao-mcp.exe", "queqiao-app.exe"];
+    for exe in exes {
+        if !staging.join(exe).is_file() {
+            return None;
+        }
+    }
+    // staging 版本必须严格更新——否则是把 apply 失败保留的同版本残包
+    // 当成待应用更新，重启循环（每次启动 kill 自己换同样的版本）。
+    let cur = crate::update::parse_version(current)?;
+    for exe in exes {
+        match probe_version(&staging.join(exe)) {
+            Some(v) if matches!(crate::update::parse_version(&v), Some(n) if n > cur) => {}
+            _ => return None,
+        }
+    }
+    // update.lock 属 bridge：桥侧更新器下载完成后的持锁标记（apply bat
+    // 执行完会删锁——锁还在 = bat 从未跑过）。无锁说明 apply 已跑过而
+    // staging 是失败残包，不复活。
+    let lock = install_dir.join("update.lock");
+    let holder = std::fs::read_to_string(&lock).ok().and_then(|t| {
+        t.lines()
+            .find_map(|l| l.strip_prefix("tag="))
+            .map(String::from)
+    });
+    if holder.as_deref() != Some("bridge") {
+        return None;
+    }
+    // 就绪更新必有对应 bat（下载完成时与 staging 同步生成）。
+    let bat = install_dir.join("apply-update.bat");
+    if !bat.is_file() {
+        return None;
+    }
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", ""])
+        .arg(&bat)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn();
+    Some(bat)
 }
 
 /// 递归部署：内容不同才写（返回 (更新数, 未变数)）。
@@ -323,5 +411,61 @@ mod tests {
             notes2.iter().any(|n| n.contains("无补装包")),
             "无补装包应告警：{notes2:?}"
         );
+    }
+
+    /// 复活待应用更新（revive_pending_apply 判定分支直测）：四要件——
+    /// staging 三件套齐全 / 三件都比当前新 / update.lock 属 bridge /
+    /// apply bat 在。缺一即 None（不复活），齐则 Some(bat)。
+    /// （不 spawn 真 bat——fixture 只放哑文件，Some 分支 spawn 的是
+    /// cmd /c start 哑 bat，无害；直测判定函数而非 run()，避开它。）
+    #[test]
+    fn revive_pending_apply_branches() {
+        let root = temp_root("revive");
+        let install = root.join("install");
+        let staging = install.join("update-staging");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        // 哑 bat（复活路径会 spawn 它——内容是本测试进程的 .cmd 语法但
+        // 从不会被 start 执行成功也无害：echo 到空设备即退）。
+        std::fs::write(install.join("apply-update.bat"), "@echo off\r\n").unwrap();
+        std::fs::write(install.join("update.lock"), "tag=bridge\ntime=t\r\n").unwrap();
+
+        // ①缺件（只有两件）：不复活。
+        std::fs::write(staging.join("queqiao.exe"), "x").unwrap();
+        std::fs::write(staging.join("queqiao-mcp.exe"), "x").unwrap();
+        assert!(
+            revive_pending_apply(&install, "0.0.1").is_none(),
+            "缺 queqiao-app.exe 不复活"
+        );
+
+        // ②件齐但非 PE（probe_version 失败 = 版本不可证新）：不复活。
+        std::fs::write(staging.join("queqiao-app.exe"), "x").unwrap();
+        assert!(
+            revive_pending_apply(&install, "0.0.1").is_none(),
+            "哑文件版本探测失败不复活（宁缺勿错）"
+        );
+
+        // ③锁不属 bridge：不复活（客户端更新器领地）。
+        std::fs::write(install.join("update.lock"), "tag=app\ntime=t\r\n").unwrap();
+        assert!(
+            revive_pending_apply(&install, "0.0.1").is_none(),
+            "app 锁不复活"
+        );
+        std::fs::remove_file(install.join("update.lock")).unwrap();
+        assert!(
+            revive_pending_apply(&install, "0.0.1").is_none(),
+            "无锁不复活（apply 已跑过的残包）"
+        );
+
+        // ④锁属 bridge 但 bat 缺席：不复活。
+        std::fs::write(install.join("update.lock"), "tag=bridge\ntime=t\r\n").unwrap();
+        std::fs::remove_file(install.join("apply-update.bat")).unwrap();
+        assert!(
+            revive_pending_apply(&install, "0.0.1").is_none(),
+            "无 bat 不复活"
+        );
+
+        // 就绪三件套 + 真 PE 的全链（版本探测要真 exe）留真机验证——
+        // CI/单测不 spawn 本仓库产物（跨 crate 二进制依赖，脆）。
     }
 }
