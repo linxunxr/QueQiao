@@ -2755,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao-app"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "queqiao",
  "queqiao-core",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao-core"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "regex",
  "serde",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao-dsh"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao-mcp"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "axum",
  "queqiao",
@@ -2833,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao-media"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "cc",
  "hound",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "queqiao-onebot"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",

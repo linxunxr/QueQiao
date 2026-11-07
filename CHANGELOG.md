@@ -11,6 +11,17 @@
 
 ## [未发布]
 
+## [0.5.5] - 2026-11-07
+
+### 修复
+
+- **同版本重发触达不了存量安装（v0.5.4 重发的教训闭环）**：v0.5.4 发版后发现产物带 BOM 缺陷，以「删 tag 重发」方式修复了 GitHub 产物——但 `not_newer`（update.rs）按「版本号不大于当前即无更新」判定，0.5.4→0.5.4 同号重发对已装 0.5.4 的机器永远 `hasUpdate:false`，升级链（含 preset 部署的版本对账短路）全部沉默；真机实锤：生产三件套仍是首轮 14:00 构建，重发的 14:45 构建只有手动覆盖 install.ps1 才落地。**处置决策**：不给更新链加时间戳/资产指纹重判——那会给本项目事故密度最高的子系统引入重复下载循环风险，去覆盖一条流程纪律就能根治的场景；改立纪律 **「发版即冻结：tag 打过不再动，产物有问题一律顺延新版本号」**，版本号 bump 本身即触达全部存量（含坏 0.5.4）。本版即按该纪律把 v0.5.4 重发内容（安装/升级脚本 UTF-8 无 BOM 修复）随 0.5.5 正式触达。
+- **控制台 DSH 模型下拉恒显「桥未运行/该提供方无模型」**：`loadCatalog()` 只在页面首帧调用一次——客户端（app）与桥几乎同时启动，app 首帧时桥常未就绪，目录拉取失败即把两个下拉写死占位文案；此后 tick 与 visibilitychange 的「桥转在线」恢复链补跑了 load/loadRoles/refreshDiary/refreshFeedback/refreshSlang/refreshBind 却唯独漏了 loadCatalog，模型下拉随后还被 `load().then(fillModels)` 用空目录覆盖成「该提供方无模型」，直到整页刷新才恢复（真机：07:14:20 app 启动 vs 07:14:21 桥就绪，1 秒竞态必踩；桥端 `/api/dsh/catalog` 实测 200 完整目录，纯属 UI 侧时机问题）。修复：两处翻转分支各补一次 `loadCatalog()`——7369cb3「桥转在线恢复链漏刷新面」同类坑的第二处。
+
+### CI 与流程
+
+- **CI 根治 sherpa-onnx 静态库链接失败（v0.5.4 两次 tag CI 同因红）**：rust-cache 按 fingerprint 剪枝 target 缓存——build.rs 私自落盘的 `target/sherpa-onnx-prebuilt/`（122MB 预编译静态库）保存时被剔、还原后只剩目录骨架，而 sherpa-onnx-sys 的 build.rs 见 lib/ 目录存在即早退复用（日志实锤：全程无 Downloading 行、2 秒内链接失败），rustc 找不到 `sherpa-onnx-c-api.lib`。Release 流水线无 rust-cache 每轮全新下载恒绿，CI 恒红即此分叉。三层修复：预编译归档走独立 `actions/cache`（键钉死 v2.0.1-win-x64-static-MT-Release-lib，升级 sherpa-onnx 时改键）+ `SHERPA_ONNX_ARCHIVE_DIR` 官方离线钩子（build.rs 本地拷贝不再联网）+ 构建前清理缺 `.lib` 标志文件的中毒目录兜底；已清空仓库全部中毒 Actions 缓存（16 条）并重跑验证转绿。
+
 ## [0.5.4] - 2026-11-06
 
 ### 修复
