@@ -15,6 +15,10 @@ jobs:
   check:
     name: fmt + clippy + test（含特性组合）
     runs-on: windows-latest
+    env:
+      # sherpa-onnx-sys 官方离线钩子：从此目录拷贝预编译归档，不再依赖
+      # build.rs 联网下载（v0.5.4 两次 tag CI 均因 target 缓存中毒链接失败）。
+      SHERPA_ONNX_ARCHIVE_DIR: ${{ github.workspace }}/sherpa-onnx-archive
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +27,51 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      # sherpa 预编译库走独立缓存：rust-cache 只按指纹保留 target 产物，
+      # sherpa-onnx-prebuilt/ 是 build.rs 私自落盘的（122MB 静态库），保存时被
+      # 剪枝、还原后只剩空目录骨架，build.rs 见目录存在即早退复用 → 链接时
+      # "could not find native static library sherpa-onnx-c-api" 确定性失败
+      # （真机日志实锤：无 Downloading 行 + 2 秒内报错；Release 流水线无
+      # rust-cache 全新下载恒绿）。归档缓存键钉死版本，升级 sherpa-onnx 时改这里。
+      - name: sherpa-onnx 静态库归档（actions/cache，独立于 rust-cache）
+        uses: actions/cache@v4
+        with:
+          path: sherpa-onnx-archive
+          key: sherpa-onnx-v2.0.1-win-x64-static-MT-Release-lib
+
+      - name: 确保 sherpa-onnx 归档就绪（缓存未命中则下载）
+        shell: pwsh
+        run: |
+          $dir = 'sherpa-onnx-archive'
+          $name = 'sherpa-onnx-v2.0.1-win-x64-static-MT-Release-lib.tar.bz2'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $dst = Join-Path $dir $name
+          if (-not (Test-Path $dst)) {
+            $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/$name"
+            Write-Host "归档缓存未命中，下载 $url"
+            Invoke-WebRequest -Uri $url -OutFile $dst -MaximumRedirection 5
+          }
+          # 完整性下限（2026-11 实测 122,863,596 字节）：防半截文件进缓存
+          $len = (Get-Item $dst).Length
+          if ($len -lt 100000000) { throw "sherpa-onnx 归档不完整：$len 字节" }
+          Write-Host "归档就绪：$len 字节"
+
+      - name: 清理可能被 rust-cache 剪枝中毒的 sherpa 预编译目录
+        shell: pwsh
+        run: |
+          $pre = 'target/sherpa-onnx-prebuilt'
+          if (Test-Path $pre) {
+            Get-ChildItem $pre -Directory | ForEach-Object {
+              $marker = Join-Path $_.FullName 'lib/sherpa-onnx-c-api.lib'
+              if (-not (Test-Path $marker)) {
+                Write-Host "删除不完整预编译目录：$($_.Name)（缺 $marker）"
+                Remove-Item -Recurse -Force $_.FullName
+                $tar = Join-Path $pre "$($_.Name).tar.bz2"
+                if (Test-Path $tar) { Remove-Item -Force $tar }
+              }
+            }
+          }
 
       - name: 格式检查
         run: cargo fmt --all --check
