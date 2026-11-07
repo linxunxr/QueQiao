@@ -1248,7 +1248,7 @@ let tickN = 0;
     bridgeOnline = st.bridge;
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); }
+    if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); loadCatalog(); }
     // 日志区对账（每 6 轮 = 60s）：回放只在加载/桥翻转时跑，而清屏只清显示、
     // 桥长跑不翻转——清屏或上轮回放失败后面板会一直空白。桥在线但面板空
     //（或仅有失败提示）即补一次回放。
@@ -1651,7 +1651,7 @@ async function refreshCost() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); refreshBind(); } if (st.bridge && (!$('log').textContent || logReplayFailed)) replayLog(); refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); refreshBind(); loadCatalog(); } if (st.bridge && (!$('log').textContent || logReplayFailed)) replayLog(); refreshSessions(); }); }
 });
 </script>
 </body>
