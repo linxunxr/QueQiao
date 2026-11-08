@@ -11,6 +11,13 @@
 
 ## [未发布]
 
+## [0.5.6] - 2026-11-08
+
+### 修复
+
+- **桥死后就绪的更新永不应用（v0.5.5 发版真机实锤）**：桥打印「新版已就绪，等待会话空闲后自动应用」后进程意外死亡——`pending_update` 状态只活在主循环内存里，「超 30 分钟强制应用」兜底也在主循环内一并失效，staging 三件套与 update.lock 永远躺在磁盘上：apply 永不执行、锁不清理（下轮下载还要等 20min 锁过期）、同 tag 去重跳过后续检查，只能手动跑 apply-update.bat 救回。修复：升级自检新增第⓪层「复活待装更新」——启动时发现 ①update-staging/ 三件套齐全 ②三件版本都严格比当前新（防把 apply 失败保留的同版本残包当待装更新造成重启循环）③update.lock 属 bridge（apply 跑完会删锁——锁在=从未应用；tag=app 是客户端更新器领地不代管）④apply bat 在——即补跑 apply 并立即退出旧进程交棒换装。四分支守护测试钉住判定要件。
+- **模型钉选不随 config 热更生效**：`set_dsh_model` 文档承诺「config 热更时调用」，但唯一调用点在启动 discover——运行中经控制台改 `dsh.provider/model` 只更新 ConsoleState 与主循环 cfg（UI 可见），SessionManager 仍持启动快照；钉选值为空即「不钉」，会话退役重建后回落 DSH 侧默认模型（真机实锤：v0.5.5 升级退役会话 → 新会话落在 code-availability——无图片输入声明，看图被 `[tool image omitted]` 丢弃，即「看不了图」问题的另一半根因；用户在 DSH UI 手动切模型只对存量会话生效、不改新会话默认）。修复：热更分支在 cfg 换新后同步 `set_dsh_model`（sig 由 ensure_chat_model 缓存对账，值没变不重复 selectModel）。
+
 ## [0.5.5] - 2026-11-07
 
 ### 修复
