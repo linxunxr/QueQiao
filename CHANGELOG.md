@@ -13,6 +13,7 @@
 
 ### 供应链事件记录
 
+- **NapCat 终结 + Lagrange.OneBot 消失（2026-11-13，SnowLuma 转私后第三天）**：头牌协议端 NapCatQQ（12.8k star）官宣 ending——主仓最后提交 `docs: ending`，README 仅剩"到这里告一段落"；Lagrange.OneBot 仓库同日 404（Lagrange.Core 本体存活但 OneBot 适配层已失）。非官方协议端生态全面收缩，预案文档 3.5 节修订：**换端前提塌了，策略从"备胎预案"转"孤品保全"**——本地 SnowLuma 2.2.1 + 冻结 NTQQ 9.9.36 成为自包含闭环（建议整目录离线备份），协议端适配层代码不再排期（抽象失去了对象）；失效日决策树改为：NapCat 存量版本（需冻结 NTQQ ≤ 其上限）→ 活跃 fork 盘点（失效日再查）→ QQ 链路 EOL。
 - **SnowLuma 上游转私（2026-11-10）**：OneBot 协议端 SnowLuma 因腾讯对第三方 QQ 机器人框架的法律压力转 private（仓库与 Release 资产均 404，更新链断供；2020 年"晨风被诉→十几框架停服"剧本重演）。本机 2.2.1 为终点版本，配套处置：①NTQQ 冻结于 9.9.36-53644——`%APPDATA%\QQ\packages` 目录已锁死（icacls /inheritance:r，更新包无处落盘），QQ 设置内自动更新建议一并关闭；②协议端适配层设计成文（docs/SnowLuma转私事件与协议端预案.md）——桥 12 个 action 调用面 10 个是标准 OneBot v11、2 个 SnowLuma 私有项均有降级路径，换 NapCat 等标准端理论上仅事件字段归一化成本，备胎预案待本地 2.2.1 失效日启动；③"已验证版本矩阵"入档（发版时顺带更新）。**发版纪律新增：外部依赖版本变化（NTQQ/SnowLuma/DSH）必须人工验证后更新矩阵再发版。**
 
 ## [0.5.6] - 2026-11-08
