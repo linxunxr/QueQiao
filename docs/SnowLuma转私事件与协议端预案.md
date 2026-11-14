@@ -138,4 +138,4 @@ SnowLuma 安装目录建议整目录备份一份离线介质（2.2.1 发行包 +
 | SnowLuma runtime | 2.2.1（上游断供，本地终点版本） | 2026-11-10 |
 | OneBot 实现 | SnowLuma snapshot 模式，HTTP 3000 + WS 3001 | 2026-11-10 |
 | DSH | DeepSeek Harness 内嵌（expose-internals 子进程） | 2026-11-08 |
-| 鹊桥 | 0.5.7 | 2026-11-14 |
+| 鹊桥 | 0.5.8 | 2026-11-14 |
