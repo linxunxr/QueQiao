@@ -480,6 +480,27 @@ fn on_fallback(rt: &mut SessionRuntime, now_ms: u64, rules: &DecideRules) -> Vec
     }
 }
 
+/// 无行动收敛后的概率档（默认推荐值的概率量级——原样保留用户/AI 配的
+/// 高概率会继续在每次 proactiveCheck 里空转）。
+const SOFTENED_PROBABILITY: f64 = 0.05;
+
+/// 唤醒配置收敛（noAction 达限的降级动作）。
+///
+/// 旧实现整体 `TriggerRules::default()`——AI 用 qq_set_wake_config 显式配的
+/// 关键词（如 BLG/GEN）一并被抹掉，静默期后关键词消息再也唤不醒（真机
+/// activity.log：reset 后同关键词消息零唤醒）。收敛语义：
+/// - **保留**显式配置：keywords / speaker_ids / at_mention / name_mention /
+///   question / poke（@ 与点名是社群指向性信号，静默期不该被收回）；
+/// - **收紧**宽松触发：any_message 关掉、probability 压到推荐档（连续无行动
+///   说明宽松触发在空转，收紧的对象是它们）。
+pub fn soften_wake(wake: &TriggerRules) -> TriggerRules {
+    TriggerRules {
+        any_message: false,
+        probability: SOFTENED_PROBABILITY,
+        ..wake.clone()
+    }
+}
+
 /// 历史超限重投（绕频率判定）：与 fire_wake 同样记账与动作，但不吃频率窗——
 /// 失败回合已退配额，重投再被限流会把 413 修复死锁在冷却里。
 fn force_wake(
@@ -620,7 +641,7 @@ fn on_turn_ended(
         rt.last_wake_at = None;
         // 成功回合清零瞬时重投计数。
         rt.agent_retry_attempts = 0;
-        // noAction 判定：回合期间既没发消息也没动作 → 累计；达限重置唤醒配置
+        // noAction 判定：回合期间既没发消息也没动作 → 累计；达限收敛唤醒配置
         //（防 AI 卡死——连续无动作说明配置不再适配当前会话节奏）。
         // 孤儿 end 没有回合起点，跳过 noAction 统计（无从判定动作窗口）。
         let action_taken = turn
@@ -637,13 +658,13 @@ fn on_turn_ended(
             }
             rt.no_action_count += 1;
             if rt.no_action_count >= rules.no_action_limit {
-                rt.wake = TriggerRules::default();
+                rt.wake = soften_wake(&rt.wake);
                 rt.bootstrap_sent = true;
                 rt.no_action_count = 0;
                 rt.first_quiet_wake_ms = 0;
                 actions.push(BridgeAction::Log {
                     message: format!(
-                        "[{}] 连续 {} 次唤醒无行动，重置唤醒配置",
+                        "[{}] 连续 {} 次唤醒无行动，收敛唤醒配置（保留显式关键词，收紧概率/任意消息）",
                         rt.key, rules.no_action_limit
                     ),
                 });
@@ -909,11 +930,14 @@ mod tests {
         );
     }
 
-    /// noAction：连续无动作回合达限 → 重置唤醒配置（防 AI 卡死）。
+    /// noAction：连续无动作回合达限 → 收敛唤醒配置（防 AI 卡死；保留显式
+    /// 关键词——旧实现整体重置会把 AI 配的触发词一并抹掉）。
     #[test]
-    fn no_action_resets_wake_config() {
+    fn no_action_softens_wake_config() {
         let mut rt = runtime();
         rt.wake.probability = 0.9;
+        rt.wake.any_message = true;
+        rt.wake.keywords = vec!["BLG".into(), "GEN".into()];
         for round in 0..3u64 {
             decide1(
                 &mut rt,
@@ -936,7 +960,10 @@ mod tests {
             if round < 2 {
                 assert!(rt.no_action_count == round as u32 + 1);
             } else {
-                assert!(rt.wake == TriggerRules::default(), "达限重置为默认配置");
+                // 收敛而非重置：关键词保留、宽松触发收紧。
+                assert_eq!(rt.wake.keywords, vec!["BLG".to_owned(), "GEN".to_owned()]);
+                assert!(!rt.wake.any_message, "anyMessage 收敛为关");
+                assert_eq!(rt.wake.probability, 0.05, "概率压到推荐档");
                 assert!(
                     actions
                         .iter()

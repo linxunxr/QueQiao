@@ -54,6 +54,120 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+// ── 启动补拉（离线消息回填）：IO 编排层 ─────────────────────────────────────
+//
+// 判定纯函数在 queqiao::backfill（可离线单测）；本函数只做网络调用 + 入库
+// + 推进决策循环。reqwest blocking 约束 → spawn_blocking 里跑。
+
+/// 补拉单群：拉历史 → 选出缺口 → 入库 → 推 MessageArrived。
+/// 返回 (选中数, 触发词命中的条数)。
+fn backfill_group(
+    social: &std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+    onebot: &OneBotHttpClient,
+    group: u64,
+    self_uin: u64,
+    tx: &tokio::sync::mpsc::Sender<BridgeEvent>,
+) -> (usize, usize) {
+    let key = format!("group:{group}");
+    let now = now_ms();
+    // 水位与已见集合在锁内取快照（唤醒词判定也要持久 wakeConfig——
+    // 补拉复刻主流程：入库走 append_message，事件推进决策循环）。
+    let (watermark_ms, seen_ids) = {
+        let Ok(s) = social.lock() else {
+            return (0, 0);
+        };
+        let Some(st) = s.conversation(&key) else {
+            return (0, 0); // 未注册会话（无历史消息）——不凭空建
+        };
+        let seen: HashSet<String> = st
+            .recent_messages
+            .iter()
+            .chain(st.unread.iter())
+            .map(|m| m.message_id.clone())
+            .filter(|m| !m.is_empty())
+            .collect();
+        (st.last_incoming_at, seen)
+    };
+    let Ok(raw) = onebot.call(
+        "get_group_msg_history",
+        serde_json::json!({ "group_id": group, "count": queqiao::backfill::BACKFILL_COUNT }),
+    ) else {
+        queqiao::logging::log(&format!(
+            "[backfill] {key} 历史拉取失败——跳过（正常消息流不受影响）"
+        ));
+        return (0, 0);
+    };
+    let candidates = queqiao::backfill::parse_history(&raw);
+    // message_seq 去重桥侧没有水位可对（append_message 不记该字段）——
+    // message_id 集合 + 时间窗判定为主；seq 维度留给 select 内部（None 恒过）。
+    let selected = queqiao::backfill::select_backfill(
+        group,
+        &candidates,
+        &seen_ids,
+        None,
+        watermark_ms,
+        now,
+        self_uin,
+    );
+    if selected.is_empty() {
+        return (0, 0);
+    }
+    let n = selected.len();
+    queqiao::logging::activity(&format!("[backfill] {key} 补拉回填 {n} 条停机窗口消息"));
+    let mut triggered = 0usize;
+    for c in &selected {
+        let incoming = queqiao_core::action::IncomingMessage {
+            key: key.clone(),
+            seq: 0, // append_message 分配持久 seq（与主流程一致）
+            message_id: c.message_id.to_string(),
+            sender: c.sender.clone(),
+            user_id: c.user_id.clone(),
+            text: c.text.clone(),
+            is_self: c.sent_by_self,
+            at_me: c.at_me,
+            reply_to_me: false,
+            time_ms: c.time_ms,
+        };
+        {
+            let Ok(mut s) = social.lock() else { break };
+            s.append_message(&key, &incoming, now);
+            s.save();
+        }
+        // 推进决策循环：触发词照常判定（bootstrap/keyword/atMention…），
+        // 不硬造唤醒——全部不命中时由 proactiveCheck 兜底补看未读。
+        let _ = tx.try_send(BridgeEvent::MessageArrived(Box::new(incoming)));
+        triggered += 1;
+    }
+    (n, triggered)
+}
+
+/// 启动补拉总入口（spawn_blocking 里跑）：逐群串行，失败不拦后续。
+fn run_startup_backfill(
+    social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
+    onebot: OneBotHttpClient,
+    groups: Vec<u64>,
+    self_uin: u64,
+    tx: &tokio::sync::mpsc::Sender<BridgeEvent>,
+) {
+    if groups.is_empty() {
+        return;
+    }
+    queqiao::logging::log(&format!(
+        "[backfill] 启动补拉开始：{} 个白名单群（停机窗口消息对账）",
+        groups.len()
+    ));
+    let mut total = 0usize;
+    let mut triggered = 0usize;
+    for g in groups {
+        let (n, t) = backfill_group(&social, &onebot, g, self_uin, tx);
+        total += n;
+        triggered += t;
+    }
+    queqiao::logging::log(&format!(
+        "[backfill] 启动补拉完成：回填 {total} 条，其中 {triggered} 条已推进决策循环"
+    ));
+}
+
 /// 本地民用时间（时区换算——本机当前时区取系统本地时间的小时/分钟）。
 fn now_local() -> CivilTime {
     let now = SystemTime::now()
@@ -330,6 +444,8 @@ fn main() {
 struct Setup {
     ws_url: String,
     ws_token: String,
+    /// bot 自身 QQ 号（补拉的回显判定用——历史接口的 user_id 与之匹配即跳过）。
+    self_uin: u64,
     /// 同步 discover 阶段构建（reqwest blocking client 不得在 async
     /// 上下文创建——runtime-in-runtime panic）。
     onebot_http: OneBotHttpClient,
@@ -500,9 +616,15 @@ fn discover(cfg: queqiao::config::Config) -> Option<Setup> {
     // 账号开了 OneBot HTTP 但没开 WS（或配置缺 wsServers）：与 SnowLuma 未就绪
     // 同路等待重试——用户在 SnowLuma 里补开 WS 后自动继续，不 panic。
     let ws = found.ws.as_ref()?;
+    let self_uin = found
+        .self_info
+        .get("user_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default();
     Some(Setup {
         ws_url: format!("ws://{}:{}", ws.host, ws.port),
         ws_token: ws.token.clone(),
+        self_uin,
         onebot_http: OneBotHttpClient::new(&found.base_url, &found.token, 8000),
         cfg,
         dsh,
@@ -925,6 +1047,20 @@ async fn run(setup: Setup) {
             }
         }
     };
+    // ── 启动补拉（离线消息回填）：仅在 WS 首次连接成功后执行一次 ──────────
+    // 停机窗口（机器关机/SnowLuma 下线）里群里的消息桥物理上收不到——
+    // 启动后按水位对账 get_group_msg_history，缺口消息回填 recent+unread
+    // 并以 MessageArrived 推进决策循环（详见 backfill 模块注释）。
+    {
+        let social = social_arc.clone();
+        let onebot = onebot_http.clone();
+        let self_uin = setup.self_uin;
+        let groups: Vec<u64> = cfg.allow.groups.clone();
+        let tx_for_backfill = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            run_startup_backfill(social, onebot, groups, self_uin, &tx_for_backfill)
+        });
+    }
     tokio::spawn(async move {
         let mut stream = stream;
         let social = social_for_stream;
