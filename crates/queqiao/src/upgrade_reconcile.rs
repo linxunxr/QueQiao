@@ -245,12 +245,7 @@ fn revive_pending_apply(install_dir: &Path, current: &str) -> Option<PathBuf> {
     if !bat.is_file() {
         return None;
     }
-    use std::os::windows::process::CommandExt;
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", "start", "", ""])
-        .arg(&bat)
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .spawn();
+    crate::update::spawn_apply_bat(&bat).ok()?;
     Some(bat)
 }
 

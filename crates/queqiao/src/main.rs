@@ -7,8 +7,6 @@
 //! Node 版（qq-bridge）是权威参照实现：行为契约以其 43 个 audit 脚本为准。
 
 use std::collections::HashSet;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use queqiao_core::action::{BridgeAction, BridgeEvent};
@@ -2068,11 +2066,11 @@ async fn run(setup: Setup) {
                         } else {
                             println!("[update] 会话空闲，应用更新并重启…");
                         }
-                        let _ = std::process::Command::new("cmd")
-                            .args(["/c", "start", "", ""])
-                            .arg(&bat)
-                            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                            .spawn();
+                        if let Err(e) = queqiao::update::spawn_apply_bat(&bat) {
+                            queqiao::logging::log(&format!(
+                                "[update] apply 脚本启动失败：{e}——请手动运行 {bat:?}"
+                            ));
+                        }
                         break;
                     }
                     pending_update = Some((bat, staged_at));

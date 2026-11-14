@@ -28,6 +28,34 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     Some((maj, min, patch))
 }
 
+/// 构造「启动 apply bat」的 Command（桥侧两个调用点共用：主循环空闲应用
+/// 与启动自检复活）。
+///
+/// **参数形状是踩过真机坑的契约**：`cmd /c start "" <bat>` —— 第一个空串是
+/// `start` 的窗口标题占位，**只能有一个**。2026-11-14 真机实锤：桥侧曾写成
+/// `start "" "" <bat>`（多一个空串），在 CREATE_NO_WINDOW 的无控制台进程里
+/// `start` 把第二个 `""` 当成要运行的程序、bat 路径成了它的参数——spawn 返回
+/// Ok 但 bat 永不执行（错误写进不存在的控制台）；桥随即 `exit(0)` 交棒，
+/// 于是「apply 脚本已接管」之后什么都没发生：桥停、锁留、更新不落地。
+/// 客户端自主更新（直接 spawn bat，不经 start）一直是好的，所以该缺陷只在
+/// 桥侧更新路径暴露——v0.5.0「桥件静默未换」到 v0.5.6「复活待装更新」全部
+/// 无效的最终根因就在这里。守护测试钉死参数序列。
+#[cfg(windows)]
+pub fn apply_bat_command(bat: &Path) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/c", "start", ""])
+        .arg(bat)
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW——bat 不闪控制台
+    cmd
+}
+
+/// 启动 apply bat（失败日志由调用方决定；本函数只负责 spawn）。
+#[cfg(windows)]
+pub fn spawn_apply_bat(bat: &Path) -> std::io::Result<()> {
+    apply_bat_command(bat).spawn().map(|_| ())
+}
+
 /// 一次 release 的信息。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseInfo {
@@ -542,6 +570,32 @@ mod tests {
         let old = r#"{"tag":"v0.4.13","notes":"n","zip_url":"u","published_at":"t"}"#;
         let info: ReleaseInfo = serde_json::from_str(old).unwrap();
         assert!(info.fallback_zip_url.is_none());
+    }
+
+    /// apply bat 启动参数守护（2026-11-14 真机根因，v0.5.0~0.5.7 桥侧更新
+    /// 全部不落地的元凶）：`cmd /c start "" <bat>` 只能有一个空标题串——
+    /// 多一个 `""` 时 start 把空串当要运行的程序、bat 路径当它的参数，
+    /// CREATE_NO_WINDOW 下 spawn 返回 Ok 而 bat 永不执行（桥随即 exit(0)
+    /// 交棒，于是「apply 脚本已接管」后什么都不发生）。
+    #[cfg(windows)]
+    #[test]
+    fn apply_bat_spawn_args_contract() {
+        let bat = Path::new(r"C:\some\dir\apply-update.bat");
+        let cmd = apply_bat_command(bat);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "/c".to_owned(),
+                "start".to_owned(),
+                String::new(),
+                r"C:\some\dir\apply-update.bat".to_owned()
+            ],
+            "start 后只能有一个空标题占位，bat 必须紧跟其后"
+        );
     }
 
     /// 更新互斥锁：锁存在即拒绝（防双更新器并发踩踏）；无锁可获取并落盘。
