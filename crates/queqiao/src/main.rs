@@ -140,6 +140,14 @@ fn backfill_group(
 }
 
 /// 启动补拉总入口（spawn_blocking 里跑）：逐群串行，失败不拦后续。
+///
+/// **同步竞态防御（2026-11-15 真机实锤）**：WS 首连成功 ≠ SnowLuma 历史库
+/// 就绪——它登录后还有一步漫游同步（OneBot.HistorySync，真机耗时 19s：
+/// 桥 08:16:46 首拉时停机窗口的 15 条消息还没进它的库，08:17:05 才
+/// fetched=15 stored=15；补拉已结束，AI 早上只接了昨晚 21:40 前的话）。
+/// 首拉 0 条且「存在停机间隔」（水位距启动 >10min——真有停机才可能漏）
+/// 时按 10s/20s/40s/60s 退避重试，任一轮有增量后再拉一轮确认无新增
+/// 即停；正常在线重启（水位就在眼前）零重试不拖启动。
 fn run_startup_backfill(
     social: std::sync::Arc<std::sync::Mutex<queqiao::social_store::SocialStore>>,
     onebot: OneBotHttpClient,
@@ -147,9 +155,12 @@ fn run_startup_backfill(
     self_uin: u64,
     tx: &tokio::sync::mpsc::Sender<BridgeEvent>,
 ) {
+    const RETRY_DELAYS_MS: [u64; 4] = [10_000, 20_000, 40_000, 60_000];
+    const DOWNTIME_MIN_MS: u64 = 10 * 60_000;
     if groups.is_empty() {
         return;
     }
+    let boot = now_ms();
     queqiao::logging::log(&format!(
         "[backfill] 启动补拉开始：{} 个白名单群（停机窗口消息对账）",
         groups.len()
@@ -160,6 +171,40 @@ fn run_startup_backfill(
         let (n, t) = backfill_group(&social, &onebot, g, self_uin, tx);
         total += n;
         triggered += t;
+        // 首拉 0 条 + 真停机过 → 可能撞上 SnowLuma 登录同步未完成，退避重试。
+        if n == 0 {
+            let watermark = social
+                .lock()
+                .ok()
+                .and_then(|s| {
+                    s.conversation(&format!("group:{g}"))
+                        .map(|st| st.last_incoming_at)
+                })
+                .unwrap_or(0);
+            if watermark == 0 || boot.saturating_sub(watermark) <= DOWNTIME_MIN_MS {
+                continue; // 在线重启或新会话——无停机间隔，不重试
+            }
+            queqiao::logging::log(&format!(
+                "[backfill] group:{g} 首拉 0 条且存在停机间隔（水位 {}s 前）——等待 SnowLuma 登录同步后重试",
+                boot.saturating_sub(watermark) / 1000
+            ));
+            let mut round = 0;
+            while round < RETRY_DELAYS_MS.len() {
+                std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[round]));
+                let (n2, t2) = backfill_group(&social, &onebot, g, self_uin, tx);
+                total += n2;
+                triggered += t2;
+                if n2 > 0 {
+                    // 有增量：再拉一轮确认收尾（同步可能分批到）。
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let (n3, t3) = backfill_group(&social, &onebot, g, self_uin, tx);
+                    total += n3;
+                    triggered += t3;
+                    break;
+                }
+                round += 1;
+            }
+        }
     }
     queqiao::logging::log(&format!(
         "[backfill] 启动补拉完成：回填 {total} 条，其中 {triggered} 条已推进决策循环"
