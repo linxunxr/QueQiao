@@ -9,6 +9,17 @@
 - **1.0.0 门槛**：M5 真机生产验收达成（关键机制 1~7 真机全踩修齐 + 生产持续运行无回归，2026-11-01 定义改写见 `docs/规格设计.md` §八.3）+ Node 版归档——"可用于生产"的承诺点；生产切换已于 2026-10-23 完成；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [0.6.0] - 2026-11-15
+
+### 新增
+
+- **长期记忆语义检索（M7 二期，规格 §十二 P3，2026-11-15 落地）**：长期层此前只有关键词 LIKE（`qq_memory_query category=longterm&query=...`），同义改写/近义表述召回不了。本期补齐向量检索：①`state/memory.db` 保持 `longterm_memory` 蒸馏语义不变，新增 sqlite-vec 静态扩展（v0.1.9 内置编译，无外部 DLL）的 `longterm_vec` 虚表（rowid=longterm_memory.id，512 维 float、`distance_metric=cosine`）+ `longterm_meta`（vec_dim 版本位；维度不符自动重建并交启动回填）；②本地 embedding 用 fastembed candle BERT 后端跑 `BAAI/bge-small-zh-v1.5`（512 维、中文小模型、MIT、CPU 推理，不依赖 ONNX Runtime/外部服务）；模型文件由桥自己从 hf-mirror 一次性下载（约 96MB，三个文件带 SHA-256 完整性校验、不符重下一次）落到 `state/semantic-cache/`（hf-hub 0.5 对镜像「Range 请求回 200 全量且无 Content-Range」会报错，故按 hf-hub 缓存布局自铺缓存，之后 fastembed 只读本地、完全离线）；首跑实测「下载+校验+加载」19~25s、缓存命中 0s；③`qq_memory_query category=longterm` 带 `query` 时走语义 KNN（查询侧加 BGE 检索指令前缀）且关键词命中补漏（同 id 去重、总上限 10），语义不可用（模型未就绪/下载失败/开关关）自动降级纯关键词，响应带 `retrieval: semantic|keyword` 标记；④`qq_memory_save_longterm` 保存后异步补向量；启动后台预热模型并回填历史缺失向量（日志 `[semantic]`）；⑤配置 `socialV2.longterm`（`semantic` 默认 true、`hfEndpoint` 默认 `https://hf-mirror.com`）。测试：`longterm_store::vec_semantic_chain` 钉住扩展可用/向量写入删除/KNN 距离序/维度校验/回填名单；`embedding` 无模型返回 Err 不 panic、SHA-256 校验；另用真实模型跑临时探针两条（空缓存首跑下载校验加载成功；query「别给我发 S 赛赛程比分」准确召回「管理员不想要任何电竞/LOL 比赛内容」，同义改写无原词命中）。验证：`cargo test -p queqiao`（lib 112 + 各集成）全绿、`cargo clippy --workspace --all-targets -- -D warnings` 无告警、`cargo fmt --all -- --check` 通过。
+
+### 工程
+
+- 新依赖：`sqlite-vec 0.1.9`（MIT/Apache，C 静态编译）、`fastembed 7.7` + `candle-core 0.11`（Apache-2.0/MIT，纯 Rust CPU 推理；关闭默认 onnx/image 特性，仅 `bert-text` + `hf-hub-rustls-tls`）——不新增运行时 DLL/随包模型，安装包体积不变；模型在首跑后台下载到 state 目录（可删，删后自动重下）。
+- 失败降级铁律：embedding/sqlite-vec 任一层不可用，长期记忆查询退关键词、写入退纯文本——语义检索不阻塞主链路（与三 store / longterm_store 容忍哲学一致）。
+
 ## [0.5.11] - 2026-11-15
 
 ### 新增
