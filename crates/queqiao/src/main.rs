@@ -1389,6 +1389,30 @@ async fn run(setup: Setup) {
         queqiao::longterm_store::open(&queqiao::longterm_store::db_path())
             .unwrap_or_else(|| rusqlite::Connection::open_in_memory().expect("内存库失败")),
     ));
+    // 管理员跨会话动态启动回填（表为空才做）：从 social-v2 近 7 天消息重建
+    // 管理员互动，避免部署后要等管理员下一次发言才生效（锁序 social → longterm，
+    // 与唤醒组装层一致）。
+    {
+        let n = social_arc
+            .lock()
+            .ok()
+            .and_then(|social| {
+                ltm_arc.lock().ok().map(|conn| {
+                    queqiao::owner_activity::backfill_from_recent_messages(
+                        &conn,
+                        &social,
+                        cfg.owner_qq.map(|o| o.0),
+                        now_ms(),
+                    )
+                })
+            })
+            .unwrap_or(0);
+        if n > 0 {
+            queqiao::logging::log(&format!(
+                "[owner-activity] 启动回填 {n} 条管理员跨会话互动（近 7 天）"
+            ));
+        }
+    }
     {
         let social = social_arc.clone();
         let cfg_clone = cfg.clone();
@@ -1551,6 +1575,7 @@ async fn run(setup: Setup) {
         onebot: onebot_http.clone(),
         watch: watch.clone(),
         longterm: ltm_arc.clone(),
+        owner_qq: cfg.owner_qq.map(|o| o.0),
     };
     loop {
         let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -1588,6 +1613,21 @@ async fn run(setup: Setup) {
                         orchestrator.schedule_proactive_check(&k, now, &mut rng);
                         queqiao::logging::log(&format!("动态注册会话 {k}（allowAllWhenEmpty）"));
                     }
+                }
+                // 管理员跨会话动态（长期记忆扩展）：任何会话（含未在册群）里
+                // 管理员的消息都记一笔——owner 私聊唤醒时注入【管理员跨会话
+                // 动态】，修「群里聊过、私聊却说没理你」的跨会话盲区。
+                if let queqiao_core::action::BridgeEvent::MessageArrived(msg) = &event
+                    && let Ok(conn) = ltm_arc.lock()
+                {
+                    queqiao::owner_activity::record_owner_message(
+                        &conn,
+                        &msg.key,
+                        &msg.user_id,
+                        cfg.owner_qq.map(|o| o.0),
+                        &msg.text,
+                        msg.time_ms,
+                    );
                 }
                 // 黑话窗口喂入与提取触发（Node feedSlangWindow +
                 // maybeQueueSlangExtraction；群友普通消息才进窗口）。
@@ -2441,6 +2481,8 @@ struct Executor {
     watch: std::sync::Arc<queqiao::watch::WatchState>,
     /// 长期记忆库（M7-2：唤醒 prompt 注入计数索引行用）。
     longterm: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    /// ownerQQ（管理员跨会话动态注入的会话判定：只有 private:<owner> 才注）。
+    owner_qq: Option<u64>,
 }
 
 /// 唤醒文本构造参数（配置切片）。
@@ -2606,6 +2648,26 @@ impl Executor {
                             })
                             .unwrap_or_default()
                     };
+                    // 管理员跨会话动态（长期记忆扩展）：owner 私聊唤醒时注入
+                    // 「管理员在别的会话里也跟你说过话」的索引块——修跨会话盲区
+                    //（群里聊过、私聊却按本会话时间线判断成「没理你」）。
+                    // 群会话不注入（私聊内容不能带进群）；库不可用静默为空。
+                    let owner_block = if self.owner_qq.is_some() {
+                        self.longterm
+                            .lock()
+                            .ok()
+                            .map(|conn| {
+                                queqiao::owner_activity::build_cross_session_block(
+                                    &conn,
+                                    &key,
+                                    self.owner_qq,
+                                    now,
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     let text = queqiao::prompt::build_wake_prompt(&ctx, &reason);
                     // 表情包块（Node stickerLine 语义：策略提示 + 常用摘要，
                     // 位于记忆块之后；库空或开关关则省略）。
@@ -2684,13 +2746,14 @@ impl Executor {
                         String::new()
                     };
                     let text = format!(
-                        "{time_line}{slang_block}{memory_block}{sticker_block}{text}{diary_block}{review_block}"
+                        "{time_line}{slang_block}{memory_block}{owner_block}{sticker_block}{text}{diary_block}{review_block}"
                     );
                     // 注入体量记账：攒每会话的唤醒 prompt 配比（记忆/骨架孰为大头）。
                     queqiao::logging::log(&format!(
-                        "[prompt-size] {key} reason={reason} total={}B memory={}B sticker={}B slang={}B",
+                        "[prompt-size] {key} reason={reason} total={}B memory={}B owner={}B sticker={}B slang={}B",
                         text.len(),
                         memory_block.len(),
+                        owner_block.len(),
                         sticker_block.len(),
                         slang_block.len()
                     ));

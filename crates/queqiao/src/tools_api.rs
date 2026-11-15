@@ -794,25 +794,39 @@ fn send_text_with_reply(
 /// 发送成功后把"我"的消息记入 recent（is_self，不进未读/水位）——
 /// qq_get_my_recent_messages 的数据源（Node record-sent 同款语义）。
 fn record_self_send(state: &ToolApiState, key: &str, text: &str, message_id: i64) {
-    let mut store = state.social.lock().unwrap();
     let now = crate::session_manager::SessionManager::now_ms();
-    store.append_message(
-        key,
-        &queqiao_core::action::IncomingMessage {
-            key: key.to_owned(),
-            seq: 0,
-            message_id: message_id.to_string(),
-            sender: "我".into(),
-            user_id: String::new(),
-            text: text.to_owned(),
-            is_self: true,
-            at_me: false,
-            reply_to_me: false,
-            time_ms: now,
-        },
-        now,
-    );
-    store.save();
+    {
+        let mut store = state.social.lock().unwrap();
+        store.append_message(
+            key,
+            &queqiao_core::action::IncomingMessage {
+                key: key.to_owned(),
+                seq: 0,
+                message_id: message_id.to_string(),
+                sender: "我".into(),
+                user_id: String::new(),
+                text: text.to_owned(),
+                is_self: true,
+                at_me: false,
+                reply_to_me: false,
+                time_ms: now,
+            },
+            now,
+        );
+        store.save();
+    }
+    // 管理员跨会话动态：AI 在「管理员近期出现过」的会话里的发言记一笔
+    // （owner 私聊全记；群会话按 6h 窗口，见 owner_activity 模块注释）。
+    // social 锁先释放再锁 longterm——锁序与唤醒组装层一致（social → longterm）。
+    if let Ok(conn) = state.longterm.lock() {
+        crate::owner_activity::record_self_message(
+            &conn,
+            key,
+            state.cfg.owner_qq.map(|o| o.0),
+            text,
+            now,
+        );
+    }
 }
 
 /// 出站前把全部会话的 agent token 原文替换为 `***`（Node `KNOWN_AGENT_TOKENS`

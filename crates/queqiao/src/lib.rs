@@ -12,6 +12,7 @@ pub mod logging;
 pub mod longterm_store;
 pub mod memory;
 pub mod orchestrator;
+pub mod owner_activity;
 pub mod paths;
 pub mod prompt;
 pub mod review_sched;
