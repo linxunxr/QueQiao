@@ -867,6 +867,26 @@ impl Default for ReviewConfig {
     }
 }
 
+/// 长期记忆检索（M7 二期，规格 §十二 P3）：语义检索用本地 bge-small-zh
+/// embedding + sqlite-vec；模型不可用时自动降级关键词 LIKE。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LongtermConfig {
+    /// 语义检索开关（默认开；关掉后 qq_memory_query 只用 LIKE）。
+    pub semantic: bool,
+    /// 模型下载镜像（首次一次性 ~96MB；默认国内可达的 hf-mirror）。
+    pub hf_endpoint: String,
+}
+
+impl Default for LongtermConfig {
+    fn default() -> Self {
+        Self {
+            semantic: true,
+            hf_endpoint: "https://hf-mirror.com".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SocialV2Config {
@@ -885,6 +905,7 @@ pub struct SocialV2Config {
     pub context: ContextConfig,
     pub diary: DiaryConfig,
     pub review: ReviewConfig,
+    pub longterm: LongtermConfig,
 }
 
 impl Default for SocialV2Config {
@@ -905,6 +926,7 @@ impl Default for SocialV2Config {
             context: ContextConfig::default(),
             diary: DiaryConfig::default(),
             review: ReviewConfig::default(),
+            longterm: LongtermConfig::default(),
         }
     }
 }

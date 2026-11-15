@@ -5116,7 +5116,7 @@ async fn memory_list(
             "category 须为 activeTopic / pendingThought / memberImpression / longterm / all",
         );
     }
-    // 长期层走 SQLite（kind 过滤 + 可选 query 关键词 LIKE）。
+    // 长期层走 SQLite（kind 过滤 + 语义检索 / 关键词 LIKE 双通道）。
     if category == "longterm" {
         let now = crate::session_manager::SessionManager::now_ms();
         let kind = q.get("kind").and_then(|k| {
@@ -5125,23 +5125,67 @@ async fn memory_list(
                 .find(|x| *x == &k.as_str())
                 .copied()
         });
-        let kw = q.get("query").map(String::as_str);
-        let rows = {
-            let Ok(guard) = state.longterm.lock() else {
-                return denied(StatusCode::INTERNAL_SERVER_ERROR, "长期库锁中毒");
-            };
-            crate::longterm_store::query(&guard, kind, kw, now)
+        let kw = q.get("query").cloned();
+        let semantic_enabled = state.live_cfg().social_v2.longterm.semantic;
+        // 语义检索要跑本地 embedding（CPU 推理，阻塞）→ 整段进 spawn_blocking；
+        // 关键词 LIKE 也在同一闭包里，语义不可用时自动只走关键词。
+        let conn = state.longterm.clone();
+        let kind_owned = kind.map(str::to_owned);
+        let kw_owned = kw;
+        let joined = tokio::task::spawn_blocking(
+            move || -> Result<(Vec<crate::longterm_store::LongtermEntry>, &'static str), String> {
+                let guard = conn.lock().map_err(|_| "长期库锁中毒".to_owned())?;
+                let query_text = kw_owned.as_deref().filter(|s| !s.trim().is_empty());
+                if semantic_enabled
+                    && let Some(text) = query_text
+                    && let Some(mut list) = crate::longterm_store::semantic_query(
+                        &guard,
+                        text,
+                        kind_owned.as_deref(),
+                        10,
+                        now,
+                    )
+                {
+                    // 语义结果在前，关键词命中补漏（同 id 去重，总上限 10）。
+                    if let Ok(keyword) =
+                        crate::longterm_store::query(&guard, kind_owned.as_deref(), Some(text), now)
+                    {
+                        let seen: std::collections::HashSet<i64> =
+                            list.iter().map(|e| e.id).collect();
+                        for e in keyword {
+                            if list.len() >= 10 {
+                                break;
+                            }
+                            if !seen.contains(&e.id) {
+                                list.push(e);
+                            }
+                        }
+                    }
+                    return Ok((list, "semantic"));
+                }
+                crate::longterm_store::query(
+                    &guard,
+                    kind_owned.as_deref(),
+                    kw_owned.as_deref(),
+                    now,
+                )
+                .map(|list| (list, "keyword"))
+                .map_err(|e| format!("长期库查询失败：{e}"))
+            },
+        )
+        .await;
+        let result = match joined {
+            Ok(r) => r,
+            Err(e) => Err(format!("长期库查询任务失败：{e}")),
         };
-        return match rows {
-            Ok(list) => ok_json(json!({
+        return match result {
+            Ok((list, retrieval)) => ok_json(json!({
                 "memory": list,
                 "count": list.len(),
+                "retrieval": retrieval,
                 "hint": "长期记忆（跨会话共享）：topic=沉淀话题 / fact=稳定事实 / impression=群友印象"
             })),
-            Err(e) => denied(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("长期库查询失败：{e}"),
-            ),
+            Err(e) => denied(StatusCode::INTERNAL_SERVER_ERROR, &e),
         };
     }
     let store = state.social.lock().unwrap();
@@ -5203,6 +5247,18 @@ async fn memory_longterm_save(
                 "{key} 蒸馏长期记忆 [{kind}]：{}",
                 content.chars().take(60).collect::<String>()
             ));
+            // 语义向量异步补写：模型未就绪/关闭开关时跳过，交由启动回填。
+            if state.live_cfg().social_v2.longterm.semantic && crate::embedding::is_ready() {
+                let conn = state.longterm.clone();
+                let text = content.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(emb) = crate::embedding::embed_one_passage(&text)
+                        && let Ok(guard) = conn.lock()
+                    {
+                        let _ = crate::longterm_store::set_embedding(&guard, id, &emb);
+                    }
+                });
+            }
             let (t, f, i) = state
                 .longterm
                 .lock()

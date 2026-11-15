@@ -380,6 +380,9 @@ fn main() {
         println!("{} {}", queqiao_core::APP_NAME, env!("CARGO_PKG_VERSION"));
         return;
     }
+    // 本地 embedding 的 env 落定（fastembed 缓存目录 / HF 镜像）——必须在
+    // 任何线程/runtime 创建前单线程调用。
+    queqiao::embedding::init_env();
     // 单实例（第一道，向导之前——向导也绑同一端口）：已有健康鹊桥 → 秒退
     //（2026-11-01 真机三桥事故根治——多实例重复收发消息、回合互踩）。
     // 此处用 env/默认口；配置口在主流程合流处再探一道。
@@ -1412,6 +1415,27 @@ async fn run(setup: Setup) {
                 "[owner-activity] 启动回填 {n} 条管理员跨会话互动（近 7 天）"
             ));
         }
+    }
+    // 长期记忆语义检索（M7 二期）：模型下载/加载在后台线程，不阻塞启动；
+    // 就绪后给缺失向量的旧条目补 embedding。关闭开关则完全不触碰模型。
+    if cfg.social_v2.longterm.semantic {
+        let endpoint = cfg.social_v2.longterm.hf_endpoint.clone();
+        let ltm = ltm_arc.clone();
+        tokio::task::spawn_blocking(move || match queqiao::embedding::prewarm(&endpoint) {
+            Ok(()) => {
+                let n = ltm
+                    .lock()
+                    .ok()
+                    .map(|c| queqiao::longterm_store::backfill_embeddings(&c))
+                    .unwrap_or(0);
+                if n > 0 {
+                    queqiao::logging::log(&format!("[semantic] 启动回填 {n} 条长期记忆向量"));
+                }
+            }
+            Err(e) => queqiao::logging::log(&format!(
+                "[semantic] 本地 embedding 不可用，长期检索降级关键词：{e}"
+            )),
+        });
     }
     {
         let social = social_arc.clone();

@@ -170,7 +170,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "qq_memory_query",
-        description: "查看记忆详情（全量）：进行中的话题/想说未说/对群友的印象/长期记忆。唤醒提示里只有摘要与印象索引，查某类全文时传 category（印象必传）；长期记忆传 category=longterm（可选 kind 过滤 + query 关键词）",
+        description: "查看记忆详情（全量）：进行中的话题/想说未说/对群友的印象/长期记忆。唤醒提示里只有摘要与印象索引，查某类全文时传 category（印象必传）；长期记忆传 category=longterm（可选 kind 过滤 + query：语义检索优先、模型不可用时自动回退关键词 LIKE）",
         endpoint: "memory",
         method: "GET",
         flag: Some("memory"),
@@ -189,7 +189,12 @@ const TOOLS: &[ToolDef] = &[
                 false,
                 "longterm 时可选：topic / fact / impression",
             ),
-            ("query", "string", false, "longterm 时可选：关键词过滤"),
+            (
+                "query",
+                "string",
+                false,
+                "longterm 时可选：语义检索查询（同义改写也能召回；模型未就绪时回退关键词）",
+            ),
         ],
     },
     ToolDef {

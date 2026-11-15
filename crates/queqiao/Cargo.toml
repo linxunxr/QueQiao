@@ -28,6 +28,11 @@ getrandom = "0.3"
 # 人格卡内容修订号（sha256 前 8 hex，跨版本稳定；dsh 已用同 workspace 依赖）。
 sha2 = { workspace = true }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
+# 长期记忆语义检索（M7 二期）：sqlite-vec 向量表 + 本地中文小模型
+#（fastembed candle BERT 后端，CPU 推理，无外部服务/无 onnxruntime DLL）。
+sqlite-vec = "0.1.9"
+fastembed = { version = "7.7", default-features = false, features = ["bert-text", "hf-hub-rustls-tls"] }
+candle-core = "0.11"
 
 [dev-dependencies]
 # 集成测试用 oneshot 直打路由（进程内验证工具面端点，不占端口）。
