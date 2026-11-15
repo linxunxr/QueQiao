@@ -435,6 +435,8 @@
 const BRIDGE = localStorage.getItem('bridgeBase') || 'http://127.0.0.1:3100';
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 面板是否停在「读取失败」占位（低频面对账用：只有失败态才补拉，正常内容不动）。
+const isErrText = el => !!el && (String(el.textContent).includes('不可读') || String(el.textContent).trim() === '读取失败');
 // 浏览器直开控制台页时无 Tauri 桥——判空防脚本中断（Tauri-only 调用全部经 T）。
 const T = window.__TAURI__ || null;
 
@@ -497,7 +499,10 @@ function showTab(name) {
   // 回顾页面板不进 tick 轮询（重渲染打断阅读），切页时补刷一次。
   if (name === 'review') setTimeout(() => { refreshCost(); refreshDiary(); refreshFeedback(); refreshProactiveAudit(); }, 0);
   // 设置页的提议审批同为低频面，切页补刷（不进 tick）。
-  if (name === 'settings') setTimeout(() => refreshRoleProposals(), 0);
+  // DSH 提供方/模型目录也在这里补刷：它只在首帧 + 桥翻转时拉过——启动竞态里
+  // 拉失败（桥进程在、控制台接口未就绪）就永久停在「桥未运行」占位，而设置页
+  // 没有任何刷新入口，只能重启客户端才恢复。
+  if (name === 'settings') setTimeout(() => { refreshRoleProposals(); if (!catalogReady()) loadCatalog(); }, 0);
   // 保存/导出是设置页动作，总览不显示（main 的 padding-bottom 也随之收紧）。
   $('settingsBar').style.display = name === 'settings' ? 'flex' : 'none';
   document.querySelectorAll('main').forEach(m => m.style.paddingBottom = name === 'settings' ? '96px' : '28px');
@@ -512,22 +517,30 @@ if (!T) document.getElementById('page-overview').insertAdjacentHTML('afterbegin'
 async function refreshComponents() {
   let st = { dsh: false, snowluma: false, snowlumaHttp: false, bridge: false };
   try { st = await T.core.invoke('components_status'); } catch (e) { /* 非 Tauri 环境保持默认 */ }
-  // HTTP 探活兜底：进程探测失败/未就绪（开机 WMI 竞态、探测超时）时，
-  // 桥 HTTP 可能已可应答——直接打 /api/health，通即视在线，恢复链
-  // （数据重拉）即刻触发，不等 WMI 恢复。网络不可达才维持 false。
-  // 浏览器直开模式（无 Tauri）此前 bridgeOnline 恒 false、恢复链从不
-  // 触发——这一兜底顺带打通。
-  if (!st.bridge) {
-    try { await fetch(BRIDGE + '/api/health', { signal: AbortSignal.timeout(2500) }); st.bridge = true; } catch (e) { }
-  }
+  // 桥在线判定：进程在 ≠ 接口能用。桥的 axum 控制台服务要等 OneBot/DSH 初始化
+  // 完才 spawn（main.rs 在 DSH mux 之后、主动检查环之前，实测冷启动约 40s 空窗），
+  // 这期间所有 fetch 都是 ECONNREFUSED；若只看进程就判在线，"离线→在线"那次翻转
+  // 会消耗在空窗里——日记/反馈/审计/DSH 模型目录把失败占位写死，只能重启客户端。
+  // 所以：在线必须以 /api/health 真能应答为准；进程在但接口没答 = 启动中。
+  // 兜底另一半：进程探测失败（WMI 竞态/非本壳拉的桥）但接口能答，同样算在线。
+  // 已经在线后不做单次探活降级——桥忙时一次健康检查超时不等于桥死，避免面板闪回。
+  const procUp = !!st.bridge;
+  let apiOk = false;
+  try {
+    const hr = await fetch(BRIDGE + '/api/health', { signal: AbortSignal.timeout(2500) });
+    apiOk = hr.ok;
+  } catch (e) { /* 连接拒绝/超时：控制台接口未就绪 */ }
+  const wasOnline = bridgeOnline;
+  st.bridge = apiOk || (procUp && wasOnline);
+  st.bridgeStarting = procUp && !apiOk;
   setCard('dsh', st.dsh, st.dsh ? '运行中' : '未运行（一键启动可代劳）');
   const slOk = st.snowluma && st.snowlumaHttp;
   setCard('sl', slOk, slOk ? '运行中 · OneBot 就绪' : (st.snowluma ? '运行中 · OneBot 未就绪（登录 QQ 并开启 OneBot）' : '未运行（一键启动可代为拉起）'));
-  setCard('bridge', st.bridge, st.bridge ? '运行中' : '已停止');
+  setCard('bridge', st.bridge, st.bridge ? '运行中' : (st.bridgeStarting ? '启动中 · 控制台接口未就绪' : '已停止'), st.bridgeStarting);
   return st;
 }
-function setCard(name, ok, text) {
-  $('d-' + name).className = 'dotc ' + (ok ? 'on' : 'off');
+function setCard(name, ok, text, checking) {
+  $('d-' + name).className = 'dotc ' + (checking ? 'checking' : (ok ? 'on' : 'off'));
   $('t-' + name).textContent = text;
 }
 
@@ -571,9 +584,18 @@ async function startAll() {
     msg.textContent = 'SnowLuma 就绪——启动桥…';
     try { await T.core.invoke('bridge_start'); }
     catch (e) { toast(String(e), false); return; }
-    msg.textContent = '三件套就绪 ✓';
-    toast('DSH / SnowLuma / 桥 已全部就绪', true);
-    load();
+    // 桥进程起来 ≠ 控制台接口就绪（初始化要跑 OneBot/DSH 发现，实测约 40s）——
+    // 按 /api/health 判定，没就绪就如实说"启动中"，数据由桥翻转时的恢复链自动补拉，
+    // 别在这儿先喊"三件套就绪"再把 load() 打空。
+    const bst = await refreshComponents();
+    if (bst.bridge) {
+      msg.textContent = '三件套就绪 ✓';
+      toast('DSH / SnowLuma / 桥 已全部就绪', true);
+      load();
+    } else {
+      msg.textContent = '桥已拉起，正在初始化（控制台接口就绪后自动加载数据）…';
+      toast('桥已拉起，初始化完成后自动继续', true);
+    }
   } finally {
     orchBusy = false;
     $('btnStartAll').disabled = false;
@@ -581,7 +603,13 @@ async function startAll() {
   }
 }
 
-async function stopBridge() { try { await T.core.invoke('bridge_stop'); } catch (e) { toast(String(e), false); } refreshComponents(); }
+async function stopBridge() {
+  try { await T.core.invoke('bridge_stop'); } catch (e) { toast(String(e), false); }
+  // 先落离线态：桥进程退出有延迟，refreshComponents 的「已在线不做瞬时降级」
+  // 保护会把它继续判成在线，卡片要等下一轮 tick 才变灰。
+  bridgeOnline = false;
+  refreshComponents();
+}
 
 // AI 暂停/恢复（桥侧 socialV2.paused——暂停期间拒绝 AI 一切工具调用）。
 let aiPaused = false;
@@ -867,9 +895,15 @@ async function save() {
   body.dsh = body.dsh || {};
   body.dsh.baseUrl = document.getElementById('f-dshBase').value.trim() || 'http://127.0.0.1:3080';
   body.sessionCwd = document.getElementById('f-sessionCwd').value.trim();
-  body.dsh.model = document.getElementById('f-dshModel').value.trim();
-  body.dsh.provider = document.getElementById('f-dshProvider').value.trim();
-  body.dsh.reasoningEffort = document.getElementById('f-dshEffort').value.trim();
+  // 目录没加载出来时（启动竞态下 loadCatalog 失败）这三个下拉是空的——
+  // 空值绝不能覆盖 config 里已有的 provider/model，否则「改个开关顺手保存」
+  // 就把模型钉选清空，AI 静默回落 DSH 默认模型（可能是无图模型），且无提示。
+  const dshModel = document.getElementById('f-dshModel').value.trim();
+  const dshProvider = document.getElementById('f-dshProvider').value.trim();
+  const dshEffort = document.getElementById('f-dshEffort').value.trim();
+  if (dshModel) body.dsh.model = dshModel;
+  if (dshProvider) body.dsh.provider = dshProvider;
+  if (dshEffort) body.dsh.reasoningEffort = dshEffort;
   body.allow = body.allow || {};
   body.allow.groups = chipLists.groups.map(Number);
   body.allow.private = chipLists.private.map(Number);
@@ -927,6 +961,9 @@ async function exportDiag() {
 }
 
 let dshCatalog = null;
+// 目录是否真的可用：groups 为空（DSH 侧还没就绪/探测失败）也算没拿到，别当成已加载
+// ——否则一次空目录会把「每 60s 补拉」永久关掉。
+const catalogReady = () => !!(dshCatalog && (dshCatalog.groups || []).length);
 async function loadCatalog() {
   const p = $('f-dshProvider'), m = $('f-dshModel');
   try {
@@ -1248,11 +1285,22 @@ let tickN = 0;
     bridgeOnline = st.bridge;
     // 桥从离线转在线：初始化时 load()/loadRoles() 可能因桥未就绪而失败（设置页
     // 配置基底空、人格卡恒"桥未连接"）——这里补调一次；日志区也重放（桥重启后的新日志）。
-    if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); loadCatalog(); }
+    if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshProactiveAudit(); refreshSlang(); loadCatalog(); }
     // 日志区对账（每 6 轮 = 60s）：回放只在加载/桥翻转时跑，而清屏只清显示、
     // 桥长跑不翻转——清屏或上轮回放失败后面板会一直空白。桥在线但面板空
     //（或仅有失败提示）即补一次回放。
     if (st.bridge && tickN % 6 === 0 && (!$('log').textContent || logReplayFailed)) replayLog();
+    // 低频面对账（同款，每 6 轮 = 60s）：桥控制台接口比进程晚约 40s 就绪
+    // （main.rs 在 DSH/OneBot 初始化之后才 spawn 3100），启动那一下所有 fetch
+    // 都 ECONNREFUSED；而日记/反馈/审计/DSH 目录只在首帧与「桥离线→在线」
+    // 翻转时拉——翻转早在接口就绪前就用掉了，失败状态会一直卡到下次翻转。
+    // 只在仍处错误占位时补拉：不重渲染正常内容，不打断阅读。
+    if (st.bridge && tickN % 6 === 0) {
+      if (!catalogReady()) loadCatalog();
+      if (isErrText($('diaryBody'))) refreshDiary();
+      if (isErrText($('feedbackBody'))) refreshFeedback();
+      if (isErrText($('proactiveBody')) || $('proactiveSum').textContent === '读取失败') refreshProactiveAudit();
+    }
     refreshPaused();
     refreshSessions();
     refreshCost();
@@ -1631,7 +1679,7 @@ async function refreshCost() {
     const v = res.value || {};
     const sumEl = document.getElementById('costSum');
     if (!v.rows) { sumEl.textContent = '暂无记录'; body.innerHTML = '<div class="empty"><div class="t">还没有用量记录</div><div class="s">AI 开始工作后在这里汇总</div></div>'; return; }
-    if (!sumEl.textContent || sumEl.textContent === '检测中…') sumEl.textContent = `累计 ¥${v.cost.toFixed(2)}`;
+    if (!sumEl.textContent || sumEl.textContent === '检测中…' || sumEl.textContent === '读取失败') sumEl.textContent = `累计 ¥${v.cost.toFixed(2)}`;
     const byKey = (v.byKey || []).slice(0, 5).map(k => `<tr><td><a href="javascript:void 0" onclick="showTurns('${k.key}')" style="color:var(--acc)">${k.key}</a></td><td>${k.turns}</td><td>¥${k.cost.toFixed(3)}</td></tr>`).join('');
     const est = v.estimatedRows ? `（${v.estimatedRows} 行按兜底价估算）` : '';
     let day24 = '';
@@ -1647,11 +1695,16 @@ async function refreshCost() {
     body.innerHTML = `<div style="font-size:20px;margin-bottom:6px">累计 ¥${v.cost.toFixed(3)}${est}</div>` + day24 +
       `<div class="hint" style="margin-bottom:8px">tokens：命中 ${v.cacheHit} / 未命中 ${v.cacheMiss} / 输出 ${v.output} · 回合 ${v.turns} · 记录 ${v.rows} 行</div>` +
       (byKey ? `<table><tr><th>会话</th><th>回合</th><th>花费</th></tr>${byKey}</table>` : '');
-  } catch (e) { body.textContent = '（花费数据不可读）'; }
+  } catch (e) {
+    // 摘要也要落失败态：只改 body 会让摘要永远停在「检测中…」，看着像一直没加载。
+    const s = document.getElementById('costSum');
+    if (!s.textContent || s.textContent === '检测中…') s.textContent = '读取失败';
+    body.textContent = '（花费数据不可读）';
+  }
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshSlang(); refreshBind(); loadCatalog(); } if (st.bridge && (!$('log').textContent || logReplayFailed)) replayLog(); refreshSessions(); }); }
+  if (!document.hidden) { refreshComponents().then(st => { const wasOffline = !bridgeOnline; bridgeOnline = st.bridge; if (st.bridge && wasOffline) { load().then(fillModels); loadRoles(); replayLog(); refreshDiary(); refreshFeedback(); refreshProactiveAudit(); refreshSlang(); refreshBind(); loadCatalog(); } if (st.bridge && (!$('log').textContent || logReplayFailed)) replayLog(); refreshSessions(); }); }
 });
 </script>
 </body>
