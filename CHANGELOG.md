@@ -9,6 +9,12 @@
 - **1.0.0 门槛**：M5 真机生产验收达成（关键机制 1~7 真机全踩修齐 + 生产持续运行无回归，2026-11-01 定义改写见 `docs/规格设计.md` §八.3）+ Node 版归档——"可用于生产"的承诺点；生产切换已于 2026-10-23 完成；
 - patch（0.1.x…0.3.x）：缺陷修复、文档与小步体验改进（用户反馈驱动的局部补齐，不构成功能域对齐）。
 
+## [0.6.1] - 2026-11-16
+
+### 修复
+
+- **设置里钉了 `omniroute/high-availability`，实际却跑 `deepseek-account/deepseek-flash`（即 dsv4.1f）：钉选被拒被当成成功（2026-11-16 真机）**：三处叠加才成链——①`DshConfig::normalize_reasoning_effort` 的白名单只有 `off/low/medium/high/max`，加载期把设置页的「不带档位」哨兵 `none` 改写成 `max`（文件里是 none、内存里是 max，`/api/config` 可见），而 `high-availability` 这类聚合路由别名在 DSH 目录里不声明任何思考档位；②DSH `session/selectModel` 先 `resolveCallConfig` 校验档位，带 `max` 直接拒绝（`provider "omniroute" model "high-availability" does not support reasoning effort "max"`）；③`DshClient::call_unary` 只在信封层异常时返回 `Err`，业务拒绝放在 `result.ok=false` 里，而 `ensureChatModel` 只匹配 `Ok(_)`——于是"被拒"记成"已应用"、sig 缓存挡住重试、也不打日志，会话静默跑 DSH 默认模型（默认模型恰为 `deepseek-account/deepseek-flash`，DeepSeek-V4.1-Flash，界面显示 dsv4.1f）。证据链：`state/sessions.json` 映射的 QQ 会话投影 `modelSelection.lastUsed` 与 `session.v4.jsonl.zstd` 的 `request/header.config` 均为 `deepseek-account/deepseek-flash/max`；omniroute `usage_history` 里 API key `dsh` 自 11-15 17:52 后再无调用；`/api/dsh/catalog` 显示 omniroute 组只有 `high-availability`/`code-availability` 且无 `reasoning` 字段。修复：①`none` 留在思考强度白名单（显式空串仍回落 `max`）；②`session/selectModel` 两处调用补 `.and_then(|o| o.unwrap(...))`，业务拒绝回到 `Err`，"不支持档位 → 去档重试"这才真正可达；③`session/prompt` 同款修复，顺带救活原本永不触发的 `not-found` 退役重投分支。测试：新增 `config::tests::reasoning_effort_none_is_preserved`、`session_manager::tests::select_model_business_error_drops_effort_and_retries`（本地假 DSH + 真实 reqwest：首次带 `max` 被拒 → 第二次不带档位 → 按 `.../none` 缓存）、`select_model_none_sends_no_effort_and_caches`（`none` 不带字段 + sig 命中不重复请求）；反向验证：临时还原 ③ 后该用例必失败（断言 `left: 1, right: 2`），证明确实覆盖本 bug。验证：`cargo test -p queqiao --lib` 112 全绿、`cargo clippy -p queqiao --lib --all-targets` 与 `cargo fmt -- --check` 无告警。
+
 ## [0.6.0] - 2026-11-15
 
 ### 新增
