@@ -119,11 +119,16 @@ impl Default for DshConfig {
 impl DshConfig {
     /// 思考强度规范化：手工编辑可能写成非法值，DeepSeek 适配器会硬拒绝——
     /// 统一规范化并回退默认（Node 版 normalizeReasoningEffort 语义）。
+    ///
+    /// `none` 必须留在白名单：它是 UI 的「不带档位」哨兵（路由别名/聚合路由
+    /// 只能用它，见 session_manager::ensure_chat_model）。曾被这里改写成 `max`，
+    /// 结果 `omniroute/high-availability` 带档位被 DSH 硬拒（模型无思考档位），
+    /// 钉选静默失效、会话回落 DSH 默认模型（2026-11-16 真机）。
     pub fn normalize_reasoning_effort(&mut self) {
         const DEFAULT: &str = "max";
         if !matches!(
             self.reasoning_effort.as_str(),
-            "off" | "low" | "medium" | "high" | "max"
+            "none" | "off" | "low" | "medium" | "high" | "max"
         ) {
             self.reasoning_effort = DEFAULT.into();
         }
@@ -1283,6 +1288,17 @@ mod tests {
         assert_eq!(cfg.dsh.reasoning_effort, "max");
         let cfg = Config::from_json_text(r#"{"dsh": {"reasoningEffort": "low"}}"#).unwrap();
         assert_eq!(cfg.dsh.reasoning_effort, "low");
+    }
+
+    /// UI 的「不带档位」哨兵 must survive load：`none` 一旦被改写成 `max`，
+    /// 路由别名（high-availability 等无思考档位的模型）钉选会被 DSH 硬拒。
+    #[test]
+    fn reasoning_effort_none_is_preserved() {
+        let cfg = Config::from_json_text(r#"{"dsh": {"reasoningEffort": "none"}}"#).unwrap();
+        assert_eq!(cfg.dsh.reasoning_effort, "none");
+        // 显式空串仍按「未配置」回落默认，避免空值被当成档位发出去。
+        let cfg = Config::from_json_text(r#"{"dsh": {"reasoningEffort": ""}}"#).unwrap();
+        assert_eq!(cfg.dsh.reasoning_effort, "max");
     }
 
     /// BOM 容忍（Windows 编辑器常写 BOM）。

@@ -202,6 +202,12 @@ impl SessionManager {
     /// 不带字段（路由别名模型必须不带档位）；「不支持思考档位」降级去档重试
     /// （钉模型优先于档位——旧日志 112 条同错的慢性根因）；not-found 上抛
     /// 由 deliver_prompt 的退役重建路径处理。
+    ///
+    /// **业务错误必须当失败**：`call_unary` 只在信封层异常时 Err，DSH 把拒绝
+    /// 放在 `result.ok=false`（如「does not support reasoning effort」/「Select
+    /// an available model」）。以前这里只看 `Ok(_)`，于是钉选被拒也记成已应用：
+    /// 会话静默跑 DSH 默认模型（2026-11-16 真机：设置里是 omniroute/
+    /// high-availability，实际却跑 deepseek-account/deepseek-flash）。
     fn ensure_chat_model(&mut self, session_id: &str) -> Result<(), String> {
         let (provider, model, effort) = self.dsh_model.clone();
         if provider.is_empty() && model.is_empty() {
@@ -225,7 +231,10 @@ impl SessionManager {
             payload
         };
         let now = Self::now_ms();
-        match dsh.call_unary("session/selectModel", Some(build(with_effort)), now) {
+        match dsh
+            .call_unary("session/selectModel", Some(build(with_effort)), now)
+            .and_then(|o| o.unwrap("session/selectModel"))
+        {
             Ok(_) => {
                 drop(dsh);
                 self.model_applied.insert(session_id.to_owned(), sig);
@@ -240,7 +249,9 @@ impl SessionManager {
                         || msg.contains("Invalid API parameter"))
                 {
                     // 降级：去档位重试——思考强度交给 DSH/路由默认。
-                    let r = dsh.call_unary("session/selectModel", Some(build(false)), now);
+                    let r = dsh
+                        .call_unary("session/selectModel", Some(build(false)), now)
+                        .and_then(|o| o.unwrap("session/selectModel"));
                     drop(dsh);
                     match r {
                         Ok(_) => {
@@ -280,7 +291,13 @@ impl SessionManager {
             "content": [ { "type": "text", "text": text } ],
         });
         let mut dsh = self.dsh.lock().map_err(|e| e.to_string())?;
-        match dsh.call_unary("session/prompt", Some(payload), Self::now_ms()) {
+        // 同 ensure_chat_model：业务拒绝（agent-busy / not-found / 参数非法）
+        // 都在 result.ok=false 里，必须 unwrap 出来，否则「投递被拒」被当成
+        // 成功、下面的 not-found 退役重投分支永不触发。
+        match dsh
+            .call_unary("session/prompt", Some(payload), Self::now_ms())
+            .and_then(|o| o.unwrap("session/prompt"))
+        {
             Ok(_) => Ok(()),
             Err(e) => {
                 let code = match &e {
@@ -302,6 +319,7 @@ impl SessionManager {
                         })),
                         Self::now_ms(),
                     )
+                    .and_then(|o| o.unwrap("session/prompt"))
                     .map_err(|e| format!("重投失败：{e}"))?;
                     Ok(())
                 } else {
@@ -390,5 +408,181 @@ mod tests {
         );
         let abs = r"D:\somewhere\state\agents";
         assert_eq!(normalize_agent_dir(abs), abs);
+    }
+
+    /// 极简 DSH 假服务：按脚本逐条应答 `session/selectModel`，回显 rpcId。
+    /// 返回 (base_url, 线程句柄: 实际收到的请求)。
+    /// 监听非阻塞 + 5s 上限：请求数少于脚本时也要收敛（让断言失败而不是挂死）。
+    fn spawn_dsh_stub(results: Vec<Value>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+            hay.windows(needle.len()).position(|w| w == needle)
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let expected = results.len();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while seen.len() < expected {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(conn) => conn,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() > deadline {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                let _ = stream.set_nonblocking(false);
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let n = match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    raw.extend_from_slice(&buf[..n]);
+                    if let Some(head_end) = find(&raw, b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if raw.len() >= head_end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let head_end = find(&raw, b"\r\n\r\n").unwrap_or(0);
+                let body = String::from_utf8_lossy(&raw[head_end + 4..]).to_string();
+                let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let rpc_id = payload
+                    .get("rpcId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let reply = results
+                    .get(seen.len())
+                    .cloned()
+                    .unwrap_or_else(|| json!({"ok": false, "error": {"code": "stub/extra", "message": "unexpected extra request"}}));
+                seen.push(payload);
+                let envelope =
+                    json!({ "type": "server-response", "rpcId": rpc_id, "result": reply })
+                        .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    envelope.len(),
+                    envelope
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+            seen
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn manager_with_model(base: &str, path: &Path) -> SessionManager {
+        let client = DshClient::new(
+            base,
+            ReqwestTransport::new(2_000),
+            queqiao_dsh::client::AuthSources::token_only("", false),
+            false,
+        );
+        SessionManager::new(
+            Arc::new(Mutex::new(client)),
+            path,
+            "qq-chat-v2",
+            "QQ 聊天",
+            "agents",
+        )
+        .unwrap()
+    }
+
+    fn temp_sessions_path(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("queqiao-sm-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.json");
+        (dir, path)
+    }
+
+    /// 业务拒绝（result.ok=false）必须走失败分支：路由别名带档位被 DSH 拒后
+    /// 要去档重试，否则钉选静默失效、会话回落 DSH 默认模型（真机故障）。
+    #[test]
+    fn select_model_business_error_drops_effort_and_retries() {
+        let rejected = json!({
+            "ok": false,
+            "error": {
+                "code": "session/model-unavailable",
+                "message": "provider \"omniroute\" model \"high-availability\" does not support reasoning effort \"max\""
+            }
+        });
+        let accepted = json!({
+            "ok": true,
+            "value": {"selected": {"provider": "omniroute", "model": "high-availability"}}
+        });
+        let (base, stub) = spawn_dsh_stub(vec![rejected, accepted]);
+        let (dir, path) = temp_sessions_path("model-retry");
+        let mut manager = manager_with_model(&base, &path);
+        manager.set_dsh_model("omniroute", "high-availability", "max");
+        manager
+            .ensure_chat_model("session-x")
+            .expect("带档位被拒后应去档重试并成功");
+        let seen = stub.join().unwrap();
+        assert_eq!(seen.len(), 2, "首次被拒后必须再发一次去档请求");
+        assert_eq!(
+            seen[0]["payload"]["args"]["request"]["reasoningEffort"], "max",
+            "首次带配置档位"
+        );
+        assert!(
+            seen[1]["payload"]["args"]["request"]
+                .get("reasoningEffort")
+                .is_none(),
+            "去档重试不得再带 reasoningEffort"
+        );
+        assert_eq!(
+            manager.model_applied.get("session-x").map(String::as_str),
+            Some("omniroute/high-availability/none"),
+            "成功后按去档 sig 缓存"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `none` 哨兵不带档位字段；成功后按 sig 缓存、重复投递不再重选。
+    #[test]
+    fn select_model_none_sends_no_effort_and_caches() {
+        let accepted = json!({
+            "ok": true,
+            "value": {"selected": {"provider": "omniroute", "model": "high-availability"}}
+        });
+        let (base, stub) = spawn_dsh_stub(vec![accepted]);
+        let (dir, path) = temp_sessions_path("model-none");
+        let mut manager = manager_with_model(&base, &path);
+        manager.set_dsh_model("omniroute", "high-availability", "none");
+        manager.ensure_chat_model("session-y").unwrap();
+        manager.ensure_chat_model("session-y").unwrap();
+        let seen = stub.join().unwrap();
+        assert_eq!(seen.len(), 1, "sig 命中缓存后不得重复 selectModel");
+        assert!(
+            seen[0]["payload"]["args"]["request"]
+                .get("reasoningEffort")
+                .is_none(),
+            "none = 不带档位"
+        );
+        assert_eq!(
+            manager.model_applied.get("session-y").map(String::as_str),
+            Some("omniroute/high-availability/none")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
